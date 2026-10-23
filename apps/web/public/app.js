@@ -1413,6 +1413,15 @@ $('doImport').addEventListener('click', async () => {
       await refresh();
     } else {
       $('importResult').textContent = r.error || '没能识别这段回复';
+      // 认出来是「接入配置」→ 给一个启用入口。
+      // 启用后它就是一个真正的平台（同步、提醒、变更历史都走内置平台同一条链路），
+      // 而不是只能看一次的导入数据。
+      if (r.canEnable) {
+        $('importResult').innerHTML =
+          `${escapeHtml(r.notes?.join('；') || '识别到接入配置')}<br>` +
+          '<button class="primary" id="enablePlatform" style="margin-top:8px">启用为平台（可自动同步）</button>';
+        $('enablePlatform').addEventListener('click', enablePlatform);
+      }
     }
   } catch (e) {
     $('importResult').textContent = `导入失败：${e.message}`;
@@ -1420,6 +1429,35 @@ $('doImport').addEventListener('click', async () => {
     busy(false);
   }
 });
+
+/**
+ * 把「接入配置」启用成一个真正的平台。
+ *
+ * 启用之后的行为和超星 / iSmart 完全一致 —— 它只是把 adapter 从"写死的类"
+ * 换成了"配置驱动的类"，上层同步、合并、提醒、变更历史一行都没改。
+ */
+async function enablePlatform() {
+  const text = $('importBox').value.trim();
+  if (!text) {
+    toast('先把配置粘进来');
+    return;
+  }
+  busy(true);
+  try {
+    const r = await api('/api/adapter/enable', { method: 'POST', body: JSON.stringify({ text }) });
+    if (r.ok) {
+      $('importResult').textContent = `已启用「${r.name}」—— 现在去账号页同步一次，它就会和内置平台一样工作。`;
+      $('importBox').value = '';
+      await refresh();
+    } else {
+      $('importResult').textContent = r.error || '启用失败';
+    }
+  } catch (e) {
+    $('importResult').textContent = `启用失败：${e.message}`;
+  } finally {
+    busy(false);
+  }
+}
 
 $('settingsList').addEventListener('click', (e) => {
   const presetBtn = e.target.closest('[data-preset]');

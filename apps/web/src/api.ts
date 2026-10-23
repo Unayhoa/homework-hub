@@ -18,6 +18,7 @@ import {
   HarReplayHttpClient,
   HubError,
   canSkip,
+  validateConfig,
   hasPendingAc,
   ADAPTER_PROMPT,
   ADAPTER_PITFALLS,
@@ -471,6 +472,35 @@ export function createApiHandler(deps: ApiDeps): ApiHandler {
         return { status: 200, body: { groups } };
       }
 
+      // 把一份「接入配置」启用成真正的平台：注册适配器 + 建账号。
+      // 启用之后这个平台和超星 / iSmart 完全等价（同步、提醒、变更历史都走同一条链路）。
+      if (method === 'POST' && path === '/api/adapter/enable') {
+        const body = parseBody();
+        let cfg = body.config as Record<string, unknown> | undefined;
+        let fallbackError: string | undefined;
+        if (!cfg && body.text) {
+          const parsed = parseImport(String(body.text));
+          cfg = parsed.adapterDraft as Record<string, unknown> | undefined;
+          fallbackError = parsed.error;
+        }
+        if (!cfg) {
+          return { status: 200, body: { ok: false, error: fallbackError ?? '没有找到接入配置' } };
+        }
+        const missing = validateConfig(cfg);
+        if (missing.length > 0) {
+          return { status: 200, body: { ok: false, error: `配置还缺：${missing.join('、')}` } };
+        }
+        const c = cfg as unknown as { key: string; name: string };
+        await deps.engine.saveCustomAdapter(cfg as never);
+        await deps.engine.loadCustomAdapters();
+        const platformId = `custom-${c.key}`;
+        await deps.engine.registerOfflineAccount(platformId, 'web', {
+          label: c.name,
+          freshLogin: true,
+        });
+        return { status: 200, body: { ok: true, platformId, name: c.name } };
+      }
+
       // 把 AI 的回复粘回来。两种格式都认：
       //   数据型（作业数组）→ 直接导入手动作业，立刻能用
       //   配置型（接口+字段映射）→ 目前只能识别，还不能自动同步
@@ -478,7 +508,12 @@ export function createApiHandler(deps: ApiDeps): ApiHandler {
         const body = parseBody();
         const parsed = parseImport(String(body.text ?? ''));
         if (!parsed.homework || parsed.homework.length === 0) {
-          return { status: 200, body: { ok: false, kind: parsed.kind, notes: parsed.notes, error: parsed.error } };
+          // 配置型：不是失败，而是「需要用户确认启用」—— 前端据此显示启用按钮
+          const canEnable = parsed.kind === 'adapter' && !parsed.error;
+          return {
+            status: 200,
+            body: { ok: false, kind: parsed.kind, notes: parsed.notes, error: parsed.error, canEnable },
+          };
         }
         // 去重：同标题已存在就跳过，避免同一个平台导入两遍
         const existing = [

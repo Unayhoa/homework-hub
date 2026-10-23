@@ -122,6 +122,8 @@ export type {
 
 export { mergeTasks, materializeTask, diffTask, DEFAULT_MERGE_OPTIONS } from './engine/merge.ts';
 export { ADAPTER_PROMPT, ADAPTER_PITFALLS, buildEvidencePack } from './engine/adapter-authoring.ts';
+export { DeclarativeAdapter, validateConfig, getByPath, mapStatus } from './engine/declarative-adapter.ts';
+export type { AdapterConfig } from './engine/declarative-adapter.ts';
 export type { MergePlan, MergeOptions, TaskEvent } from './engine/merge.ts';
 
 export { planReminders, DEFAULT_REMINDER_RULES } from './engine/reminder.ts';

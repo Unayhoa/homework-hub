@@ -21,6 +21,8 @@ import { completionOrigin, effectiveStatus, hasPendingAc, isTerminalStatus } fro
 import { makeCourseId } from '../domain/ids.ts';
 import { effectiveInstant } from '../domain/deadline.ts';
 import { courseTitle, maskUsername } from '../domain/course.ts';
+import { DeclarativeAdapter, validateConfig } from './declarative-adapter.ts';
+import type { AdapterConfig } from './declarative-adapter.ts';
 import { describe, HubError, schemaDrift, toHubError } from '../domain/errors.ts';
 import { isSessionExpired, mayReauthenticate } from '../ports/vault.ts';
 import type { Credentials, Session, SessionOrigin, Vault } from '../ports/vault.ts';
@@ -1654,6 +1656,64 @@ export class SyncEngine {
       updatedAt: this.#clock.now().toISOString(),
     });
     this.#logger.info(muted ? '课程已设为不再同步' : '课程已恢复同步', { accountId, courseId });
+  }
+
+  /**
+   * 把「用户自己添加的平台」配置读出来并注册成适配器。
+   *
+   * 幂等：已经注册过的跳过。改动配置后再调一次，注册表里的实例仍是旧的 ——
+   * 所以调用方在保存配置后需要重启注册（这里用 "先删再注册" 的方式做不到，
+   * registry 没有 remove；实际做法是保存后由 API 层触发一次整体重载，见 api.ts）。
+   */
+  async loadCustomAdapters(): Promise<string[]> {
+    const c = await this.#store.getCursor('__system', 'custom-adapters');
+    if (!c?.cursor) return [];
+    let list: unknown;
+    try {
+      list = JSON.parse(c.cursor);
+    } catch {
+      return [];
+    }
+    if (!Array.isArray(list)) return [];
+    const ids: string[] = [];
+    for (const raw of list) {
+      if (validateConfig(raw).length > 0) continue;
+      const cfg = raw as AdapterConfig;
+      const id = `custom-${cfg.key}`;
+      if (this.#registry.has(id)) {
+        ids.push(id);
+        continue;
+      }
+      try {
+        this.#registry.register(new DeclarativeAdapter(cfg));
+        ids.push(id);
+      } catch {
+        // 单个配置有问题不该拖垮启动
+      }
+    }
+    return ids;
+  }
+
+  /** 保存/覆盖一份自定义平台配置（按 key 去重）。 */
+  async saveCustomAdapter(cfg: AdapterConfig): Promise<void> {
+    const c = await this.#store.getCursor('__system', 'custom-adapters');
+    let list: unknown[] = [];
+    if (c?.cursor) {
+      try {
+        const v = JSON.parse(c.cursor);
+        if (Array.isArray(v)) list = v;
+      } catch {
+        list = [];
+      }
+    }
+    const rest = list.filter((x) => (x as AdapterConfig | null)?.key !== cfg.key);
+    rest.push(cfg);
+    await this.#store.setCursor({
+      accountId: '__system',
+      kind: 'custom-adapters',
+      cursor: JSON.stringify(rest),
+      updatedAt: this.#clock.now().toISOString(),
+    });
   }
 
   /**
