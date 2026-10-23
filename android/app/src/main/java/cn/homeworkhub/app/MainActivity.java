@@ -56,7 +56,8 @@ public class MainActivity extends Activity {
      * 与 activePlatformId 的区别只有一个 —— 返回应用时**不**当成一次登录：
      * 不登记账号、不触发同步。用户只是去看一眼题目，任何副作用都是打扰。
      */
-    private boolean browsing;
+    // 说明：平台页面的"只是看看"模式已改为独立 Activity（BrowseActivity），
+    // 不再占用主 WebView 的历史栈。这里不再需要 browsing 标记。
 
     WebView webView;
     /**
@@ -139,7 +140,7 @@ public class MainActivity extends Activity {
                 // 登录流程内的跳转全部放行（SSO 会有多次重定向，中途接管会打断登录）
                 if (activePlatformId != null) return false;
                 // 已经在浏览某个平台页面了 → 页面内跳转放行，别再套一层
-                if (browsing) return false;
+
                 // 其余外部链接：用「浏览模式」打开 —— 有返回条，返回时不登记账号、不触发同步。
                 //
                 // 为什么在导航层接、而不是只靠 JS 桥：<a target="_blank"> 在 WebView 里
@@ -156,7 +157,6 @@ public class MainActivity extends Activity {
                     // 从平台登录页回到了应用界面
                     final String justLoggedIn = activePlatformId;
                     activePlatformId = null;
-                    browsing = false;
                     updateBar();
                     // 应用是单页，WebView 历史对它没有意义；但平台浏览留下的条目会让
                     // "回到应用后再侧滑"退进平台页。
@@ -438,26 +438,26 @@ public class MainActivity extends Activity {
      * @param referer 部分平台（超星）会校验来源页，从外部直接打开会回「无权限」；
      *                传空表示不设置（绝大多数平台不需要）。
      */
+    /**
+     * 打开平台页面给用户看（点作业名）。
+     *
+     * 用**独立 Activity**，不碰主 WebView 的历史栈 —— 主界面因此永远不会
+     * 出现"侧滑退回平台页"的问题（那正是前两版 goBack / clearHistory 没能解决的）。
+     *
+     * @param referer 超星等平台会校验来源，不带给会回「无权限」
+     */
     void openBrowsePage(String url, String referer) {
-        activePlatformId = null;
-        browsing = true;
-        updateBar();
-        // 超星校验来源页：不带 Referer 会回「信息提示 · 无权限！」。
-        // 放在这里统一判断，两个调用点（JS 桥 / 导航层拦截）都不用各自处理。
+        if (url == null || url.isEmpty()) return;
         if ((referer == null || referer.isEmpty()) && url.contains("chaoxing.com")) {
-            referer = "https://mooc2-ans.chaoxing.com/";
+            referer = "https://i.chaoxing.com";
         }
-        if (referer != null && !referer.isEmpty()) {
-            java.util.Map<String, String> h = new java.util.HashMap<>();
-            h.put("Referer", referer);
-            webView.loadUrl(url, h);
-        } else {
-            webView.loadUrl(url);
-        }
+        android.content.Intent i = new android.content.Intent(this, BrowseActivity.class);
+        i.putExtra(BrowseActivity.EXTRA_URL, url);
+        i.putExtra(BrowseActivity.EXTRA_REFERER, referer);
+        startActivity(i);
     }
 
     void openLoginPage(String url, String platformId) {
-        browsing = false;
         activePlatformId = platformId;
         updateBar();
         webView.loadUrl(url);
@@ -466,7 +466,7 @@ public class MainActivity extends Activity {
     private void updateBar() {
         // 整条返回条只在平台登录页期间出现 —— 其余时候它只是一个「课业中枢」标题，
         // 白占一行屏幕（用户反馈过）。
-        boolean onPlatform = activePlatformId != null || browsing;
+        boolean onPlatform = activePlatformId != null; // 只有登录流程需要返回条
         toolbar.setVisibility(onPlatform ? View.VISIBLE : View.GONE);
         btnBack.setVisibility(onPlatform ? View.VISIBLE : View.GONE);
     }
@@ -482,8 +482,7 @@ public class MainActivity extends Activity {
 
     @Override
     public void onBackPressed() {
-        if (activePlatformId != null || browsing) {
-            browsing = false;
+        if (activePlatformId != null) {
             // 必须 loadUrl + clearHistory，不能只 goBack()：
             // 浏览平台时会在历史里留下若干条（平台页面内部还会跳几次）。
             // goBack 只退一条，用户回到待办页后再侧滑，就又退进平台页面了 ——

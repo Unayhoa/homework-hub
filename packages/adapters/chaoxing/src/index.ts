@@ -448,9 +448,7 @@ export class ChaoxingAdapter implements PlatformAdapter {
           // 以前这里没有 sourceUrl，靠引擎在物化时兜底调 buildTaskUrl ——
           // 但 buildTaskUrl 拿不到 classId/cpi（它们只在课程对象上），
           // 所以那条路永远拼不出可用链接。在适配器里做，因为**只有这里拿得到全部参数**。
-          // 优先用列表页 href 里那条（带 enc/answerId，能直接打开）；
-          // 拿不到才退回"自己拼"的版本 —— 那种基本只有课程页能用。
-          sourceUrl: w.sourceUrl ?? chaoxingWorkUrl(course, w.platformTaskId),
+          sourceUrl: chaoxingWorkUrl(course, w.platformTaskId),
           raw: { source: 'task-list', title: w.title },
         }));
       } catch (e) {
@@ -764,18 +762,43 @@ export interface ParsedWorkItem {
  * 缺 workId 时退到**作业列表页**（同一路径的 list，HAR 里是真实页面），
  * 而不是拼一个没有 workId 的 dowork —— 那个会打开空白答题页。
  */
+/**
+ * 超星没有可靠的直达作业链接 —— 只能回我的课程。
+ *
+ * 为什么放弃直达（2026-10-23 连试四版，逐层排除）：
+ *   1. /mooc-ans/work/doWork       → 404（死路径）
+ *   2. /mooc-ans/mooc2/work/dowork → 404（缺 enc）
+ *   3. 从列表页 href 原样搬参数（含 answerId + enc）→ 真机回「信息提示 · 无权限！」
+ *   4. 补 Referer 模拟从列表点进来 → 仍无权限
+ *
+ * 结论： 是**服务端按会话/时间签发**的短命参数，同步时抓到的那一份，
+ * 用户过一会儿再点就已经失效。任何预先拼好再存起来的链接都会过期，
+ * 这条路在原理上走不通。
+ *
+ * 所以退到首页：让平台自己生成 enc，用户多点两下。
+ * 这比给一个必然报错的链接好 —— 后者会让人以为应用坏了。
+ */
+/**
+ * 超星没有可靠的「直达作业」链接 —— 只能回我的课程。
+ *
+ * 为什么放弃直达（2026-10-23 连试四版，逐层排除）：
+ *   1. `/mooc-ans/work/doWork`        → 404（死路径）
+ *   2. `/mooc-ans/mooc2/work/dowork`  → 404（缺 enc）
+ *   3. 从列表页 href 原样搬参数（含 answerId + enc）→ 真机回「信息提示 · 无权限！」
+ *   4. 再补 Referer 模拟"从列表点进来" → 仍无权限
+ *
+ * 结论：`enc` 是**服务端按会话/时间签发**的短命参数。同步时抓到的那一份，
+ * 用户过一会儿再点就已经失效 —— 任何"提前拼好、存进库里"的链接都会过期，
+ * 这条路在原理上走不通（不是参数没找对）。
+ *
+ * 所以退到首页：让平台自己生成 enc，用户多点两下。
+ * 这比给一个必然报错的链接好 —— 后者会让人以为应用坏了。
+ */
 function chaoxingWorkUrl(
-  course: { courseId: string; classId: string; cpi?: string },
-  workId: string | undefined,
-): string | undefined {
-  if (!course.classId) return undefined; // classId 是必须的，没有就宁可不给链接
-  const p = new URLSearchParams({ courseId: course.courseId, classId: course.classId });
-  if (course.cpi) p.set('cpi', course.cpi);
-  // 缺 workId 时**不再**退到 /mooc2/work/list —— 那个页面同样需要 enc，实测 404。
-  // 宁可不给链接（前端不显示 ↗），也不要给一个必然打不开的地址。
-  if (!workId) return undefined;
-  p.set('workId', workId);
-  return `https://mooc1.chaoxing.com/mooc-ans/mooc2/work/dowork?${p.toString()}`;
+  _course: { courseId: string; classId: string; cpi?: string },
+  _workId: string | undefined,
+): string {
+  return 'https://i.chaoxing.com';
 }
 
 export function parseTaskListHtml(html: string, now: Date): ParsedWorkItem[] {
@@ -815,32 +838,11 @@ export function parseTaskListHtml(html: string, now: Date): ParsedWorkItem[] {
       firstGroup(block, /(?:workId|workid|jobid)=(\d{3,})/i) ??
       firstGroup(block, /data-id=["'](\d{3,})["']/);
 
-    // 直达链接：把 href 里的参数**原样搬过来**（尤其 enc / answerId）。
-    //
-    // 为什么不能自己拼 URL：真实入口是 /mooc2/work/task?...&workId=&answerId=&enc=，
-    // 而 enc 是**每份作业一个、由服务端签发**的加密串。只拿 workId 拼地址必然 404
-    // （2026-10-23 真机：有箭头但点开 404，根因就是缺 enc）。
-    const href = firstGroup(block, /href=["']([^"']*(?:workId|workid)=\d+[^"']*)["']/i);
-    let sourceUrl: string | undefined;
-    if (href) {
-      const clean = href.replace(/&amp;/g, '&');
-      const q = new URLSearchParams();
-      for (const k of ['courseId', 'classId', 'cpi', 'workId', 'answerId', 'enc']) {
-        const v = queryParam(clean, k);
-        if (v) q.set(k, v);
-      }
-      // href 是**根相对**路径（实测是 /work/task?...，没有 /mooc2 前缀）。
-      // 之前我拼成 /mooc2/work/task —— 多了两段，直接 404。
-      // 正确做法是用 href 原样转绝对，不再自己猜路径。
-      if (q.get('workId')) sourceUrl = new URL(clean, 'https://mooc2-ans.chaoxing.com').toString();
-    }
-
     out.push({
       platformTaskId: id ?? undefined,
       title: cleanTitle,
       status,
       deadline,
-      ...(sourceUrl ? { sourceUrl } : {}),
     });
   }
   return out;

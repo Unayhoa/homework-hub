@@ -36,6 +36,13 @@
             </intent-filter>
         </activity>
 
+        <!-- 看平台页面用（点作业名）。独立 Activity 的理由见 BrowseActivity 类注释：
+             不复用主 WebView，是为了让主界面的返回栈里永远没有外部页面。 -->
+        <activity
+            android:name=".BrowseActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|keyboardHidden|uiMode" />
+
         <!-- 闹钟到点 → 弹通知。不导出（只由系统的闹钟回调触发） -->
         <receiver
             android:name=".ReminderReceiver"
