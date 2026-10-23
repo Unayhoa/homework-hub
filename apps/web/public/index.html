@@ -187,7 +187,12 @@
           它会回一份接入配置。
         </div>
         <button class="primary" id="startCapture" style="margin-top:10px">开始录制</button>
-        <div class="hint" id="captureHint"></div>
+
+        <div class="hint" style="margin-top:14px">AI 回复后，把它的回答整段粘回来：</div>
+        <textarea id="importBox" rows="5" placeholder="粘贴 AI 返回的 JSON（整段粘，不用挑）"
+          style="width:100%;box-sizing:border-box;margin-top:6px;font-size:12px;font-family:monospace"></textarea>
+        <button class="primary" id="doImport" style="margin-top:8px">导入</button>
+        <div class="hint" id="importResult"></div>
       </div>
     </details>
 

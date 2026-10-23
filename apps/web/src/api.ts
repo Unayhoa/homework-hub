@@ -29,6 +29,8 @@ import {
   SyncEngine,
   UnavailableSigner,
 } from '#core';
+
+import { parseImport, toManualInput } from './adapter-import.ts';
 import type {
   AdapterRegistry,
   Clock,
@@ -467,6 +469,47 @@ export function createApiHandler(deps: ApiDeps): ApiHandler {
           });
         }
         return { status: 200, body: { groups } };
+      }
+
+      // 把 AI 的回复粘回来。两种格式都认：
+      //   数据型（作业数组）→ 直接导入手动作业，立刻能用
+      //   配置型（接口+字段映射）→ 目前只能识别，还不能自动同步
+      if (method === 'POST' && path === '/api/adapter/import') {
+        const body = parseBody();
+        const parsed = parseImport(String(body.text ?? ''));
+        if (!parsed.homework || parsed.homework.length === 0) {
+          return { status: 200, body: { ok: false, kind: parsed.kind, notes: parsed.notes, error: parsed.error } };
+        }
+        // 去重：同标题已存在就跳过，避免同一个平台导入两遍
+        const existing = [
+          ...(await deps.engine.upcoming({ withinDays: 365, includeOverdue: true })),
+          ...(await deps.engine.completed({ limit: 300 })),
+        ];
+        let created = 0;
+        let done = 0;
+        let skipped = 0;
+        for (const h of parsed.homework) {
+          if (existing.some((e) => e.title.trim() === h.title.trim())) {
+            skipped += 1;
+            continue;
+          }
+          const input = toManualInput(h, parsed.courseName, parsed.platformName);
+          const task = await deps.engine.createManualTask({
+            title: input.title,
+            deadlineAt: input.deadlineAt,
+            courseName: input.courseName,
+            platformLabel: input.platformLabel,
+          });
+          created += 1;
+          if (input.done) {
+            await deps.engine.setTaskCompleted(task.id, true);
+            done += 1;
+          }
+        }
+        return {
+          status: 200,
+          body: { ok: true, kind: 'homework', created, done, skipped, notes: parsed.notes },
+        };
       }
 
       // 「自己加平台」用的提示词与注意事项。原生侧不硬编码这两样，避免两份漂移。

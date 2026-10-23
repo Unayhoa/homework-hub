@@ -1392,6 +1392,35 @@ $('startCapture').addEventListener('click', async () => {
   }
 });
 
+// 把 AI 的回复粘回来 → 导入成作业。
+// 为什么这里不"校验格式后拒绝"：真实测试里手机端 AI 给的是**作业数据**而不是接入配置，
+// 直接拒绝会让用户卡死。两种都收：数据能导入就导入，配置先认下来并说明还不能用。
+$('doImport').addEventListener('click', async () => {
+  const text = $('importBox').value.trim();
+  if (!text) {
+    toast('先粘贴 AI 的回复');
+    return;
+  }
+  busy(true);
+  try {
+    const r = await api('/api/adapter/import', { method: 'POST', body: JSON.stringify({ text }) });
+    if (r.ok) {
+      const bits = [`已导入 ${r.created} 条作业`];
+      if (r.done) bits.push(`其中 ${r.done} 条标为已完成`);
+      if (r.skipped) bits.push(`跳过 ${r.skipped} 条重复`);
+      $('importResult').textContent = bits.join('，');
+      $('importBox').value = '';
+      await refresh();
+    } else {
+      $('importResult').textContent = r.error || '没能识别这段回复';
+    }
+  } catch (e) {
+    $('importResult').textContent = `导入失败：${e.message}`;
+  } finally {
+    busy(false);
+  }
+});
+
 $('settingsList').addEventListener('click', (e) => {
   const presetBtn = e.target.closest('[data-preset]');
   if (presetBtn) applyPreset(presetBtn.dataset.preset);
