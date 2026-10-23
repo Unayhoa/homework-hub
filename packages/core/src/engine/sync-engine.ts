@@ -1694,6 +1694,22 @@ export class SyncEngine {
     return ids;
   }
 
+  /** 按 platformId 找一份自定义配置（诊断包要用原配置去让 AI 改）。 */
+  async findCustomAdapter(platformId: string): Promise<unknown | undefined> {
+    const c = await this.#store.getCursor('__system', 'custom-adapters');
+    if (!c?.cursor) return undefined;
+    try {
+      const list = JSON.parse(c.cursor);
+      if (!Array.isArray(list)) return undefined;
+      return list.find((x) => {
+        if (!x || typeof x !== 'object') return false;
+        return `custom-${(x as { key?: string }).key}` === platformId;
+      });
+    } catch {
+      return undefined;
+    }
+  }
+
   /** 保存/覆盖一份自定义平台配置（按 key 去重）。 */
   async saveCustomAdapter(cfg: AdapterConfig): Promise<void> {
     const c = await this.#store.getCursor('__system', 'custom-adapters');

@@ -273,9 +273,12 @@ export class DeclarativeAdapter implements PlatformAdapter {
       const list = getByPath(res.body, cfg.tasks.listPath ?? '$.data');
       if (!Array.isArray(list)) {
         // 关键区分：拿不到数组 ≠ 没有作业。前者是配置/改版问题，必须报错。
+        // 带上响应片段：没有它，AI（和人）都判断不出是「接口地址错了」还是「字段路径写错了」。
+        // 这是「让 AI 自己修配置」能不能成立的前提 —— 诊断包必须自带证据。
+        const peek = JSON.stringify(res.body ?? null).slice(0, 600);
         throw new HubError(
           'UPSTREAM',
-          `${this.displayName}：作业列表取不到（listPath「${cfg.tasks.listPath ?? '$.data'}」没命中数组）`,
+          `${this.displayName}：作业列表取不到（listPath「${cfg.tasks.listPath ?? '$.data'}」没命中）。接口返回：${peek}`,
           { platformId: this.id, requiresUserAction: true },
         );
       }

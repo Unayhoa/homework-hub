@@ -1495,10 +1495,46 @@ async function renderLog() {
         <div>${escapeHtml(e.platformId)} · 拉取 ${e.fetched} · 新增 ${e.created} · 更新 ${e.updated} · 删除 ${e.removed}</div>
         ${stats ? `<div class="muted">${stats}</div>` : ''}
         ${e.message ? `<div class="muted">${escapeHtml(e.message)}</div>` : ''}
+        ${
+          status === 'failed' && String(e.platformId).startsWith('custom-')
+            ? `<button class="mini" data-diagnose="${escapeHtml(e.platformId)}" style="margin-top:6px">让 AI 修配置</button>`
+            : ''
+        }
       </div>`;
     })
     .join('');
 }
+
+// 诊断闭环：失败 → 打包证据 + 当前配置 → AI 只改错处 → 粘回来重新启用。
+// 这里只做"复制到剪贴板"—— 系统剪贴板是这个环境里唯一稳定跨 App 的通道。
+$('logList').addEventListener('click', async (e) => {
+  const btn = e.target.closest('button[data-diagnose]');
+  if (!btn) return;
+  busy(true);
+  try {
+    const r = await api('/api/adapter/diagnose', {
+      method: 'POST',
+      body: JSON.stringify({ platformId: btn.dataset.diagnose }),
+    });
+    if (!r.ok) {
+      toast(r.error || '生成诊断包失败', 5000);
+      return;
+    }
+    const text = `${r.markdown}\n\n===== 以下是原始接入要求（仅作参考）=====\n\n${r.prompt}`;
+    try {
+      await navigator.clipboard.writeText(text);
+      toast('诊断包已复制。粘给 AI，让它改配置，再把结果粘回「添加平台」', 6000);
+    } catch {
+      // 剪贴板被拒（非安全上下文）时退化成"显示出来让用户手动选"
+      $('importBox').value = text;
+      toast('已填进「添加平台」的输入框，手动复制即可', 6000);
+    }
+  } catch (err) {
+    toast(`失败：${err.message}`, 5000);
+  } finally {
+    busy(false);
+  }
+});
 
 // ---------------------------------------------------------------- 主流程
 

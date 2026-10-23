@@ -22,6 +22,7 @@ import {
   normalizeAdapterConfig,
   hasPendingAc,
   ADAPTER_PROMPT,
+  drillPack,
   ADAPTER_PITFALLS,
   isTerminalStatus,
   MIN_GAP_HOURS,
@@ -503,13 +504,39 @@ export function createApiHandler(deps: ApiDeps): ApiHandler {
         }
         const c = cfg as unknown as { key: string; name: string };
         await deps.engine.saveCustomAdapter(cfg as never);
-        await deps.engine.loadCustomAdapters();
         const platformId = `custom-${c.key}`;
+        // 重新启用同一份配置（修正版）时，必须先把旧实例踢出注册表 ——
+        // 否则用户改完点同步，跑的仍是旧对象，表现为「我明明改了却没生效」。
+        deps.registry.unregister(platformId);
+        await deps.engine.loadCustomAdapters();
         await deps.engine.registerOfflineAccount(platformId, 'web', {
           label: c.name,
           freshLogin: true,
         });
         return { status: 200, body: { ok: true, platformId, name: c.name } };
+      }
+
+      // 生成「诊断包」：把失败原因 + 请求 + 响应片段 + 当前配置打包，
+      // 用户分享给 AI，让它在原配置上**改**，而不是从零重写。
+      if (method === 'POST' && path === '/api/adapter/diagnose') {
+        const body = parseBody();
+        const platformId = String(body.platformId ?? '');
+        const cfg = platformId ? await deps.engine.findCustomAdapter(platformId) : undefined;
+        if (!cfg) {
+          return { status: 200, body: { ok: false, error: '找不到这个平台的配置（可能不是自定义平台）' } };
+        }
+        // 错误取最近一次失败记录：用户不用手抄，也就不会抄错。
+        let error = String(body.error ?? '');
+        if (!error) {
+          const acc = (await deps.engine.listAccounts()).find((a) => a.platformId === platformId);
+          if (acc) {
+            const log = await deps.store.listSyncLog(acc.id, 5);
+            const last = log.find((x) => x.status === 'failed');
+            error = last?.message ?? '';
+          }
+        }
+        const md = drillPack(platformId, error, cfg);
+        return { status: 200, body: { ok: true, markdown: md, prompt: ADAPTER_PROMPT } };
       }
 
       // 把 AI 的回复粘回来。两种格式都认：

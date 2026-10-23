@@ -194,3 +194,33 @@ function truncate(s: string, max: number): string {
   if (s.length <= max) return s;
   return `${s.slice(0, max)}\n…（已截断，原长 ${s.length} 字符）`;
 }
+
+/**
+ * 诊断包：把「失败了什么」+「现在的配置」交给 AI，让它在原配置上**只改错的地方**。
+ *
+ * 为什么不让它重写：重写会把已经对的部分也改掉（真机上就有过把 courseId 写成页码）。
+ * 只改错处，风险面小得多。
+ */
+export function drillPack(platformId: string, error: string, config: unknown): string {
+  return [
+    '# 平台接入诊断',
+    '',
+    `平台标识：${platformId}`,
+    '',
+    '## 出了什么问题',
+    '',
+    error || '(没有拿到具体错误信息)',
+    '',
+    '## 当前配置（有问题的那份）',
+    '',
+    '',
+    '',
+    '## 要求',
+    '',
+    '1. **只改错的地方**，其余字段原样保留 —— 不要重写、不要精简、不要换风格。',
+    '2. 如果错误信息里的「接口返回」表明地址不对，用证据里出现过的真实地址替换。',
+    '3. 如果表明字段路径不对，按接口返回的真实结构修正 listPath 或 fields.*.path。',
+    '4. 只输出完整的修正版 JSON，不要解释。',
+    '5. 仍不确定就输出 {"need_more":["还需要什么"],"confidence":0.3}。',
+  ].join('\n');
+}
