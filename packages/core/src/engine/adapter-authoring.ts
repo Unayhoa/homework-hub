@@ -140,7 +140,7 @@ export function buildEvidencePack(input: {
     if (r.bodyPreview) {
       lines.push('- 响应片段：');
       lines.push('```json');
-      lines.push(truncate(r.bodyPreview, 2500));
+      lines.push(truncate(maskBody(r.bodyPreview), 2500));
       lines.push('```');
     }
     lines.push('');
@@ -149,6 +149,45 @@ export function buildEvidencePack(input: {
   lines.push('');
   lines.push('请按提示词里的 JSON 格式输出平台接入配置。');
   return lines.join('\n');
+}
+
+/**
+ * 把响应里的」内容「换成占位符，只留结构。
+ *
+ * 为什么必须这么做（2026-10-23 实测）：只要证据包里能看见作业标题，
+ * 手机端 AI 就会去「提取作业」，而不是「写读取规则」——连着两次都是这样，
+ * 加多少句约束都没用。看不见内容，它就只能描述怎么读。
+ *
+ * 日期/数字类字符串**保留**：AI 需要知道时间字段长什么样才能填对 format。
+ */
+function maskValues(v: unknown, depth = 0): unknown {
+  if (depth > 6) return '<deep>';
+  if (Array.isArray(v)) return v.slice(0, 1).map((x) => maskValues(x, depth + 1));
+  if (v && typeof v === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+      out[k] = maskValues(val, depth + 1);
+    }
+    return out;
+  }
+  if (typeof v === 'string') {
+    // 保留能说明格式的：日期/时间、纯数字、短枚举
+    if (/^\d{4}[-/]\d{1,2}[-/]\d{1,2}([ T]\d{1,2}:\d{2}(:\d{2})?)?/.test(v)) return v;
+    if (/^\d{1,6}$/.test(v)) return v;
+    return `<string len=${v.length}>`;
+  }
+  if (typeof v === 'number') return v;
+  if (typeof v === 'boolean') return v;
+  return v;
+}
+
+/** 给 bodyPreview 做结构脱敏；解析不了就原样（短文本没风险）。 */
+export function maskBody(body: string): string {
+  try {
+    return JSON.stringify(maskValues(JSON.parse(body)), null, 2);
+  } catch {
+    return body;
+  }
 }
 
 function truncate(s: string, max: number): string {

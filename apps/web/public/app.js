@@ -1408,7 +1408,10 @@ $('doImport').addEventListener('click', async () => {
       const bits = [`已导入 ${r.created} 条作业`];
       if (r.done) bits.push(`其中 ${r.done} 条标为已完成`);
       if (r.skipped) bits.push(`跳过 ${r.skipped} 条重复`);
-      $('importResult').textContent = bits.join('，');
+      // 必须说清这是"快照"不是"接入" —— 否则用户会以为这个平台以后能自动更新，
+      // 过几天发现作业没变还以为坏了。
+      $('importResult').textContent =
+        `${bits.join('，')}。这是一次性快照：平台以后新增或改期，这里不会跟着变。`;
       $('importBox').value = '';
       await refresh();
     } else {

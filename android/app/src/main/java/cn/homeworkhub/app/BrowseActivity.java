@@ -260,13 +260,61 @@ public class BrowseActivity extends Activity {
                 b.append("- 状态：").append(r.optInt("status", 0)).append('\n');
                 String body = r.optString("body", "");
                 if (!body.isEmpty()) {
-                    b.append("- 响应片段：\n```json\n").append(body).append("\n```\n");
+                    b.append("- 响应片段：\n```json\n").append(maskBody(body)).append("\n```\n");
                 }
                 b.append('\n');
             }
         }
         b.append("---\n\n请按提示词里的 JSON 格式输出平台接入配置。");
         return b.toString();
+    }
+
+    /**
+     * 把响应里的「内容」换成占位符，只留结构。
+     *
+     * 为什么必须这么做（真机实测两次）：只要证据包里能看见作业标题，
+     * 手机端 AI 就会去「提取作业」而不是「写读取规则」——
+     * 加多少句提示词约束都没用。看不见内容，它就只能描述怎么读。
+     *
+     * 日期类和短数字字符串**保留**：AI 要知道时间字段长什么样，才能填对格式。
+     */
+    private static Object maskValues(Object v, int depth) {
+        if (depth > 6) return "<deep>";
+        if (v instanceof JSONArray) {
+            JSONArray a = (JSONArray) v;
+            JSONArray out = new JSONArray();
+            if (a.length() > 0) out.put(maskValues(a.opt(0), depth + 1));
+            return out;
+        }
+        if (v instanceof JSONObject) {
+            JSONObject o = (JSONObject) v;
+            JSONObject out = new JSONObject();
+            java.util.Iterator<String> it = o.keys();
+            while (it.hasNext()) {
+                String k = it.next();
+                try {
+                    out.put(k, maskValues(o.opt(k), depth + 1));
+                } catch (Exception ignored) {
+                    // 单个字段出问题不该毁掉整份证据
+                }
+            }
+            return out;
+        }
+        if (v instanceof String) {
+            String s = (String) v;
+            if (s.matches("^\\d{4}[-/]\\d{1,2}[-/]\\d{1,2}.*")) return s;
+            if (s.matches("^\\d{1,6}$")) return s;
+            return "<string len=" + s.length() + ">";
+        }
+        return v;
+    }
+
+    private static String maskBody(String body) {
+        try {
+            return maskValues(new org.json.JSONTokener(body).nextValue(), 0).toString();
+        } catch (Exception e) {
+            return body;
+        }
     }
 
     /** 去掉 URL 里可能是凭据的查询参数值。 */
