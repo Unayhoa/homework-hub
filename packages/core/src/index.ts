@@ -121,6 +121,7 @@ export type {
 } from './engine/sync-engine.ts';
 
 export { mergeTasks, materializeTask, diffTask, DEFAULT_MERGE_OPTIONS } from './engine/merge.ts';
+export { ADAPTER_PROMPT, ADAPTER_PITFALLS, buildEvidencePack } from './engine/adapter-authoring.ts';
 export type { MergePlan, MergeOptions, TaskEvent } from './engine/merge.ts';
 
 export { planReminders, DEFAULT_REMINDER_RULES } from './engine/reminder.ts';

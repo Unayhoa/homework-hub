@@ -1377,6 +1377,21 @@ async function saveSettings(patch) {
   }
 }
 
+// 添加平台（实验）：把提示词交给原生，原生负责注入记录器并导出证据包。
+// 提示词由后端提供（单一真源），不在这里硬编码 —— 两份必然漂移。
+$('startCapture').addEventListener('click', async () => {
+  if (!window.Android?.openCapture) {
+    toast('这个功能目前只在 Android 应用里可用', 5000);
+    return;
+  }
+  try {
+    const r = await api('/api/adapter/prompt');
+    window.Android.openCapture(r.prompt || '');
+  } catch (e) {
+    toast(`取提示词失败：${e.message}`, 5000);
+  }
+});
+
 $('settingsList').addEventListener('click', (e) => {
   const presetBtn = e.target.closest('[data-preset]');
   if (presetBtn) applyPreset(presetBtn.dataset.preset);

@@ -173,6 +173,24 @@
   <section id="tab-settings" class="tab-panel">
     <div id="settingsList"></div>
 
+    <!-- 添加平台（实验）：录一段操作 → 导出证据包 → 交给 AI 生成接入配置。
+         刻意放在设置页最下面：它是"想加新平台时"才用的一次性动作，不是日常路径。 -->
+    <details class="set-item" id="addPlatformBox">
+      <summary>
+        <span class="set-name">添加平台</span>
+        <span class="set-now">实验性</span>
+      </summary>
+      <div class="set-body">
+        <div class="hint">
+          在应用内打开平台并登录，正常点进「作业列表」，然后导出。
+          导出时会**复制一段提示词**到剪贴板，并把证据包分享给任意 AI —— 把提示词粘给它，
+          它会回一份接入配置。
+        </div>
+        <button class="primary" id="startCapture" style="margin-top:10px">开始录制</button>
+        <div class="hint" id="captureHint"></div>
+      </div>
+    </details>
+
     <!-- 关于与说明：**按「困惑」组织，不按「功能」罗列**。
          功能清单用户自己扫一眼界面就看到了；这里只回答"看界面看不出来的事" ——
          每一条都是用户真会问「为什么是这样」的地方。

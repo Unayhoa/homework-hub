@@ -19,6 +19,8 @@ import {
   HubError,
   canSkip,
   hasPendingAc,
+  ADAPTER_PROMPT,
+  ADAPTER_PITFALLS,
   isTerminalStatus,
   MIN_GAP_HOURS,
   normalizeNotifyPrefs,
@@ -465,6 +467,11 @@ export function createApiHandler(deps: ApiDeps): ApiHandler {
           });
         }
         return { status: 200, body: { groups } };
+      }
+
+      // 「自己加平台」用的提示词与注意事项。原生侧不硬编码这两样，避免两份漂移。
+      if (method === 'GET' && path === '/api/adapter/prompt') {
+        return { status: 200, body: { prompt: ADAPTER_PROMPT, pitfalls: ADAPTER_PITFALLS } };
       }
 
       if (method === 'GET' && path === '/api/platforms') {

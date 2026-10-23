@@ -95,6 +95,12 @@ public class HttpBridge {
         activity.runOnUiThread(() -> activity.openBrowsePage(url, referer));
     }
 
+    /** 打开「录制新平台」界面：注入记录器 → 用户操作 → 导出证据包给 AI。 */
+    @android.webkit.JavascriptInterface
+    public void openCapture(final String prompt) {
+        activity.runOnUiThread(() -> activity.openCapturePage(prompt));
+    }
+
     @android.webkit.JavascriptInterface
     public void openLogin(final String url, final String platformId) {
         Log.i(TAG, "打开平台登录页 " + platformId + " -> " + url);

@@ -457,6 +457,14 @@ public class MainActivity extends Activity {
         startActivity(i);
     }
 
+    /** 打开「录制新平台」窗口（设置页 → 添加平台）。 */
+    void openCapturePage(String prompt) {
+        android.content.Intent i = new android.content.Intent(this, BrowseActivity.class);
+        i.putExtra(BrowseActivity.EXTRA_RECORD, true);
+        i.putExtra(BrowseActivity.EXTRA_PROMPT, prompt);
+        startActivity(i);
+    }
+
     void openLoginPage(String url, String platformId) {
         activePlatformId = platformId;
         updateBar();
