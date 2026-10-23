@@ -245,16 +245,30 @@ public class BrowseActivity extends Activity {
 
         b.append("## 页面可见文本（用户看到作业列表时的屏幕内容）\n\n```text\n");
         String pageText = o.optString("pageText", "");
-        b.append(pageText.length() > 4000 ? pageText.substring(0, 4000) : pageText);
+        b.append(trimPageNoise(pageText));
         b.append("\n```\n\n");
 
         b.append("## 期间发出的 JSON 请求\n\n");
         JSONArray reqs = o.optJSONArray("requests");
-        if (reqs == null || reqs.length() == 0) {
-            b.append("（没记录到任何 JSON 请求。可能是页面在我注入记录器之前就加载完了 —— 请刷新一次再操作。）\n");
+        // 先筛掉埋点、再按「像不像作业接口」排序 —— 真机上这份列表里 80% 是
+        // appcomm-user 那类用户行为上报（URL 里还带一长串 uid），既没用又占满上下文。
+        java.util.List<JSONObject> kept = new java.util.ArrayList<>();
+        if (reqs != null) {
+            for (int i = 0; i < reqs.length(); i++) {
+                JSONObject r = reqs.optJSONObject(i);
+                if (r == null) continue;
+                String u = r.optString("url", "");
+                if (isNoise(u)) continue;
+                kept.add(r);
+            }
+        }
+        kept.sort((x, y) -> Integer.compare(score(y.optString("url", "")), score(x.optString("url", ""))));
+
+        if (kept.isEmpty()) {
+            b.append("（没记录到任何可用的 JSON 请求。可能是页面在我注入记录器之前就加载完了 —— 请刷新一次再操作。）\n");
         } else {
-            for (int i = 0; i < Math.min(reqs.length(), 40); i++) {
-                JSONObject r = reqs.getJSONObject(i);
+            for (int i = 0; i < Math.min(kept.size(), 25); i++) {
+                JSONObject r = kept.get(i);
                 b.append("### ").append(r.optString("method", "GET")).append(' ')
                         .append(scrub(r.optString("url", ""))).append('\n');
                 b.append("- 状态：").append(r.optInt("status", 0)).append('\n');
@@ -317,27 +331,76 @@ public class BrowseActivity extends Activity {
         }
     }
 
+    /** 埋点 / 用户行为上报：对定位作业接口毫无用处，只会挤占 AI 的上下文。 */
+    private static boolean isNoise(String url) {
+        String u = url.toLowerCase();
+        return u.contains("appcomm") || u.contains("/c/has?") || u.contains("has?uid=")
+                || u.contains("/track") || u.contains("/log") || u.contains("beacon")
+                || u.contains("statistic") || u.contains("report");
+    }
+
+    /** 「像作业列表」的地址加分：用于把关键请求排到前面（猜不准也只会影响顺序，不影响对错）。 */
+    private static int score(String url) {
+        String u = url.toLowerCase();
+        int s = 0;
+        for (String k : new String[] { "exam", "homework", "work", "task", "assignment", "quiz" }) {
+            if (u.contains(k)) s += 10;
+        }
+        if (u.contains("list")) s += 5;
+        if (u.contains("page")) s += 2;
+        return s;
+    }
+
+    /**
+     * 页面可见文本去噪：真机上 innerText 里会混进大量纯粹的数字（分页器、评分控件），
+     * 几十行 "0 1 2 3 4…" 对定位字段毫无帮助，却把真正的作业标题冲淡了。
+     */
+    private static String trimPageNoise(String text) {
+        if (text == null) return "";
+        StringBuilder out = new StringBuilder();
+        int kept = 0;
+        for (String line : text.split("\n")) {
+            String t = line.trim();
+            if (t.isEmpty()) continue;
+            // 纯数字、单字符、长度 < 2 的碎片直接丢
+            if (t.matches("^\\d{1,3}$") || t.length() < 2) continue;
+            out.append(t).append('\n');
+            kept += 1;
+            if (kept >= 60) break; // 只留前 60 行有效文本
+        }
+        String s = out.toString();
+        return s.length() > 3000 ? s.substring(0, 3000) : s;
+    }
+
     /** 去掉 URL 里可能是凭据的查询参数值。 */
     private static String scrub(String url) {
         if (url == null) return "";
         return url.replaceAll(
-                "(?i)([?&](token|auth|access_token|sign|signature|ticket|key|session|enc)=)[^&]*",
+                "(?i)([?&](token|auth|access_token|sign|signature|ticket|key|session|enc|uid|uuid|secretstr|uuidstr)=)[^&]*",
                 "$1***");
     }
 
-    private void share(String text) {
-        // 提示词放剪贴板，文件内容走系统分享。
-        // 不尝试"自动粘贴到另一个 App" —— Android/iOS 都不允许，硬做只能靠无障碍服务，
-        // 那既脆弱又有隐私风险。
-        if (!prompt.isEmpty()) {
-            ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
-            if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("接入提示词", prompt));
-        }
+    private void share(String evidence) {
+        // **提示词必须和证据拼在一起**。
+        // 之前的做法是把提示词放剪贴板、证据走分享 —— 真机上用户只用了分享那一个，
+        // 结果 AI 收到的是纯证据包（一个字的提示词都没有），自然乱答。
+        // 两个通道 = 两个必选项，没人会记得两个都做。
+        String combined = prompt.isEmpty()
+                ? evidence
+                : "【请严格按下面的要求处理材料，只输出 JSON，不要解释】\n\n"
+                        + prompt
+                        + "\n\n===== 以下是证据材料 =====\n\n"
+                        + evidence;
+
+        // 剪贴板仍然放一份：万一某个 AI 只让粘贴、不吃分享。
+        ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+        if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("接入提示词", combined));
+
         Intent send = new Intent(Intent.ACTION_SEND);
         send.setType("text/plain");
-        send.putExtra(Intent.EXTRA_SUBJECT, "平台接入证据包");
-        send.putExtra(Intent.EXTRA_TEXT, text);
-        startActivity(Intent.createChooser(send, "发给 AI（提示词已复制到剪贴板）"));
+        send.putExtra(Intent.EXTRA_SUBJECT, "平台接入（提示词 + 证据）");
+        send.putExtra(Intent.EXTRA_TEXT, combined);
+        startActivity(Intent.createChooser(send, "发给 AI（提示词已一并附上）"));
     }
 
     private void toast(String s) {
