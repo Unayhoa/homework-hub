@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 用平台自带的 Material 主题，避免为一个 WebView 外壳引入 AppCompat 依赖 -->
+<resources>
+    <style name="AppTheme" parent="@android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">#FFFFFF</item>
+    </style>
+</resources>

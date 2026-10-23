@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  为什么要自定义 network-security-config：
+
+  1. 高校平台至今仍有相当一部分走 http 或自签证书（尤其教务/校内系统），
+     默认配置会直接拒绝这些请求。
+  2. 但要显式声明，而不是图省事写 android:usesCleartextTraffic="true" ——
+     后者会把所有域的明文流量都放开，包括我们自己的接口。
+
+  这里的策略：默认禁止明文，只对已知的教学平台域放开。
+  新增平台时在这里加域名。
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </base-config>
+
+    <domain-config cleartextTrafficPermitted="true">
+        <!-- 超星 -->
+        <domain includeSubdomains="true">chaoxing.com</domain>
+        <!-- 雨课堂 -->
+        <domain includeSubdomains="true">yuketang.cn</domain>
+        <!-- iSmart：登录页 http://me.ismartlearning.cn 是明文（真机 ERR_CLEARTEXT_NOT_PERMITTED） -->
+        <domain includeSubdomains="true">ismartlearning.cn</domain>
+        <!-- 兼容旧配置遗留：unipus.cn 实际不存在 iSmart，但保留以防平台间跳转 -->
+        <domain includeSubdomains="true">unipus.cn</domain>
+        <!-- 本地开发（mock 平台） -->
+        <domain includeSubdomains="true">127.0.0.1</domain>
+        <domain includeSubdomains="true">localhost</domain>
+    </domain-config>
+</network-security-config>

@@ -1,0 +1,64 @@
+{
+  "_comment": [
+    "Android WebView 构建配置：把核心引擎编译成浏览器能直接加载的 ESM。",
+    "与根 tsconfig 的区别：",
+    "  1. lib 换成 DOM（WebView 是浏览器环境，没有 Node 全局）",
+    "  2. types 清空（不引入 @types/node，避免误用 Node API 却不报错）",
+    "  3. #core 指向 index.browser.ts（不含 4 个 Node 专有实现）",
+    "  4. #registry-browser 是浏览器专用别名（不含 mock）—— 刻意不复用 #adapters：",
+    "     同一个别名在 package.json 的 imports 与 tsconfig 的 paths 里指向不同文件时，",
+    "     tsc 会用其中一方解析、用另一方计算输出路径，产出指向不存在文件的 import。",
+    "     这个坑已经踩过一次（生成了 packages/adapters/index.js，而实际编译的是 registry.js）。",
+    "  4. exclude 掉 Node 专有模块 —— 它们顶层 import node:* ，一旦进模块图，",
+    "     浏览器端会在加载阶段直接失败，而不是调用时才报错",
+    "  5. rewriteRelativeImportExtensions：源码里写的是 import './x.ts'，",
+    "     输出自动改成 './x.js'（这是 TS 5.7+ 专门为此提供的开关）",
+    "  # 开头的子路径导入（#core / #adapters …）tsc 不会重写，",
+    "     由 scripts/build-android.mjs 在编译后统一改写为相对路径。"
+  ],
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "rootDir": ".",
+    "outDir": "android/app/src/main/assets/www/hh",
+    "noEmit": false,
+    "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": true,
+    "strict": true,
+    "exactOptionalPropertyTypes": false,
+    "noUncheckedIndexedAccess": true,
+    "verbatimModuleSyntax": true,
+    "erasableSyntaxOnly": true,
+    "skipLibCheck": true,
+    "noUnusedLocals": false,
+    "types": [],
+    "baseUrl": ".",
+    "paths": {
+      "#core": ["./packages/core/src/index.browser.ts"],
+      "#core/*": ["./packages/core/src/*"],
+      "#registry-browser": ["./packages/adapters/registry.ts"],
+      "#web-kit": ["./packages/web-kit/src/index.ts"],
+      "#api": ["./apps/web/src/api.ts"]
+    }
+  },
+  "include": [
+    "packages/core/src/**/*.ts",
+    "packages/adapters/**/src/**/*.ts",
+    "packages/adapters/*.ts",
+    "packages/web-kit/src/**/*.ts",
+    "apps/web/src/api.ts",
+    "apps/android/www/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "packages/core/src/index.ts",
+    "packages/core/src/infra/json-store.ts",
+    "packages/core/src/infra/encrypted-vault.ts",
+    "packages/core/src/infra/subprocess-signer.ts",
+    "packages/core/src/infra/fetch-http.ts",
+    "packages/adapters/index.ts",
+    "packages/adapters/mock/**"
+  ]
+}

@@ -1,0 +1,704 @@
+:root {
+  --bg: #f5f6f8;
+  --surface: #fff;
+  --border: #e6e7eb;
+  --text: #1d1f24;
+  --text-2: #5c6068;
+  --text-3: #9a9ea6;
+  --accent: #4c6ef5;
+  --accent-soft: #eef1fe;
+  --danger: #d64545;
+  --danger-soft: #fdecec;
+  --warn: #b7791f;
+  --warn-soft: #fdf5e6;
+  --ok: #1f8a5a;
+  --ok-soft: #e9f7ef;
+  --radius: 14px;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB",
+          "Microsoft YaHei", sans-serif;
+}
+
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 15px;
+  line-height: 1.6;
+  padding-bottom: 40px;
+}
+
+/* ---------- 顶栏 ---------- */
+.topbar {
+  position: sticky; top: 0; z-index: 10;
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 16px calc(12px);
+  padding-top: max(12px, env(safe-area-inset-top));
+  background: rgba(255,255,255,.92);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--border);
+}
+.brand { display: flex; align-items: center; gap: 10px; }
+.logo {
+  width: 38px; height: 38px; border-radius: 11px;
+  background: linear-gradient(135deg, #4c6ef5, #7048e8);
+  color: #fff; font-weight: 700; font-size: 18px;
+  display: flex; align-items: center; justify-content: center;
+}
+.title { font-weight: 700; font-size: 16px; line-height: 1.2; }
+.subtitle { font-size: 11.5px; color: var(--text-3); }
+.sync-btn {
+  width: 42px; height: 42px; border-radius: 50%;
+  border: 1px solid var(--border); background: var(--surface);
+  color: var(--accent); cursor: pointer; padding: 0;
+  /* 图标是 SVG，不再依赖字体度量；flex 居中后圆心即按钮中心 */
+  display: flex; align-items: center; justify-content: center;
+}
+.sync-icon { display: block; }
+.sync-btn:active { transform: scale(.94); }
+/* 旋转绕元素自身盒中心（默认 transform-origin: 50% 50%），
+   而 SVG 的圆弧中心就是盒中心 —— 所以转起来圆心不动 */
+.sync-btn.busy .sync-icon { animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ---------- 标签 ---------- */
+.tabs {
+  position: sticky; top: 62px; z-index: 9;
+  display: flex; gap: 4px; padding: 8px 12px;
+  background: rgba(245,246,248,.94); backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--border);
+}
+.tabs button {
+  flex: 1; border: none; background: transparent; color: var(--text-2);
+  font-size: 14px; padding: 8px 4px; border-radius: 9px; cursor: pointer;
+  font-family: inherit;
+}
+.tabs button.active { background: var(--surface); color: var(--accent); font-weight: 650; }
+.badge {
+  display: inline-block; min-width: 18px; padding: 0 5px; border-radius: 999px;
+  background: var(--danger); color: #fff; font-size: 11px; line-height: 18px;
+}
+.badge:empty { display: none; }
+/* 已完成不是需要你行动的事，角标用灰色弱化，把红色留给待办 */
+#badgeDone { background: var(--text-3); }
+
+main { padding: 14px 14px 0; max-width: 640px; margin: 0 auto; overflow-x: hidden; }
+.tab-panel { display: none; }
+.tab-panel.active { display: block; }
+
+/* ---------- 卡片 ---------- */
+.card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 14px 16px; margin: 12px 0;
+}
+.card h3 { margin: 2px 0 10px; font-size: 15px; }
+.empty { text-align: center; padding: 48px 0; color: var(--text-2); font-size: 16px; }
+.muted { color: var(--text-3); font-size: 13px; }
+.hint { color: var(--text-3); font-size: 12px; margin-top: 8px; }
+
+/* ---------- 待办条目 ---------- */
+.group-title {
+  font-size: 12.5px; font-weight: 650; color: var(--text-3);
+  margin: 18px 4px 8px; letter-spacing: .02em;
+}
+.group-title.overdue { color: var(--danger); }
+.task {
+  display: flex; align-items: flex-start; gap: 10px;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 12px 14px; margin: 8px 0;
+}
+.task.overdue { border-left: 3px solid var(--danger); }
+.task.today { border-left: 3px solid var(--warn); }
+/* 「题全交了、只差 AC」：左侧换绿条 + 整体降透明度。
+   0.72 不是随手取的 —— 再低会被读成"禁用/已删除"，而它其实可点、可继续做。
+   放在 overdue/today 之后：绿条要盖住红/橙条，因为"已经交了"比"快截止了"更能说明状态。 */
+.task.pending-ac { border-left: 3px solid var(--ok); opacity: 0.72; }
+.task.done { opacity: 0.68; }
+.task.done .task-title { text-decoration: line-through; text-decoration-color: var(--text-3); text-decoration-thickness: 1px; }
+/* 左列：课程名。宽度固定（每行 4 个字），所有卡片上下对齐 ——
+   但**允许换行**：名字右侧本来就有大片空白，截成「计算机....」纯属浪费。
+   横向尺寸完全不变，只是把名字纵向铺开（最多 3 行，超长兜底截断，
+   免得一条占掉半屏）。**点一下 = 只看这门课**，完整课程名由筛选条显示。 */
+.course-tag {
+  flex: none; width: 58px;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-all;
+  line-height: 1.35;
+  font-size: 11px; font-weight: 600; color: var(--accent);
+  background: var(--accent-soft); padding: 2px 7px; border-radius: 6px;
+  align-self: flex-start; cursor: pointer;
+}
+
+/* 按课程筛选条：点课程标签后出现，零常驻占位 ——
+   没筛选时容器是空的，不占任何视觉空间（待办页是作战面板，
+   常驻控件越少，核心信息越突出）。 */
+.filter-bar {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  margin: 10px 14px 2px; padding: 7px 10px;
+  background: var(--accent-soft); border-radius: 9px;
+  font-size: 12.5px; color: var(--text-2);
+}
+/* min-width:0 是 flex 子项能被压缩的前提，否则长课程名会把这一行撑出视口 */
+.filter-text { min-width: 0; overflow-wrap: anywhere; }
+.filter-text b { color: var(--accent); font-weight: 600; }
+.filter-clear {
+  flex: none; border: 1px solid var(--border); background: var(--surface);
+  color: var(--accent); border-radius: 7px; padding: 2px 9px;
+  font-size: 12px; font-family: inherit; cursor: pointer;
+}
+.filter-clear:active { transform: scale(.96); }
+/* 信息行里的平台徽标 */
+.plat {
+  font-size: 10px; color: var(--text-2, #555);
+  border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; margin-right: 2px;
+}
+.del-btn {
+  border: none; background: none; color: var(--text-3); font-size: 11px;
+  padding: 1px 6px; border-radius: 6px; cursor: pointer;
+}
+.del-btn:active { background: var(--border); }
+.del-btn.x { flex: none; font-size: 14px; line-height: 1; padding: 4px 8px; }
+.del-btn.armed { background: var(--danger); color: #fff; font-weight: 600; }
+/* 「标记完成」：与删除并排，但语义相反，所以用主色而不是灰，
+   并且按下时不做任何危险色提示 —— 它只是本机记录，随时可撤销。 */
+.done-btn {
+  flex: none; border: 1px solid var(--border); background: var(--surface);
+  color: var(--accent); font-size: 13px; line-height: 1; padding: 5px 9px;
+  border-radius: 8px; cursor: pointer;
+}
+.done-btn:active { transform: scale(.94); }
+.done-btn.undo { font-size: 11.5px; color: var(--text-2); }
+/* 手动标记的徽标：本地数据绝不伪装成平台数据 */
+.manual-tag {
+  flex: none; font-size: 10.5px; padding: 2px 7px; border-radius: 999px;
+  background: var(--accent-soft); color: var(--accent); margin-top: 2px;
+}
+/* 「不用交」与「手动已完成」必须一眼分得开：前者不是我做了，是这条与我无关。
+   所以用中性灰而不是强调色 —— 它不该抢"我交了作业"那些条目的注意力。 */
+.manual-tag.skip { background: var(--border); color: var(--text-2); }
+/* 被「平台优先」压住的手动标记：说清楚"你标过，平台说没完成" */
+.manual-hint { color: var(--warn); margin-left: 6px; }
+.kind {
+  flex: none; font-size: 11px; padding: 2px 7px; border-radius: 6px;
+  background: var(--accent-soft); color: var(--accent); font-weight: 600;
+  margin-top: 2px;
+}
+.task-body { flex: 1; min-width: 0; }
+.task-title { font-weight: 600; font-size: 14.5px; word-break: break-word; }
+.task-meta { font-size: 12.5px; color: var(--text-3); margin-top: 3px; }
+.countdown { font-size: 12.5px; margin-top: 4px; font-weight: 600; }
+.countdown.overdue { color: var(--danger); }
+.countdown.today { color: var(--warn); }
+.countdown.normal { color: var(--text-2); font-weight: 500; }
+.task.rev { position: relative; }
+.rev-dot {
+  position: absolute; top: 10px; right: 12px;
+  font-size: 10.5px; color: var(--accent); background: var(--accent-soft);
+  padding: 1px 6px; border-radius: 999px;
+}
+
+/* ---------- 表单 ---------- */
+label { display: block; font-size: 13px; color: var(--text-2); margin: 10px 0 4px; }
+input, select {
+  width: 100%; padding: 10px 12px; font-size: 15px; font-family: inherit;
+  border: 1px solid var(--border); border-radius: 10px; background: #fbfbfc;
+  color: var(--text);
+}
+input:focus, select:focus { outline: none; border-color: var(--accent); background: #fff; }
+button.primary {
+  width: 100%; margin-top: 14px; padding: 12px; font-size: 15px; font-weight: 650;
+  border: none; border-radius: 11px; background: var(--accent); color: #fff;
+  cursor: pointer; font-family: inherit;
+}
+button.primary:active { opacity: .85; }
+button.mini {
+  padding: 5px 10px; font-size: 12px; border-radius: 8px;
+  border: 1px solid var(--border); background: var(--surface); color: var(--text-2);
+  cursor: pointer; font-family: inherit;
+}
+
+details { border-top: 1px solid var(--border); padding: 10px 0; }
+details summary { cursor: pointer; font-size: 14px; font-weight: 600; }
+
+/* ---------- 账号条目 ---------- */
+.account {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 12px 14px; margin: 8px 0;
+}
+/* 左列必须能收缩：flex 子项默认 min-width:auto，内容里有长串（URL、cookie 名、
+   一串没有空格的诊断文本）时会拒绝变窄，把整张卡撑出屏幕宽度。
+   这是真机踩过的：会话失效信息里带了换票 URL，卡片右侧直接被切掉。 */
+.account > div:first-child { flex: 1; min-width: 0; }
+.account > button { flex: none; }
+.account .name {
+  font-weight: 600; font-size: 14.5px;
+  overflow-wrap: anywhere;
+}
+.account .meta {
+  font-size: 12px; color: var(--text-3);
+  /* anywhere 而不是 break-word：break-word 对「一长串无空格」的 URL 仍然不换行 */
+  overflow-wrap: anywhere;
+}
+.cred-badge {
+  font-size: 10.5px; font-weight: 500; color: var(--accent, #4c6ef5);
+  border: 1px solid var(--accent, #4c6ef5); border-radius: 999px;
+  padding: 1px 7px; margin-left: 6px; vertical-align: 1px;
+}
+/* 可点的「一键重登」：同一枚胶囊，但要有「按得下去」的样子 ——
+   它会跳走（打开平台登录页），所以必须看起来像按钮，不能像状态标签。 */
+.cred-badge.as-btn {
+  background: var(--accent-soft, #eef2ff); cursor: pointer; font-family: inherit;
+}
+.cred-badge.as-btn:active { background: var(--accent, #4c6ef5); color: #fff; }
+.checkrow { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--text-2, #444); margin: 4px 0 10px; }
+.checkrow input { width: auto; }
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; }
+.dot.ok { background: var(--ok); }
+.dot.warn { background: var(--warn); }
+.dot.bad { background: var(--danger); }
+
+/* ---------- 变更 / 日志 ---------- */
+.change-item, .log-item {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 12px; padding: 11px 14px; margin: 8px 0;
+  overflow-wrap: anywhere;
+}
+.change-field { font-size: 13px; color: var(--text-2); }
+.change-field b { color: var(--accent); font-weight: 600; }
+.log-item .head { display: flex; justify-content: space-between; font-size: 12.5px; color: var(--text-3); }
+.pill { font-size: 11px; padding: 1px 7px; border-radius: 999px; font-weight: 600; }
+.pill.ok { background: var(--ok-soft); color: var(--ok); }
+.pill.failed { background: var(--danger-soft); color: var(--danger); }
+.pill.partial, .pill.auth-required { background: var(--warn-soft); color: var(--warn); }
+.pill.skipped { background: #eeeef0; color: var(--text-2); }
+
+/* 后台保活卡片（在「账号」页）：它代表「App 没打开时也在发请求」，
+   必须看得见、也必须能一键关掉。 */
+.ka-card { margin: 8px 0; overflow-wrap: anywhere; }
+.ka-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+.ka-switch { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--text-2); }
+.ka-switch input { width: auto; margin: 0; }
+.ka-stat { font-size: 12.5px; color: var(--text-2); margin-top: 8px; }
+.ka-row { display: flex; gap: 10px; flex-wrap: wrap; font-size: 12.5px; color: var(--text-3); padding: 3px 0; }
+/* min-width:0 是 flex 子项能被压缩的前提；否则长串（域名、URL、报错原文）
+   会把整行撑出视口，表现为"能横向拖出一列空白"（真机反馈过）。 */
+.ka-row > * { min-width: 0; overflow-wrap: anywhere; }
+.ka-ok { color: var(--ok); }
+.ka-bad { color: var(--danger); }
+/* 「没测成」既不是好也不是坏 —— 用中性色，避免被读成"会话又掉了" */
+.ka-warn { color: var(--text-2); }
+.ka-btn {
+  border: 1px solid var(--border); background: var(--surface); color: var(--accent);
+  border-radius: 8px; padding: 3px 10px; font-size: 12px; font-family: inherit; cursor: pointer;
+}
+.ka-btn:active { transform: scale(.96); }
+.ka-action { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 8px; font-size: 12.5px; }
+/* 系统放行说明：平时一句话带过，真出现连续「未测成」时才升级成警示块 */
+.ka-tip { font-size: 12px; color: var(--text-3); margin-top: 8px; line-height: 1.6; }
+.ka-tip.warn {
+  color: var(--text-2); background: var(--warn-soft);
+  border-radius: 10px; padding: 9px 12px;
+}
+
+.reminders h3 { font-size: 13px; color: var(--text-3); margin: 22px 4px 8px; }
+.reminder {
+  background: var(--warn-soft); border-radius: 12px; padding: 10px 14px; margin: 6px 0;
+  font-size: 13.5px;
+}
+
+/* ---------- 其他 ---------- */
+.token-gate { position: fixed; inset: 0; z-index: 100; background: var(--bg); padding: 60px 20px; }
+.token-gate.hidden { display: none; }
+.hidden { display: none !important; }
+.toast {
+  position: fixed; left: 50%; bottom: 34px; transform: translateX(-50%);
+  background: #23262c; color: #fff; padding: 10px 18px; border-radius: 10px;
+  font-size: 13.5px; z-index: 200; max-width: 88vw; text-align: center;
+}
+.busy {
+  position: fixed; inset: 0; background: rgba(255,255,255,.6); z-index: 150;
+  display: flex; align-items: center; justify-content: center;
+}
+.spinner {
+  width: 34px; height: 34px; border-radius: 50%;
+  border: 3px solid var(--border); border-top-color: var(--accent);
+  animation: spin .8s linear infinite;
+}
+.foot { text-align: center; color: var(--text-3); font-size: 11.5px; padding: 26px 0 10px; }
+
+/* 数据体检行：只在「库里的条数多于界面上看得见的」时出现。
+   目的是在「数据在库里但看不到」时立刻给出证据，而不是让人怀疑自己。 */
+.diag-line {
+  margin: 16px 14px 0;
+  padding: 9px 11px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--warn-soft);
+  color: var(--text-2);
+  font-size: 11.5px;
+  line-height: 1.7;
+  word-break: break-all;
+}
+
+/* 课程页：勾选参与同步的课程 */
+.course-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 0; border-bottom: 1px solid var(--border);
+  font-size: 12.5px;
+}
+.course-row:last-child { border-bottom: none; }
+/* 勾选区域单独包一层 label：右边那两个小按钮不能包在 label 里，
+   否则点"改名"会顺带把课程勾掉。 */
+.course-row-pick { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; cursor: pointer; }
+.course-row-pick input { flex: none; width: 16px; height: 16px; }
+.course-row-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.course-row-count { flex: none; color: var(--text-3); font-size: 11px; }
+.renamed-tag {
+  margin-left: 6px; font-style: normal; font-size: 10px; padding: 1px 6px;
+  border-radius: 999px; background: var(--accent-soft); color: var(--accent);
+}
+.course-mini {
+  flex: none; border: none; background: none; color: var(--text-3);
+  font-size: 14px; padding: 2px 4px; cursor: pointer; line-height: 1;
+}
+.course-mini:active { color: var(--accent); }
+
+/* 作业信息变更提示条（待办页最上面）。
+   漏看一次改期的代价是错过作业，所以它必须显眼、不容易被划过去。 */
+.change-notice {
+  margin: 12px 14px 0;
+  border: 1px solid var(--warn);
+  border-radius: 12px;
+  background: var(--warn-soft);
+  overflow: hidden;
+}
+.change-notice-head {
+  padding: 11px 12px;
+  font-size: 12.5px;
+  color: var(--warn);
+  cursor: pointer;
+  user-select: none;
+}
+.change-notice-head:active { background: rgba(183, 121, 31, 0.08); }
+#changeNoticeBody { padding: 0 12px 10px; }
+.change-item {
+  padding: 9px 0;
+  border-top: 1px dashed rgba(183, 121, 31, 0.3);
+  font-size: 12.5px;
+}
+.change-field { color: var(--text-2); margin-top: 3px; }
+/* 变更时间：小一号、右对齐 —— 它是判断"哪条是新的"的依据，但不该抢字段名的位置 */
+.ch-time {
+  float: right; margin-left: 8px;
+  font-size: 11px; color: var(--text-3); font-variant-numeric: tabular-nums;
+}
+/* 「新增」不是字段改动，用中性色区分开，避免和「改期」混成一片 */
+.ch-new { color: var(--text); }
+.ch-gone {
+  margin-left: 6px; font-size: 10.5px; padding: 1px 7px; border-radius: 999px;
+  background: #eeeef0; color: var(--text-2);
+}
+.ch-removed-card { opacity: .72; }
+
+/* 同步状态条（底部常驻，不拦截操作）
+   同步要跑十几二十秒，用全屏遮罩会把界面锁死；这里只占底部一条，
+   用户可以一边同步一边翻列表。 */
+.sync-bar {
+  position: fixed;
+  left: 12px; right: 12px; bottom: 16px;
+  z-index: 60;
+  padding: 11px 14px;
+  border-radius: 12px;
+  background: rgba(29, 31, 36, 0.93);
+  color: #fff;
+  font-size: 12.5px;
+  line-height: 1.5;
+  box-shadow: 0 8px 26px rgba(0, 0, 0, 0.22);
+  /* 关键：不拦截点击 —— 同步期间界面照常可用 */
+  pointer-events: none;
+  animation: syncBarIn 0.18s ease-out;
+}
+.sync-bar.is-done { background: rgba(31, 138, 90, 0.95); }
+.sync-bar.is-error { background: rgba(214, 69, 69, 0.95); }
+.sync-bar .spin {
+  display: inline-block;
+  width: 1.15em; height: 1.15em;
+  /* middle 把元素盒的垂直中点对齐到「基线 + 半个 x 高度」——正是图标与文字
+     看起来居中的位置。SVG 的圆弧中心就是盒中心，所以转起来圆心不动。 */
+  vertical-align: middle;
+  animation: syncSpin 1.1s linear infinite;
+}
+@keyframes syncSpin { to { transform: rotate(360deg); } }
+@keyframes syncBarIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* 「权限未开」这类需要用户动作的提示：换成警示色，让它不像普通说明。
+   （普通说明被划过去没关系，这条漏看就等于提醒功能整个不生效） */
+.diag-line.warn {
+  border-color: var(--warn);
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+/* 顶部「添加待办」入口：细长一条，不抢待办列表的视觉重心 */
+/* 添加待办：右下角浮动按钮（FAB）。
+   取代原来顶部那个虚线框 —— 淡虚线边 + 次要文字色，**视觉权重太低**，
+   新用户根本注意不到有这功能（而"平台没记录的作业"正需要它）。
+   FAB 是全世界的移动端惯例，不需要学习；bottom 带上安全区，
+   免得被手势导航条压住。 */
+.fab {
+  position: fixed; right: 18px;
+  bottom: calc(20px + env(safe-area-inset-bottom, 0px));
+  z-index: 60;
+  width: 52px; height: 52px; padding: 0; border: none; border-radius: 50%;
+  background: var(--accent); color: #fff;
+  display: flex; align-items: center; justify-content: center;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, .2);
+  cursor: pointer; font-family: inherit;
+  animation: fabIn .18s ease-out;
+}
+.fab:active { transform: scale(.93); }
+@keyframes fabIn { from { opacity: 0; transform: scale(.8); } to { opacity: 1; transform: scale(1); } }
+/* FAB 浮在列表之上：底部留出它的高度，否则最后一条会被盖住、点不到 */
+#tab-todo #todoList { padding-bottom: 76px; }
+
+/* 记录页的三段切换（已完成 / 变更历史 / 同步日志）。
+   与「档位卡片」（.seg）的区别：这里是在**同一组查看内容**之间切，
+   不是在选设置值 —— 所以更轻、更紧凑。 */
+.seg-tabs {
+  display: flex; gap: 4px; margin: 8px 14px 6px;
+  background: var(--border); border-radius: 10px; padding: 3px;
+}
+.seg-tabs button {
+  flex: 1; border: none; background: transparent; color: var(--text-2);
+  font-size: 13px; padding: 7px 4px; border-radius: 8px;
+  font-family: inherit; cursor: pointer;
+}
+.seg-tabs button.on { background: var(--surface); color: var(--accent); font-weight: 600; }
+
+/* ---------- 设置页：功能开关为一级目录 ----------
+   一级行 = 功能名 + **当前值**，扫一眼就知道有哪些能力、现在各是什么状态；
+   展开才是具体选项。默认全部收起 —— 全展开会把设置页变成一堵墙。 */
+.set-item {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 12px 16px; margin: 12px 0;
+}
+.set-item > summary {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 10px;
+  cursor: pointer; list-style: none; font-size: 14.5px;
+}
+.set-item > summary::-webkit-details-marker { display: none; }
+.set-name { font-weight: 600; color: var(--text); }
+.set-now { font-size: 12.5px; color: var(--accent); font-weight: 500; }
+.set-item[open] > summary { margin-bottom: 10px; }
+.set-body { border-top: 1px solid var(--border); padding-top: 10px; }
+.set-body .muted { font-size: 12.5px; margin: 0 0 10px; }
+.set-row {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 13.5px; color: var(--text-2); margin: 8px 0;
+}
+.set-row input[type='number'] { width: 64px; }
+.set-row input[type='checkbox'] { width: auto; margin: 0; }
+
+/* 区间输入：「数字 + 单位」成组出现。
+   存的一律是小时，但显示时能整除 24 就说天 —— 用户输入 1 天，
+   下次打开看到的还是 1 天，而不是 24 小时。 */
+.spec-row {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 13px; color: var(--text-2); margin: 8px 0;
+}
+.spec-label { flex: none; min-width: 92px; }
+.num-unit { display: inline-flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.num-unit input[type='number'] { width: 64px; }
+.num-unit select { width: auto; padding: 2px 4px; font-size: 12.5px; }
+/* 软护栏提示：不阻止保存，只说明"这么设效果有限" */
+.spec-warn { display: block; margin-top: 6px; color: var(--warn); font-weight: 500; }
+
+/* 档位三选一：用卡片而不是下拉 —— 每档的差别（提前几天/几小时）
+   要能直接看到，下拉框会把最重要的对比信息藏起来。 */
+.seg { display: flex; gap: 8px; margin: 4px 0 10px; flex-wrap: wrap; }
+.seg-btn {
+  flex: 1 1 96px; display: flex; flex-direction: column; gap: 2px;
+  border: 1px solid var(--border); background: var(--bg);
+  border-radius: 10px; padding: 9px 10px; cursor: pointer;
+  font-family: inherit; text-align: left; color: var(--text-2);
+}
+.seg-btn b { font-size: 13.5px; color: var(--text); font-weight: 600; }
+.seg-btn span { font-size: 11px; line-height: 1.35; }
+.seg-btn.on { border-color: var(--accent); background: var(--accent-soft); }
+.seg-btn.on b { color: var(--accent); }
+
+/* 单条任务的处理菜单（点 ✓ 弹出）----------
+   用底部弹出而不是下拉气泡：手机上一只手够得着，而且能带上任务标题 ——
+   用户一眼确认自己点的是哪一条。 */
+.task-menu {
+  position: fixed; inset: 0; z-index: 120;
+  display: flex; flex-direction: column; justify-content: flex-end;
+}
+.task-menu-mask { position: absolute; inset: 0; background: rgba(0, 0, 0, .32); }
+.task-menu-body {
+  position: relative; background: var(--surface);
+  border-radius: 16px 16px 0 0;
+  padding: 8px 12px calc(12px + env(safe-area-inset-bottom, 0px));
+  box-shadow: 0 -6px 24px rgba(0, 0, 0, .14);
+  animation: menuUp .18s ease-out;
+}
+@keyframes menuUp {
+  from { transform: translateY(18px); opacity: .6; }
+  to { transform: translateY(0); opacity: 1; }
+}
+.task-menu-title {
+  font-size: 12.5px; color: var(--text-3);
+  padding: 8px 6px 10px; overflow-wrap: anywhere;
+}
+.task-menu-item {
+  display: block; width: 100%; text-align: left;
+  background: none; border: none; border-radius: 10px;
+  padding: 11px 12px; font-family: inherit; cursor: pointer; color: var(--text);
+}
+.task-menu-item:active { background: var(--accent-soft); }
+.task-menu-item b { display: block; font-size: 14.5px; font-weight: 600; }
+.task-menu-item span {
+  display: block; font-size: 11.5px; color: var(--text-2);
+  margin-top: 2px; line-height: 1.4;
+}
+/* 空说明不占位 —— 否则"标记已完成"那一行会多出一段空白 */
+.task-menu-item span:empty { display: none; }
+.task-menu-item.danger b { color: var(--danger); }
+.task-menu-item.cancel {
+  text-align: center; color: var(--text-2); margin-top: 4px;
+  border-top: 1px solid var(--border); border-radius: 0;
+}
+/* 不可用项：置灰但仍然显示 —— 让"为什么不能选"有机会被说明 */
+.task-menu-item:disabled { opacity: .45; cursor: default; }
+.task-menu-item:disabled b { color: var(--text-3); }
+
+/* 添加待办层：从底部滑出的整屏层。
+   独立于页面内容 —— 展开/收起都不改变待办列表的布局与滚动位置。 */
+.sheet {
+  position: fixed; inset: 0; z-index: 80;
+  display: flex; flex-direction: column;
+  background: var(--bg, #fff);
+  animation: sheetIn 0.18s ease-out;
+}
+.sheet-head {
+  flex: none; display: flex; align-items: center; justify-content: space-between;
+  gap: 10px; padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+  font-size: 14px;
+}
+.sheet-body {
+  flex: 1; overflow-y: auto;
+  padding: 14px;
+  -webkit-overflow-scrolling: touch;
+}
+.sheet-body label { display: block; margin-bottom: 12px; }
+@keyframes sheetIn {
+  from { opacity: 0; transform: translateY(14px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* 账号卡上的会话 cookie 名单（诊断用）：默认折起，需要时展开对照。
+   注意：这里只显示 cookie 的**名字**，永远不显示值 —— 值是凭据。 */
+.cookie-box { margin-top: 6px; }
+.cookie-box > summary {
+  cursor: pointer; font-size: 11px; color: var(--text-3); list-style: none;
+}
+.cookie-box > summary::-webkit-details-marker { display: none; }
+.cookie-box > summary::before { content: '▸ '; }
+.cookie-box[open] > summary::before { content: '▾ '; }
+.cookie-list {
+  margin-top: 4px; font-size: 11px; color: var(--text-3);
+  line-height: 1.6; word-break: break-all;
+}
+
+/* 标题旁的版本号：小、浅，但要能看清 —— 它的用途是"确认我装的是哪一版" */
+.ver { font-size: 10.5px; font-weight: 400; color: var(--text-3); vertical-align: 1px; }
+
+/* ---------- 关于与说明 ----------
+   按「困惑」组织：每条一个问句当标题 + 两三句解释。
+   不做二次折叠 —— 用户点开这一栏本来就是来读的，再折一层只多一次点击。 */
+.faq h4 {
+  margin: 14px 0 4px; font-size: 13.5px; font-weight: 600; color: var(--text);
+}
+.faq h4:first-child { margin-top: 0; }
+.faq p {
+  margin: 0 0 6px; font-size: 12.5px; line-height: 1.6; color: var(--text-2);
+}
+.faq b { color: var(--text); font-weight: 600; }
+/* 保活卡片里的「为什么」：跟在要求后面，不单独占一块 */
+.ka-hint {
+  margin-top: 6px; font-size: 11.5px; line-height: 1.5; color: var(--text-3);
+}
+
+/* ---------- 题目进度条（PTA 这类「一份作业 = N 道题」的平台）----------
+   三段颜色回答的是"卡在哪一段"：绿 = 已通过，橙 = 交了没过，灰 = 没交。
+   整条做成按钮 —— 看到"还有 2 题"的下一个动作必然是"哪两题"。 */
+.prog {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  margin-top: 6px; padding: 0; border: none; background: none;
+  font-family: inherit; cursor: pointer; text-align: left;
+}
+.prog-bar {
+  display: flex; flex: 1; min-width: 56px; height: 6px;
+  border-radius: 3px; overflow: hidden; background: #e5e5ea;
+}
+.prog-bar i { display: block; height: 100%; }
+.prog-bar .s-ac { background: var(--ok); }
+.prog-bar .s-sub { background: var(--warn); }
+.prog-bar .s-rest { background: #e5e5ea; }
+.prog-txt {
+  flex: none; font-size: 11px; color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+.prog:active .prog-bar { opacity: .8; }
+/* 未开考时没有题数可画 —— 给一句明确的话，别留白。
+   留白和"坏了"在用户眼里没有区别，而这个项目已经在这上面栽过几次。 */
+.prog-none { font-size: 11.5px; color: var(--text-3); margin-top: 6px; }
+
+/* ---------- 题目详情弹层 ---------- */
+.sheet-spacer { width: 44px; }
+.detail-meta { font-size: 12.5px; color: var(--text-2); }
+.detail-sum { font-size: 13px; color: var(--text); margin: 10px 0 8px; }
+.detail-sum b { color: var(--accent); }
+.subtask-list { border-top: 1px solid var(--border); }
+.subtask {
+  display: flex; align-items: baseline; gap: 10px;
+  padding: 9px 2px; border-bottom: 1px solid var(--border); font-size: 13px;
+}
+.st-label { flex: none; width: 22px; font-weight: 700; color: var(--text-2); }
+.st-score { flex: none; width: 52px; font-size: 12px; color: var(--text-3); }
+.st-status { margin-left: auto; font-size: 12.5px; }
+.subtask.ok .st-status { color: var(--ok); }
+.subtask.warn .st-status { color: var(--warn); }
+.subtask.idle .st-status { color: var(--text-3); }
+.subtask.idle .st-label { color: var(--text-3); }
+.detail-link {
+  display: block; margin-top: 14px; padding: 10px; text-align: center;
+  border-radius: 10px; background: var(--accent-soft); color: var(--accent);
+  text-decoration: none; font-size: 13.5px; font-weight: 600;
+}
+
+/* ---------- 添加待办时的「同名课程」选择 ----------
+   放在输入框正下方、就地出现：这是用户唯一盯着这个课程名、
+   并且意图明确的时刻。事后再让他去某处按"归并"是不可能的。 */
+.course-match {
+  margin: -4px 0 10px; padding: 10px 12px;
+  border: 1px solid var(--border); border-radius: 10px;
+  background: var(--surface);
+}
+.cm-hint { font-size: 12px; color: var(--text-2); margin-bottom: 6px; }
+.cm-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 0; font-size: 13px; cursor: pointer;
+}
+.cm-item input { width: auto; margin: 0; flex: none; }
+.cm-plat { font-size: 10.5px; color: var(--text-3); }

@@ -1,0 +1,24 @@
+# 依赖
+node_modules/
+
+# 构建产物
+android/build/
+android/app/build/
+android/.gradle/
+android/local.properties
+# 由 npm run android:sync 生成（注释必须单独一行：git 不支持行尾注释）
+android/app/src/main/assets/www/
+.tsc-android.log
+
+# 抓包文件（可能含隐私，虽然导出时已脱敏）
+*.har
+
+# 本地数据
+.homework-hub/
+
+# 交付物归档：APK 是二进制，每版 ~680KB 且无法压缩差异。
+# 保留在 release/ 目录里，但不入版本历史（需要时用 git tag 标记版本号）。
+release/
+
+# 本地日志
+.tsc.log

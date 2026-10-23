@@ -1,0 +1,35 @@
+{
+  "name": "homework-hub",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "HomeworkHub · 课业中枢 —— 跨平台汇总学习通 / 雨课堂 / iSmart 等平台的作业与考试信息",
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "imports": {
+    "#core": "./packages/core/src/index.ts",
+    "#core/*": "./packages/core/src/*",
+    "#adapter/*": "./packages/adapters/*/src/index.ts",
+    "#adapters": "./packages/adapters/index.ts",
+    "#web-kit": "./packages/web-kit/src/index.ts",
+    "#api": "./apps/web/src/api.ts"
+  },
+  "scripts": {
+    "demo": "node apps/cli/src/main.ts demo",
+    "web": "node apps/web/src/server.ts",
+    "web:lan": "node apps/web/src/server.ts --lan",
+    "android:clean": "node scripts/clean-android.mjs",
+    "android:compile": "node scripts/clean-android.mjs && tsc -p tsconfig.android.json > .tsc-android.log 2>&1 || true",
+    "android:sync": "npm run android:compile && node scripts/build-android.mjs",
+    "android:apk": "npm run android:sync && node scripts/build-apk.mjs",
+    "test": "node --test \"packages/*/test/*.test.ts\"",
+    "typecheck": "tsc --noEmit",
+    "android:typecheck": "tsc -p tsconfig.android.json --noEmit",
+    "android:verify": "node scripts/build-android.mjs --verify-only"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.2",
+    "@types/node": "^22.15.3"
+  }
+}

@@ -1,0 +1,1135 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HomeworkHub · 同类开源项目调研与架构设计</title>
+<style>
+  :root {
+    --bg: #f7f7f6;
+    --surface: #ffffff;
+    --surface-2: #fbfbfa;
+    --border: #e5e4e1;
+    --border-strong: #d6d4d0;
+    --text: #1c1b19;
+    --text-2: #55534e;
+    --text-3: #8a8781;
+    --accent: #3b5bdb;
+    --accent-soft: #eef1fd;
+    --green: #1f7a4d;
+    --green-soft: #e9f6ef;
+    --amber: #9a6300;
+    --amber-soft: #fdf3e0;
+    --red: #b02a2a;
+    --red-soft: #fdeceb;
+    --purple: #6b3fa0;
+    --purple-soft: #f2ecfa;
+    --mono: ui-monospace, "SFMono-Regular", "Cascadia Mono", Consolas, "Liberation Mono", monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB",
+            "Microsoft YaHei", "Source Han Sans SC", "Noto Sans CJK SC", sans-serif;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 15.5px;
+    line-height: 1.78;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .page { max-width: 940px; margin: 0 auto; padding: 56px 28px 96px; }
+
+  /* ---------- 头部 ---------- */
+  header { border-bottom: 3px solid var(--text); padding-bottom: 28px; margin-bottom: 12px; }
+  .kicker {
+    font-size: 12.5px; letter-spacing: .16em; text-transform: uppercase;
+    color: var(--text-3); font-weight: 600; margin-bottom: 14px;
+  }
+  h1 { font-size: 35px; line-height: 1.28; margin: 0 0 14px; letter-spacing: -.015em; font-weight: 700; }
+  .lede { font-size: 17px; color: var(--text-2); margin: 0; max-width: 46em; }
+
+  .meta {
+    display: flex; flex-wrap: wrap; gap: 10px 28px;
+    margin-top: 22px; font-size: 13px; color: var(--text-3);
+  }
+  .meta b { color: var(--text-2); font-weight: 600; }
+
+  /* ---------- 通用 ---------- */
+  h2 {
+    font-size: 23px; margin: 62px 0 6px; letter-spacing: -.01em; font-weight: 700;
+    padding-top: 22px; border-top: 1px solid var(--border);
+  }
+  h2 .num {
+    display: inline-block; min-width: 1.9em; color: var(--accent);
+    font-variant-numeric: tabular-nums; font-weight: 700;
+  }
+  h3 { font-size: 17px; margin: 34px 0 10px; font-weight: 650; }
+  h4 { font-size: 15px; margin: 24px 0 8px; font-weight: 650; color: var(--text-2); }
+  p { margin: 12px 0; }
+  ul, ol { margin: 12px 0; padding-left: 1.4em; }
+  li { margin: 7px 0; }
+  a { color: var(--accent); text-decoration: none; border-bottom: 1px solid #c3cdf5; }
+  a:hover { border-bottom-color: var(--accent); }
+  code {
+    font-family: var(--mono); font-size: .875em;
+    background: #f0efec; padding: 2px 6px; border-radius: 4px; color: #3a3733;
+  }
+  strong { font-weight: 650; }
+
+  .sub { color: var(--text-2); font-size: 15px; margin-top: 4px; }
+
+  /* ---------- 卡片 ---------- */
+  .card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; padding: 22px 24px; margin: 20px 0;
+  }
+  .card.tight { padding: 16px 20px; }
+
+  .callout {
+    border-left: 3px solid var(--accent); background: var(--accent-soft);
+    border-radius: 0 8px 8px 0; padding: 14px 20px; margin: 20px 0;
+  }
+  .callout.warn { border-left-color: var(--amber); background: var(--amber-soft); }
+  .callout.danger { border-left-color: var(--red); background: var(--red-soft); }
+  .callout.good { border-left-color: var(--green); background: var(--green-soft); }
+  .callout .t { font-weight: 650; display: block; margin-bottom: 4px; }
+  .callout p:first-of-type { margin-top: 0; }
+  .callout p:last-child { margin-bottom: 0; }
+
+  /* ---------- 表格 ---------- */
+  .tw { overflow-x: auto; margin: 20px 0; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
+  table { border-collapse: collapse; width: 100%; font-size: 14px; min-width: 640px; }
+  th, td { text-align: left; padding: 11px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { background: var(--surface-2); font-weight: 650; font-size: 12.5px; color: var(--text-2); white-space: nowrap; }
+  tr:last-child td { border-bottom: none; }
+  td.name { font-weight: 600; white-space: nowrap; }
+  td.mono, .mono { font-family: var(--mono); font-size: 12.5px; }
+
+  .tag {
+    display: inline-block; font-size: 11.5px; font-weight: 600; line-height: 1.7;
+    padding: 0 8px; border-radius: 999px; white-space: nowrap;
+  }
+  .tag.ok    { background: var(--green-soft);  color: var(--green); }
+  .tag.mid   { background: var(--amber-soft);  color: var(--amber); }
+  .tag.no    { background: var(--red-soft);    color: var(--red); }
+  .tag.info  { background: var(--accent-soft); color: var(--accent); }
+  .tag.gray  { background: #efeeec;             color: var(--text-2); }
+  .tag.purp  { background: var(--purple-soft); color: var(--purple); }
+
+  /* ---------- 代码 ---------- */
+  pre {
+    font-family: var(--mono); font-size: 12.8px; line-height: 1.68;
+    background: #fbfaf8; border: 1px solid var(--border); border-radius: 9px;
+    padding: 15px 17px; overflow-x: auto; margin: 16px 0;
+  }
+  pre code { background: none; padding: 0; font-size: inherit; }
+  pre .c { color: #8a8781; }
+  pre .k { color: #a03ba0; }
+  pre .s { color: #1f7a4d; }
+  pre .f { color: #3b5bdb; }
+  pre .hl { background: #fff4d6; border-radius: 3px; padding: 0 3px; }
+
+  /* ---------- 架构图 ---------- */
+  .arch { margin: 24px 0; }
+  .layer {
+    border: 1px solid var(--border); border-radius: 10px;
+    background: var(--surface); padding: 13px 16px; margin-bottom: 0;
+    display: flex; align-items: stretch; gap: 16px;
+  }
+  .layer + .arrow { height: 26px; }
+  .layer-label {
+    flex: 0 0 92px; display: flex; flex-direction: column; justify-content: center;
+    border-right: 1px solid var(--border); padding-right: 14px;
+  }
+  .layer-label b { font-size: 13.5px; display: block; }
+  .layer-label span { font-size: 11.5px; color: var(--text-3); font-family: var(--mono); }
+  .layer-items { flex: 1; display: flex; flex-wrap: wrap; gap: 8px; align-content: center; }
+  .chip {
+    font-size: 12.5px; padding: 4px 11px; border-radius: 7px;
+    background: var(--surface-2); border: 1px solid var(--border-strong);
+    font-family: var(--mono); white-space: nowrap;
+  }
+  .chip.hl { background: var(--accent-soft); border-color: #c3cdf5; color: #2743b8; }
+  .chip.core { background: var(--purple-soft); border-color: #dccdf0; color: var(--purple); }
+  .arrow { display: flex; align-items: center; justify-content: center; }
+  .arrow::before {
+    content: ""; width: 1px; height: 100%; background: var(--border-strong);
+    position: relative;
+  }
+  .arrow span {
+    position: absolute; font-size: 11px; color: var(--text-3);
+    background: var(--bg); padding: 0 8px; font-family: var(--mono);
+  }
+  .arrow { position: relative; }
+
+  /* ---------- 难点卡 ---------- */
+  .gap { display: grid; gap: 14px; margin: 22px 0; }
+  .gap-item {
+    background: var(--surface); border: 1px solid var(--border);
+    border-left: 3px solid var(--purple); border-radius: 0 10px 10px 0;
+    padding: 16px 20px;
+  }
+  .gap-item h4 { margin: 0 0 6px; font-size: 15.5px; color: var(--text); }
+  .gap-item p { margin: 6px 0 0; font-size: 14.5px; color: var(--text-2); }
+  .gap-item .bad, .gap-item .good2 { font-size: 14px; display: block; margin-top: 7px; }
+  .gap-item .bad::before  { content: "症状 · "; font-weight: 650; color: var(--red); }
+  .gap-item .good2::before { content: "解法 · "; font-weight: 650; color: var(--green); }
+
+  /* ---------- 结果面板 ---------- */
+  .result {
+    background: #14201a; color: #d6e6db; border-radius: 11px;
+    padding: 18px 20px; font-family: var(--mono); font-size: 12.6px;
+    line-height: 1.7; overflow-x: auto; margin: 20px 0;
+  }
+  .result .g { color: #6ee7a0; }
+  .result .y { color: #f5d580; }
+  .result .d { color: #7e9689; }
+  .result .w { color: #e8e4d8; }
+
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 14px; margin: 24px 0; }
+  .stat { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px 18px; }
+  .stat .v { font-size: 27px; font-weight: 700; letter-spacing: -.02em; font-variant-numeric: tabular-nums; line-height: 1.15; }
+  .stat .l { font-size: 12.5px; color: var(--text-3); margin-top: 3px; }
+  .stat.g .v { color: var(--green); }
+  .stat.b .v { color: var(--accent); }
+  .stat.p .v { color: var(--purple); }
+
+  footer {
+    margin-top: 72px; padding-top: 22px; border-top: 1px solid var(--border);
+    font-size: 13px; color: var(--text-3);
+  }
+
+  @media (max-width: 620px) {
+    .page { padding: 34px 18px 64px; }
+    h1 { font-size: 27px; }
+    h2 { font-size: 20px; }
+    .layer { flex-direction: column; gap: 10px; }
+    .layer-label { flex: none; border-right: none; border-bottom: 1px solid var(--border); padding: 0 0 8px; flex-direction: row; gap: 8px; align-items: baseline; }
+  }
+</style>
+</head>
+<body>
+<div class="page">
+
+<header>
+  <div class="kicker">开源项目调研 · 技术选型 · 架构设计</div>
+  <h1>HomeworkHub · 课业中枢</h1>
+  <p class="lede">
+    跨平台汇总自己的作业与考试信息 —— 学习通、雨课堂、长江雨课堂、iSmart……
+    本文回答三个问题：<b>别人做过什么</b>、<b>还有什么是空的</b>、<b>难点怎么解</b>。
+  </p>
+  <div class="meta">
+    <span><b>状态</b> 核心引擎已实现并通过验证 · 真实适配器待校准</span>
+    <span><b>代码量</b> 50 个文件 · 零运行时依赖</span>
+    <span><b>验证</b> 80 项端到端断言 + 69 项单元测试，全部通过</span>
+  </div>
+</header>
+
+<!-- ============================================================ 1 -->
+<h2><span class="num">01</span>同类开源项目调研</h2>
+
+<p class="sub">
+  按 GitHub 上可查到的相关项目，分三类看：<b>时间维度工具</b>（课表）、
+  <b>单平台助手</b>（脚本/插件）、<b>一体化学习管理</b>（多为闭源商业产品）。
+</p>
+
+<div class="tw">
+<table>
+<thead>
+<tr><th>项目</th><th>性质</th><th>技术栈 / 许可</th><th>能借鉴什么</th><th>没覆盖什么</th></tr>
+</thead>
+<tbody>
+<tr>
+  <td class="name">ClassIsland</td>
+  <td>教室大屏课表 + 上下课提醒</td>
+  <td class="mono">.NET 8 + Avalonia<br>GPL-3.0</td>
+  <td>跨平台桌面方案（Win/mac/Linux）<br><b>插件 SDK + 主题系统</b><br>「事件-条件-动作」自动化规则</td>
+  <td>只管课表时间，不管作业与考试</td>
+</tr>
+<tr>
+  <td class="name">WakeUp课程表<br><span class="mono" style="font-size:11.5px">+ CourseAdapter</span></td>
+  <td>Android 课程表 App</td>
+  <td class="mono">Kotlin / Android<br>Apache-2.0</td>
+  <td><b>适配器插件化的最佳范本</b>：<br>抽象类 <code>Parser</code> + 一个 <code>generateCourseList</code><br>社区贡献了几十个学校适配器</td>
+  <td>课表导入是一次性动作；<br>没有持续同步、没有作业考试</td>
+</tr>
+<tr>
+  <td class="name">yuketang-helper-auto</td>
+  <td>雨课堂浏览器插件 + 桌面客户端</td>
+  <td class="mono">Node/TS · MIT<br>Win/mac + 扩展 + CLI</td>
+  <td><b>与本项目最接近的工程形态</b>：<br>同一份核心跑多端（客户端/扩展/CLI）<br>有「新题目/考试开始」的提醒事件</td>
+  <td>只支持雨课堂一个平台；<br>重心在 AI 作答，合规风险高</td>
+</tr>
+<tr>
+  <td class="name">SuperStarInfoFetch</td>
+  <td>超星作业/考试信息抓取</td>
+  <td class="mono">Python</td>
+  <td><b>只读聚合这个定位的先行者</b>：<br>作业、考试、任务点、错题集<br><b>cookie 复用避免重复登录</b>（减少风控）</td>
+  <td>命令行脚本，无 UI；<br>单平台；无增量与去重</td>
+</tr>
+<tr>
+  <td class="name">iSmartAuto / ismart-tool</td>
+  <td>iSmart 自动完成工具</td>
+  <td class="mono">Python + CDP<br>+ unidbg</td>
+  <td><b>揭示了最硬的技术墙</b>：<br>上报请求含 native 生成的 <code>ut</code> 签名，<br>纯 JS 无解，需模拟执行 so</td>
+  <td>定位是自动作答（合规风险）；<br>无登录态管理与数据建模</td>
+</tr>
+<tr>
+  <td class="name">zhihuishu-cli / FuckZHS</td>
+  <td>智慧树自动化脚本</td>
+  <td class="mono">Python</td>
+  <td>验证了「请求签名校验」这一难点类别：<br>智慧树后端用 SALT 拼接 + 摘要校验</td>
+  <td>同上；且接口随平台改版频繁失效</td>
+</tr>
+<tr>
+  <td class="name">ClassTable · iStudiez Pro<br>· MyStudyLife</td>
+  <td>课程 + 作业 + 考试一体化</td>
+  <td class="mono">闭源商业</td>
+  <td><b>验证了需求真实存在</b>（App Store 长期榜一）</td>
+  <td>闭源、需手动录入；<br>不与国内教学平台对接</td>
+</tr>
+</tbody>
+</table>
+</div>
+
+<h3>结论：空白点在哪里</h3>
+
+<div class="callout good">
+  <span class="t">没有一个开源项目同时做到这四件事</span>
+  <p>
+    <b>① 跨多个教学平台</b>（学习通 / 雨课堂 / iSmart 一起看）·
+    <b>② 聚合的对象是作业与考试</b>（有截止时间、需要行动）·
+    <b>③ 是持续同步而非一次性导入</b>（平台会改期、会加新作业）·
+    <b>④ 适配器真正插件化</b>（新平台零侵入）
+  </p>
+  <p style="margin-top:10px">
+    课表类工具占住了「时间维度」，单平台助手占住了「自动化」，
+    而<b>「我这一周到底要交什么」这个最痛的问题，还没有开源方案回答。</b>
+  </p>
+</div>
+
+<div class="gap">
+  <div class="gap-item">
+    <h4>可以放心借鉴的</h4>
+    <p>
+      适配器抽象（WakeUp 的 <code>Parser</code> 范式）·
+      跨平台桌面选型（ClassIsland 验证了 Avalonia，
+      而 Tauri 2 在 2026 年已成为轻量跨平台的成熟选择）·
+      cookie 复用降低风控（SuperStarInfoFetch）·
+      多端共用一份核心（yuketang-helper-auto）。
+    </p>
+  </div>
+  <div class="gap-item" style="border-left-color: var(--amber)">
+    <h4>要主动避开的</h4>
+    <p>
+      现有单平台脚本的重心多是<b>自动作答 / 刷课</b>。这既有明确的合规与学术诚信风险，
+      在工程上也是死路：一旦涉及提交，就必须对抗平台的签名与行为检测（iSmart 的
+      <code>ut</code> 就是活例子），维护成本极高且随时失效。
+    </p>
+    <span class="good2">
+      本项目严格限定为<b>只读聚合</b> —— 只读取作业与考试信息并提醒你，
+      把「做不做、什么时候做」留给你自己。这既规避了风险，也让工程复杂度下降一个量级。
+    </span>
+  </div>
+</div>
+
+<!-- ============================================================ 2 -->
+<h2><span class="num">02</span>技术选型</h2>
+
+<div class="tw">
+<table>
+<thead><tr><th>决策点</th><th>选择</th><th>理由</th></tr></thead>
+<tbody>
+<tr>
+  <td class="name">核心逻辑</td>
+  <td><span class="tag info">TypeScript</span></td>
+  <td>与所有候选壳层都能集成；AI 辅助编码语料最密；平台适配器要频繁改，改起来必须便宜</td>
+</tr>
+<tr>
+  <td class="name">构建方式</td>
+  <td><span class="tag ok">Node 22 原生类型擦除</span></td>
+  <td>直接 <code>node xxx.ts</code>，<b>零构建步骤、零运行时依赖</b>。参考实现最怕的就是「先装 500MB 依赖才能跑」</td>
+</tr>
+<tr>
+  <td class="name">桌面壳层</td>
+  <td><span class="tag purp">Tauri 2</span></td>
+  <td>体积约为 Electron 的 1/10、内存 1/5；真实 UA 与代理可控（对高校平台的风控很重要）；Rust 侧天然适合承载 native 签名</td>
+</tr>
+<tr>
+  <td class="name">移动壳层</td>
+  <td><span class="tag gray">Capacitor 或 RN</span></td>
+  <td>核心已是纯 TS，WebView 壳即可复用；后台同步仍需原生任务调度（WorkManager / BGTaskScheduler）</td>
+</tr>
+<tr>
+  <td class="name">存储</td>
+  <td><span class="tag info">单文件 JSON → SQLite</span></td>
+  <td>一个学生一学期 200~800 条任务，不到 1 MB，够用且可调试。超约 1 万条换 SQLite，接口不变</td>
+</tr>
+<tr>
+  <td class="name">会话存储</td>
+  <td><span class="tag ok">AES-256-GCM + KeyProvider 端口</span></td>
+  <td>防的是「状态文件被同步到网盘 / 被顺手读走」。<code>KeyProvider</code> 预留了接操作系统钥匙串的位置</td>
+</tr>
+<tr>
+  <td class="name">Native 签名</td>
+  <td><span class="tag mid">进程外桥接</span></td>
+  <td>unidbg 跑在 JVM 里、内存占用大且不稳定；通过 stdio 协议调用可做<b>崩溃隔离</b>与<b>许可隔离</b></td>
+</tr>
+</tbody>
+</table>
+</div>
+
+<!-- ============================================================ 3 -->
+<h2><span class="num">03</span>系统架构</h2>
+
+<p class="sub">
+  依赖方向严格单向：<b>infra → engine → ports → domain</b>。
+  换掉任何一层实现，其他层一行都不用改。
+</p>
+
+<div class="arch">
+  <div class="layer">
+    <div class="layer-label"><b>壳层</b><span>apps/*</span></div>
+    <div class="layer-items">
+      <span class="chip">Tauri 2 桌面</span>
+      <span class="chip">移动端</span>
+      <span class="chip hl">CLI（已实现）</span>
+      <span class="chip hl">本地 Web App（已实现，--lan 可手机访问）</span>
+      <span class="chip">系统通知</span>
+    </div>
+  </div>
+  <div class="arrow"><span>调用</span></div>
+
+  <div class="layer">
+    <div class="layer-label"><b>适配器</b><span>packages/adapters</span></div>
+    <div class="layer-items">
+      <span class="chip core">mock（平台替身 + 参考实现）</span>
+      <span class="chip">chaoxing</span>
+      <span class="chip">yuketang / 长江</span>
+      <span class="chip">ismart</span>
+    </div>
+  </div>
+  <div class="arrow"><span>实现 PlatformAdapter</span></div>
+
+  <div class="layer">
+    <div class="layer-label"><b>引擎</b><span>src/engine</span></div>
+    <div class="layer-items">
+      <span class="chip hl">sync-engine 编排 + 错误隔离</span>
+      <span class="chip hl">merge 幂等合并 / 防误删</span>
+      <span class="chip hl">reminder 提醒窗口去重</span>
+      <span class="chip">session-http</span>
+      <span class="chip">http-pipeline 限流重试</span>
+    </div>
+  </div>
+  <div class="arrow"><span>依赖抽象</span></div>
+
+  <div class="layer">
+    <div class="layer-label"><b>端口</b><span>src/ports</span></div>
+    <div class="layer-items">
+      <span class="chip">PlatformAdapter</span>
+      <span class="chip">HubStore</span>
+      <span class="chip">Vault</span>
+      <span class="chip">HttpClient</span>
+      <span class="chip">NativeSigner</span>
+      <span class="chip">Limiter</span>
+      <span class="chip">Logger</span>
+    </div>
+  </div>
+  <div class="arrow"><span>具体实现</span></div>
+
+  <div class="layer">
+    <div class="layer-label"><b>基础设施</b><span>src/infra</span></div>
+    <div class="layer-items">
+      <span class="chip">加密保险箱</span>
+      <span class="chip">JSON 存储</span>
+      <span class="chip">fetch 客户端</span>
+      <span class="chip">令牌桶</span>
+      <span class="chip">子进程签名</span>
+      <span class="chip">HTML 提取</span>
+      <span class="chip">控制台日志</span>
+    </div>
+  </div>
+  <div class="arrow"><span>基础于</span></div>
+
+  <div class="layer">
+    <div class="layer-label"><b>领域</b><span>src/domain</span></div>
+    <div class="layer-items">
+      <span class="chip hl">任务模型（四态截止时间）</span>
+      <span class="chip hl">稳定主键 / 内容指纹</span>
+      <span class="chip hl">错误分类</span>
+      <span class="chip">时钟抽象</span>
+    </div>
+  </div>
+</div>
+
+<div class="callout">
+  <span class="t">为什么领域层零 IO，而且连时钟都要注入</span>
+  <p>
+    「截止前 2 小时提醒」这类逻辑如果用 <code>Date.now()</code>，你就没法测 ——
+    总不能让测试等到凌晨两点。把时间抽成 <code>Clock</code>，测试可以把时钟
+    「拨」到任意时刻，包括临界点，从而穷举窗口边界。
+    本项目的 <code>merge</code> 与 <code>reminder</code> 都是纯函数，
+    这正是它们能被 44 项单测完全覆盖的原因。
+  </p>
+</div>
+
+<!-- ============================================================ 4 -->
+<h2><span class="num">04</span>技术难点与实现</h2>
+
+<p class="sub">下面五条全是实际写代码时踩出来的，不是纸上推演。每条都附症状与解法。</p>
+
+<h3>难点一 · 截止时间归一化</h3>
+
+<p>各平台对「什么时候截止」的表达方式完全不同，这是全项目最脏的一层：</p>
+
+<div class="tw">
+<table>
+<thead><tr><th>来源</th><th>原始形态</th><th>陷阱</th></tr></thead>
+<tbody>
+<tr><td class="name">超星</td><td class="mono">2026-09-25 23:59</td><td>是<b>本地墙上时间</b>，用 <code>Date.UTC()</code> 解析会整体偏移 8 小时</td></tr>
+<tr><td class="name">雨课堂</td><td class="mono">endTime: 1758815940000</td><td>epoch 毫秒；但也有接口给纯剩余秒数，靠数量级区分</td></tr>
+<tr><td class="name">雨课堂（部分）</td><td class="mono">'还剩 3 天'</td><td><b>最大的坑，见下</b></td></tr>
+<tr><td class="name">各平台</td><td class="mono">未公布 / 不限时 / ""</td><td>是「开放态」，不等于「未知」</td></tr>
+</tbody>
+</table>
+</div>
+
+<div class="gap-item" style="margin:22px 0">
+  <h4>最隐蔽的坑：相对截止时间没有锚点，任务永远到不了期</h4>
+  <p>
+    平台返回「还剩 3 天」。如果每次同步都按「当前时刻 + 3 天」重新解释，
+    那么第五天看它还是「还剩 3 天」——
+    <b>提醒永远不会触发，排序永远是最后，这个作业在你眼里永远不紧急。</b>
+    而代码层面看不出任何异常。
+  </p>
+  <span class="bad">任务静止在「还剩 3 天」；提醒窗口永不命中；截止排序永久排末位</span>
+  <span class="good2">首次观测时把它<b>锚定</b>成绝对时刻（<code>UnifiedTask.deadlineAt</code>），之后一直沿用。
+    并且只在倒计时<b>变大</b>（真改期）时才重新锚定 —— 变小只是时间自然流逝，不算变更，
+    否则每天同步都会产生一次假的「截止时间已变更」。</span>
+</div>
+
+<h3>难点二 · 幂等合并（本项目真正的核心）</h3>
+
+<p>
+  一次同步拿到几百条任务，反复跑不能产生重复记录，也不能产生无意义的写操作。
+  <code>mergeTasks()</code> 是纯函数，所以能完整单测。
+</p>
+
+<h4>主键两级策略</h4>
+<pre><code><span class="c">// 第一级：平台给了稳定 ID 就用，稳定且免费</span>
+<span class="c">// 第二级：兜底指纹（标题先归一化，剥离「（第2次）」这类噪音后缀）</span>
+fingerprint = <span class="f">sha1</span>(platformId, courseId, kind, <span class="f">normalizeTitle</span>(title))
+
+<span class="c">// 关键：指纹<b>不含</b> status 与 deadline ——</span>
+<span class="c">// 「交了作业」「老师改期」都应表现为「变更」，而不是「新建一条」</span></code></pre>
+
+<div class="gap">
+  <div class="gap-item" style="border-left-color: var(--red)">
+    <h4>坑 2-1 · 主键必须包含账号维度</h4>
+    <p>
+      同一个平台可以挂多个账号（两个学校的学习通、两个班的雨课堂），
+      而平台内 ID 只在平台内部唯一。
+    </p>
+    <span class="bad">两个账号的 <code>work_88001</code> 生成了同一个主键，互相覆盖</span>
+    <span class="good2"><code>platformId + hash(accountId) + platformTaskId</code>。
+      账号段用哈希而非明文，因为主键会出现在 URL、日志与 UI 里。<b>这条是单元测试跑出来的，
+      不是想出来的</b> —— 测试「跨账号互不干扰」第一次就失败了。</span>
+  </div>
+
+  <div class="gap-item" style="border-left-color: var(--red)">
+    <h4>坑 2-2 · 上游抖动不能被误判成删除</h4>
+    <p>
+      分页请求失败、临时风控、接口超时，都会让某一轮同步「少看到」一些任务。
+      如果立刻删库，用户会看到作业一闪一闪地消失又出现。
+    </p>
+    <span class="bad">某轮翻页失败 → 30 个待办瞬间消失 → 用户以为被清理了</span>
+    <span class="good2">
+      连续缺席 N 轮（默认 2）才<b>软删除</b>，且保留记录可被上游恢复；
+      数据不完整时（翻页中断 / 达到翻页上限 / 演练模式）<b>整轮禁用删除判定</b>。
+    </span>
+  </div>
+
+  <div class="gap-item" style="border-left-color: var(--red)">
+    <h4>坑 2-3 · 时间戳精度不一致会刷出假变更</h4>
+    <p>
+      平台返回的时间戳精度不统一（有的到秒、有的到毫秒），直接比较会把每一轮同步
+      都判定成「截止时间变了」，于是 revision 无限增长、提醒被反复重置。
+    </p>
+    <span class="bad">每 30 分钟同步一次 → 每 30 分钟一条「截止时间已变更」通知</span>
+    <span class="good2">比较前先按 <b>1 分钟粒度</b>对齐，低于该粒度的差异视为噪音。</span>
+  </div>
+</div>
+
+<h3>难点三 · 平台改版必须响亮失败</h3>
+
+<div class="callout danger">
+  <span class="t">这是本类应用最严重的故障模式</span>
+  <p>
+    平台的 HTML/JSON 一改版，解析器就可能「成功地」返回 0 条记录。
+    从代码角度没有任何报错，从用户角度是<b>「我的作业不见了」</b>——
+    他会以为这周没作业，然后错过截止时间。
+  </p>
+  <p style="margin-top:10px">
+    所以适配器返回空结果、而上游声明有数据时，必须显式抛 <code>SCHEMA_DRIFT</code>。
+    同时引擎<b>不清空本地数据</b>，用户看到的仍然是上一次同步的正确结果，
+    加上一条「平台可能已改版」的提示。
+  </p>
+</div>
+
+<div class="result">
+<span class="d">▌ 场景 7 · 平台改版（字段改名）</span>
+<span class="g">   ✓ 同步状态为 failed</span>
+<span class="g">   ✓ 错误信息明确指出是结构改版</span>
+<span class="w">     mock 页面/接口结构可能已改版：预期字段 list 为数组，实际为 undefined</span>
+<span class="w">     （响应键：total,dataList）</span>
+<span class="g">   ✓ 本地数据未被清空  仍为 9 条</span>
+</div>
+
+<h3>难点四 · 提醒的去重与补发风暴</h3>
+
+<div class="tw">
+<table>
+<thead><tr><th>问题</th><th>如果不处理</th><th>解法</th></tr></thead>
+<tbody>
+<tr>
+  <td class="name">幂等</td>
+  <td>同步每 30 分钟一次，只按「是否进入 24 小时窗口」判断 → 一天被提醒 48 次</td>
+  <td>提醒 key = <code>sha1(任务, 规则+窗口, 截止时间)</code>，发过就记档</td>
+</tr>
+<tr>
+  <td class="name">改期</td>
+  <td>旧提醒已失效，但记档还在 → 新截止时间不再提醒</td>
+  <td>把截止时间编进 key，改期后 key 自然不同，<b>不需要额外的重置逻辑</b></td>
+</tr>
+<tr>
+  <td class="name">补发风暴</td>
+  <td>作业昨晚发的、今晚截止，用户今天才首次同步 → T-7d/T-1d/T-3h 三窗口同时满足，瞬间刷三条重复通知</td>
+  <td>每轮每任务<b>最多只发最紧的那一条</b>，并把更宽松的窗口一起标记为已消费</td>
+</tr>
+<tr>
+  <td class="name">逾期刷屏</td>
+  <td>三个月前没做的作业每天提醒一次</td>
+  <td>逾期超过宽限期（默认 3 天）不再提醒</td>
+</tr>
+</tbody>
+</table>
+</div>
+
+<h3>难点五 · Native 签名（iSmart 的 <code>ut</code> 字段）</h3>
+
+<p>
+  iSmart 把签名逻辑编译进了原生 so/dll，社区验证只能靠 unidbg 之类的框架
+  <b>直接模拟执行那个 so</b> 才能算出来。纯 JavaScript 拿不到签名，而签名不对后端就不认。
+  这是<b>无法用 TypeScript 解决</b>的问题，硬做只会把整个项目锁死在某个平台。
+</p>
+
+<p>架构对策：把签名抽成可替换的端口 <code>NativeSigner</code>。</p>
+
+<pre><code><span class="k">interface</span> <span class="f">NativeSigner</span> {
+  <span class="f">available</span>(): Promise&lt;<span class="k">boolean</span>&gt;
+  <span class="f">sign</span>(req: { payload: Record&lt;<span class="k">string</span>, <span class="k">string</span>&gt;; algorithm: <span class="k">string</span> }): Promise&lt;<span class="k">string</span>&gt;
+}
+
+<span class="c">// ① SubprocessSigner —— 通过 stdio 的 JSON 协议调用外部可执行文件</span>
+<span class="c">//    选进程边界而不是静态链接，为的是：</span>
+<span class="c">//    · 崩溃隔离：unidbg 跑在 JVM 里，内存占用大且容易出问题，不能拖垮同步进程</span>
+<span class="c">//    · 许可隔离：签名组件常是 GPL 或来源不明的二进制，进程调用不构成许可传染</span>
+<span class="c">//    · 可替换：用户能换成自己的实现，只要遵守同一份协议</span>
+
+<span class="c">// ② UnavailableSigner —— 没有签名能力时<b>显式失败</b>，绝不返回假签名</span></code></pre>
+
+<div class="callout good">
+  <span class="t">降级设计：只读提醒模式</span>
+  <p>
+    没有签名组件的 iSmart 用户不会「什么都用不了」——
+    他仍然能看到已经同步过来的作业和截止时间，只是不能重新拉取或提交。
+    这个降级比「要么全能要么不能用」友好得多，
+    也让项目的<b>核心价值（聚合提醒）不被最弱的那个平台拖累</b>。
+  </p>
+</div>
+
+<h3>附带 · HTTP 层的两个隐蔽细节</h3>
+
+<div class="gap">
+  <div class="gap-item" style="border-left-color: var(--accent)">
+    <h4>手动跟随重定向</h4>
+    <p>
+      Node fetch 自动跟随重定向时，中间跳转收到的 <code>Set-Cookie</code> 会被丢掉。
+      而超星/雨课堂的登录链路恰恰是「POST 登录 → 302 到主页 → 主页下发会话 cookie」。
+    </p>
+    <span class="bad">自动跟随会拿到一个「登录成功但没有会话」的诡异状态</span>
+    <span class="good2">自己接管重定向，跨跳转累积所有 <code>Set-Cookie</code>。</span>
+  </div>
+  <div class="gap-item" style="border-left-color: var(--accent)">
+    <h4>限流不能只在适配器层做</h4>
+    <p>
+      429 时如果只 sleep 这一次，后续请求仍然全速打过去，风控只会升级。
+    </p>
+    <span class="good2">
+      把 <code>Retry-After</code> 回灌给限流器（清空令牌 + 进入冷却），后续请求自动降速；
+      退避用<b>全抖动指数退避</b>，避免多账号在同一时刻齐步重试形成新尖峰；
+      401/403 不重试（重试也不会变好，只会浪费额度、加剧风控）。
+    </span>
+  </div>
+</div>
+
+<!-- ============================================================ 5 -->
+<h2><span class="num">05</span>「不会影响你正常使用平台」凭什么是真的</h2>
+
+<p class="sub">
+  这是这类工具最该被追问的一点，也是本项目的第一条设计前提。
+  关键在于：它不能是一句宣传语，必须是<b>运行时强制、可被测试断言</b>的约束。
+</p>
+
+<h3>机制一 · 只读守卫（HTTP 层强制）</h3>
+
+<p>
+  守卫包在传输管道的最外层：<b>只读守卫 → 限流/重试 → 真实传输</b>。
+  适配器拿到的就是被包装过的客户端，<b>没有办法绕过</b>。
+</p>
+
+<div class="arch" style="margin:20px 0">
+  <div class="layer">
+    <div class="layer-label"><b>适配器</b><span>发请求</span></div>
+    <div class="layer-items"><span class="chip">fetchCourses · fetchTasks · probeSession</span></div>
+  </div>
+  <div class="arrow"><span>↓</span></div>
+  <div class="layer" style="border-color:#c3cdf5;background:var(--accent-soft)">
+    <div class="layer-label"><b>只读守卫</b><span>强制拦截</span></div>
+    <div class="layer-items">
+      <span class="chip hl">Rule 1 方法白名单</span>
+      <span class="chip hl">Rule 2 显式放行</span>
+      <span class="chip hl">Rule 3 兜底黑名单</span>
+    </div>
+  </div>
+  <div class="arrow"><span>↓ 只有通过检查的才继续</span></div>
+  <div class="layer">
+    <div class="layer-label"><b>限流重试</b><span>令牌桶</span></div>
+    <div class="layer-items"><span class="chip">全局共享配额 · 全抖动退避</span></div>
+  </div>
+  <div class="arrow"><span>↓</span></div>
+  <div class="layer">
+    <div class="layer-label"><b>传输</b><span>fetch</span></div>
+    <div class="layer-items"><span class="chip">平台</span></div>
+  </div>
+</div>
+
+<div class="tw">
+<table>
+<thead><tr><th>规则</th><th>内容</th><th>为什么这样设计</th></tr></thead>
+<tbody>
+<tr>
+  <td class="name">Rule 1</td>
+  <td>默认只允许 <code>GET</code> / <code>HEAD</code></td>
+  <td>绝大多数平台的查询都是 GET，先把面收窄</td>
+</tr>
+<tr>
+  <td class="name">Rule 2</td>
+  <td>任何非安全方法必须在适配器的 <code>readOnlyPolicy.allowPost</code>
+      里<b>逐条声明并写明用途</b></td>
+  <td><b>这份清单本身就是审计材料</b>：想知道这个 app 一共会发多少个"写请求"？
+      把各适配器的 <code>allowPost</code> 读一遍即可，通常只有 1~3 行</td>
+</tr>
+<tr>
+  <td class="name">Rule 3</td>
+  <td>兜底黑名单命中即拒绝，<b>优先级高于白名单</b></td>
+  <td>一处配置失误不应该能破坏整个承诺 —— 即使有人误把提交类路径写进了白名单，也拦得下来</td>
+</tr>
+</tbody>
+</table>
+</div>
+
+<h4>黑名单里那些容易被忽视的路径</h4>
+
+<p>
+  显式的 <code>submit</code> / <code>handin</code> / <code>qiandao</code> 大家都想得到。
+  真正需要警惕的是下面这三类 —— 它们都不是「作弊」，但都会在用户不知情的情况下
+  改变他在平台上的状态：
+</p>
+
+<pre><code><span class="c">// ① 已读回执 —— 会改变通知状态，让用户以为「我已经看过了」</span>
+/(mark-?read|markread|read-?receipt|notice-?read|set-?read)/
+
+<span class="c">// ② 学习行为打点 —— 会让平台记录"你在学"，污染学习数据</span>
+/(study-?record|watch-?log|heartbeat|progress-?report|log-?study|play-?log)/
+
+<span class="c">// ③ 退出登录 —— 一旦调用，用户自己在浏览器里也会被登出</span>
+/\/(logout|signout|sign-out|exit-login)/</code></pre>
+
+<p>
+  另外还要拦 URL 参数里的动作（<code>?action=submit</code>）——
+  很多平台把动作放在 query 里，光看方法分不出来。
+</p>
+
+<h3>机制二 · 会话来源策略（绝不替你重新登录）</h3>
+
+<div class="callout danger">
+  <span class="t">「重新登录」本身就是一次影响正常使用的动作</span>
+  <p>
+    会话失效时，一个看起来最自然的补救措施是「用账号密码再登一次」。
+    但<b>重新登录 = 在服务端创建一个新会话</b>，而多数平台是单点登录或会轮换 token ——
+    那会把用户手机上正在用的那个会话顶下线，或者在别的设备弹出「新设备登录」提示。
+  </p>
+  <p style="margin-top:10px">
+    用户会把这件事归因于「这个破 app 把我挤下线了」，
+    而且他根本不会想到原因出在我们这里。
+  </p>
+</div>
+
+<p>所以会话带一个来源标记，它决定了会话失效时我们能做什么：</p>
+
+<div class="tw">
+<table>
+<thead><tr><th>来源</th><th>含义</th><th>会话失效时</th></tr></thead>
+<tbody>
+<tr>
+  <td><span class="tag ok">imported</span></td>
+  <td>用户从浏览器 / 官方客户端复制出来的</td>
+  <td><b>永远不用账号密码去重新登录。</b>只报错，把决定权交回给用户</td>
+</tr>
+<tr>
+  <td><span class="tag mid">derived</span></td>
+  <td>我们用账号密码独立登录取的</td>
+  <td>允许用户重新登录（并在 UI 上提示可能与官方客户端互踢）</td>
+</tr>
+</tbody>
+</table>
+</div>
+
+<p>
+  用户看到的提示是这样的：
+  <b>「会话已被平台失效。我们不会替你重新登录 —— 那可能会把你正在使用的浏览器/App 顶下线。
+  请你在浏览器或官方客户端里重新登录后，把新的会话凭证粘贴过来。」</b>
+</p>
+
+<div class="callout good">
+  <span class="t">两处工程细节</span>
+  <p>
+    <b>① 引擎从不保存明文密码</b>，所以它在物理上就没有「自动续期」这个能力。
+    但这条规则仍然以注释形式写在 <code>#ensureSession()</code> 上，
+    因为将来如果有人想在这里加自动续期，必须先读那段话。
+  </p>
+  <p style="margin-top:8px">
+    <b>② 提示语集中在一处生成。</b>
+    会话失效可能在过期探测、拉课程、拉任务三个地方被发现，
+    如果各写一遍就会出现「有时候说得很清楚，有时候只丢一句 401」——
+    而这句话直接决定了用户接下来做什么，不能时有时无。
+  </p>
+</div>
+
+<h3>机制三 · 风控友好的节奏</h3>
+
+<div class="tw">
+<table>
+<thead><tr><th>措施</th><th>效果</th></tr></thead>
+<tbody>
+<tr><td class="name">每平台全局共享令牌桶</td><td>同一平台的多个账号共用配额，不会因为多账号而叠加请求量</td></tr>
+<tr><td class="name">课程列表 12 小时 TTL 缓存</td><td>课程是低频变化数据，不必每轮都拉</td></tr>
+<tr><td class="name">429 的 Retry-After 回灌限流器</td><td>不是只 sleep 这一次，而是后续请求整体降速</td></tr>
+<tr><td class="name">全抖动指数退避</td><td>避免多个账号在同一时刻齐步重试，形成新的尖峰</td></tr>
+<tr><td class="name">401 / 403 不重试</td><td>重试也不会变好，只会浪费请求额度、加剧风控</td></tr>
+</tbody>
+</table>
+</div>
+
+<h3>这条承诺是可验证的</h3>
+
+<p>
+  假教学平台里放了一个「危险端点」诱饵（<code>POST /submit</code>，
+  在真实场景里它提交作业答案）。测试<b>主动去尝试提交它</b>，
+  然后断言被拦下、且服务端记录中该请求从未出现。
+</p>
+
+<div class="callout warn">
+  <span class="t">一个从没被尝试过的保护措施，等于没有保护措施</span>
+  <p>
+    只写「我们不会提交作业」是不够的 —— 必须有代码去<b>试图违反</b>它，
+    并且失败。这是这段测试存在的全部意义。
+  </p>
+</div>
+
+<div class="result">
+<span class="d">▌ 场景 14 · 只读守卫与登录态隔离</span>
+<span class="w">   平台收到的请求      19 次  {"POST":2,"GET":17}</span>
+<span class="g">   ✓ 除登录外，平台只收到过 GET 请求</span>
+<span class="g">   ✓ 提交类 POST 被拦截（WRITE_BLOCKED）</span>
+<span class="g">   ✓ 危险端点从未真正收到请求  submitCount=0</span>
+<span class="g">   ✓ 没有产生任何新的登录请求（不会把你顶下线）</span>
+
+<span class="d">▌ 场景 15 · 零流量路线：HAR 录制 → 关闭平台 → 离线回放</span>
+<span class="w">   [ok] 拉取 9 条 · 新增 9 · 请求 2 次   ← 录制阶段（平台在线）</span>
+<span class="g">   ✓ 导出的 HAR 不含任何登录凭证</span>
+<span class="g">   ✓ 导出的 HAR 不含平台下发的会话 cookie</span>
+<span class="d">   [setup] Mock 平台已关闭。现在即使适配器想联网也会失败。</span>
+<span class="w">   [ok] 拉取 9 条 · 新增 0 · 未变 9 · 请求 2 次   ← 回放阶段（平台已关）</span>
+<span class="g">   ✓ 平台已关闭，同步仍然成功</span>
+<span class="g">   ✓ 回放拉到的任务数与真实同步一致</span>
+<span class="g">   ✓ 回放产出的数据与真实同步完全一致（0 新增，全部命中既有记录）</span>
+<span class="g">   ✓ 所有请求都从回放文件精确命中  精确命中 2 次 · 未命中 0 次</span>
+<span class="g">   ✓ 回放得到的任务清单与真实同步完全相同  共 9 条</span>
+
+<span class="w">全部通过：80 通过 / 0 失败</span>
+</div>
+
+<h3>再往下走：换载体，而不是换适配器</h3>
+
+<p class="sub">
+  上面三层机制把影响压到最低，但严格说仍是「少发请求」。
+  再往下还有两级，关键洞察是：<b>把传输层做成 <code>HttpClient</code> 的替身，
+  任何适配器零改动就能换载体。</b>
+</p>
+
+<div class="arch" style="margin:20px 0">
+  <div class="layer">
+    <div class="layer-label"><b>适配器</b><span>不改动</span></div>
+    <div class="layer-items"><span class="chip">chaoxing</span><span class="chip">yuketang</span><span class="chip">ismart</span><span class="chip">…</span></div>
+  </div>
+  <div class="arrow"><span>↓ 照常发请求</span></div>
+  <div class="layer" style="border-color:#dccdf0;background:var(--purple-soft)">
+    <div class="layer-label"><b>载体</b><span>可替换</span></div>
+    <div class="layer-items">
+      <span class="chip core">HAR 回放（0 次请求）</span>
+      <span class="chip core">CDP 附着（借你的浏览器）</span>
+      <span class="chip">共享会话（粘贴 cookie）</span>
+      <span class="chip">独立登录</span>
+    </div>
+  </div>
+  <div class="arrow"><span>↓</span></div>
+  <div class="layer">
+    <div class="layer-label"><b>平台</b><span></span></div>
+    <div class="layer-items"><span class="chip">学习通 · 雨课堂 · iSmart</span></div>
+  </div>
+</div>
+
+<div class="tw">
+<table>
+<thead><tr><th>路线</th><th>对登录态的影响</th><th>向平台发请求</th><th>凭据是否过手</th><th>局限</th><th>状态</th></tr></thead>
+<tbody>
+<tr>
+  <td class="name">HAR 回放</td>
+  <td><span class="tag ok">零</span> 字面意义零请求</td>
+  <td><b>0 次</b></td>
+  <td>否（默认脱敏）</td>
+  <td>是快照，看不到今天新布置的作业</td>
+  <td><span class="tag ok">已实现</span></td>
+</tr>
+<tr>
+  <td class="name">CDP 附着</td>
+  <td><span class="tag ok">零</span> 借你自己的浏览器</td>
+  <td>有，但身份 100% 是你</td>
+  <td><b>否</b>（HttpOnly 对页面 JS 不可见）</td>
+  <td>只能到达该页面能到达的范围（CORS）</td>
+  <td><span class="tag ok">已实现</span></td>
+</tr>
+<tr>
+  <td class="name">共享会话</td>
+  <td><span class="tag mid">低</span> 只读、不续期</td>
+  <td>有（低频）</td>
+  <td>是（你粘贴的）</td>
+  <td>会话会失效，需重新粘贴</td>
+  <td><span class="tag ok">已实现</span></td>
+</tr>
+<tr>
+  <td class="name">独立登录</td>
+  <td><span class="tag no">中</span> 可能互踢</td>
+  <td>有</td>
+  <td>是（密码）</td>
+  <td>与官方客户端冲突</td>
+  <td><span class="tag ok">已实现</span></td>
+</tr>
+<tr>
+  <td class="name">浏览器扩展</td>
+  <td><span class="tag ok">零</span></td>
+  <td>来自用户浏览的页面</td>
+  <td>否</td>
+  <td>单平台、移动端不可用</td>
+  <td><span class="tag gray">规划中</span></td>
+</tr>
+</tbody>
+</table>
+</div>
+
+<h4>路线 A · HAR 录制与回放</h4>
+
+<p>
+  <code>record</code> 命令把一轮同步的响应固化成标准 HAR（<b>默认脱敏且不可关闭</b> ——
+  HAR 里天然含 Cookie 与 Authorization，那是完整登录凭证，而回放只需要响应体）；
+  <code>import-har</code> 则是一个<b>一个真实请求都不发</b>的传输，
+  适配器照常「请求」接口，拿到的是上次抓包的响应。
+</p>
+
+<pre><code><span class="c"># ① 录制（也可以直接用浏览器 DevTools 导出 HAR）</span>
+node apps/cli/src/main.ts record chaoxing 账号 密码 --out capture.har
+
+<span class="c"># ② 之后任何时候离线回放 —— 平台甚至可以完全不在线</span>
+node apps/cli/src/main.ts import-har chaoxing capture.har</code></pre>
+
+<h4>路线 B · CDP 附着（凭据不过手）</h4>
+
+<p>
+  请求是在用户自己的浏览器标签页里发出的，用浏览器自己的会话：
+  不创建任何新会话；cookie 由浏览器自动附带，
+  而 <b>HttpOnly cookie 对页面 JS 不可见</b> —— 我们连读都读不到，更不可能存。
+</p>
+
+<p>
+  这也是 iSmart 这类「客户端是套壳 Chromium」的平台唯一现实的只读路径 ——
+  社区的 iSmartAuto 就是这么发现客户端可以加
+  <code>--remote-debugging-port</code> 的。
+  区别在于：他们用它提交答案，我们只用它读取作业。
+</p>
+
+<div class="gap">
+  <div class="gap-item" style="border-left-color: var(--red)">
+    <h4>踩出来的坑：离线路径必须显式圈定范围</h4>
+    <p>
+      <code>import-har</code> 最初实现时调的是 <code>syncAll()</code>（不带参数），
+      结果引擎把库里<b>所有账号</b>都同步了一遍 —— 包括挂着真实会话的账号，
+      「零网络请求」的承诺被一行代码悄悄破坏了。
+    </p>
+    <span class="good2">两条离线命令都强制传 <code>accountIds: [account.id]</code>。
+      默认行为是全局的，而全局行为对离线场景是危险的。</span>
+  </div>
+</div>
+
+<h3>边界：做不到的部分（诚实交代）</h3>
+
+<div class="gap">
+  <div class="gap-item" style="border-left-color: var(--amber)">
+    <h4>① 无法 100% 保证零影响</h4>
+    <p>
+      平台的风控是黑盒且持续变化。我们能做的是「最小侵入」——
+      低频 + 只读 + 复用用户自己的会话，但不能承诺零影响。
+      如果平台把「同一 cookie 在不同 UA/IP 下并发请求」判为异常，我们无法预知。
+    </p>
+  </div>
+  <div class="gap-item" style="border-left-color: var(--amber)">
+    <h4>② 会话失效是必然的</h4>
+    <p>
+      用户在手机上点了退出登录、或平台策略性地轮换 token，导入的会话就失效了。
+      这时会提示重新粘贴凭证 —— 这是设计，不是缺陷。
+    </p>
+  </div>
+  <div class="gap-item" style="border-left-color: var(--amber)">
+    <h4>③ 不要和官方客户端同时高频使用</h4>
+    <p>
+      部分学校明确禁止账号共享。同时高频使用理论上存在被平台判定为异常的风险，
+      这点需要用户自己评估。
+    </p>
+  </div>
+</div>
+
+<h3>一个更「零影响」的备选形态</h3>
+
+<p>
+  如果连上面这些都想避免，还有一个几乎零侵入的方案：<b>做成浏览器扩展</b>。
+  它直接复用用户浏览器里已有的会话，不新建任何登录，请求也来自用户正在浏览的那个浏览器。
+  代价是只能读用户打开的页面、移动端不可用。
+  核心库一行都不用改 —— 只是换一个壳层（适配器的输入从 HTTP 响应变成页面内容）。
+</p>
+
+<!-- ============================================================ 6 -->
+<h2><span class="num">06</span>验证结果</h2>
+
+<p class="sub">
+  无法在拿到真实账号前验证「逆向结论」是否正确，但完全可以验证
+  <b>「引擎行为」是否正确</b> —— 只要有一个能精准复现平台各种恶劣行为的假平台。
+</p>
+
+<p>
+  <code>packages/adapters/mock</code> 就是这样一个会「使坏」的假教学平台：
+  它能注入 429 限流、5xx 抖动、会话失效、字段改名、任务增删改与脏时间格式，
+  还带一个只读守卫的「危险端点」诱饵。
+  <code>demo</code> 命令跑完 15 个场景、80 项断言。
+</p>
+
+<div class="stats">
+  <div class="stat g"><div class="v">80 / 0</div><div class="l">端到端断言 通过 / 失败</div></div>
+  <div class="stat g"><div class="v">69 / 0</div><div class="l">单元测试 通过 / 失败</div></div>
+  <div class="stat b"><div class="v">15</div><div class="l">端到端场景</div></div>
+  <div class="stat p"><div class="v">0</div><div class="l">运行时依赖</div></div>
+</div>
+
+<div class="result">
+<span class="d">▌ 场景 2 · 首次全量同步（分页 + 归一化 + 指纹兜底）</span>
+<span class="g">   ✓ 拉取到全部 9 条任务</span>
+<span class="g">   ✓ 分页请求数 &gt; 1（每页 3 条）</span>
+<span class="g">   ✓ 无平台 ID 的任务用指纹兜底（fp_ 前缀）</span>
+<span class="g">   ✓ 「还剩 3 天」被锚定成绝对时刻（否则永远到不了期）</span>
+<span class="g">   ✓ 「不限时」识别为开放态</span>
+<span class="g">   ✓ epoch 毫秒被识别为绝对时间</span>
+<span class="g">   ✓ 课程名已通过 courseId 关联补齐</span>
+
+<span class="d">▌ 场景 3 · 重复同步 —— 验证幂等性</span>
+<span class="g">   ✓ 新增 0 条（没有重复入库）</span>
+<span class="g">   ✓ 静默跳过 9 条</span>
+<span class="g">   ✓ 重复提醒 0 条（提醒去重生效）</span>
+
+<span class="d">▌ 场景 4 · 老师提前了截止时间</span>
+<span class="g">   ✓ 新增 0 条 · 更新 1 条 · revision 1 → 2</span>
+<span class="g">   ✓ 变更历史记录了 deadline 变化</span>
+<span class="g">   ✓ 改期后重新触发提醒（提醒 key 含截止时间，自动失效旧记录）</span>
+
+<span class="d">▌ 场景 6 · 平台删除一条任务 —— 验证「防翻页抖动误删」</span>
+<span class="g">   ✓ 第一轮：标记为「疑似消失」而非删除（absentCount=1）</span>
+<span class="g">   ✓ 第二轮：连续缺席后软删除 1 条</span>
+<span class="g">   ✓ 记录仍可追溯（软删除而非硬删除）</span>
+
+<span class="d">▌ 场景 8 · 会话失效</span>
+<span class="g">   ✓ 被识别为 auth-required（而不是崩溃）</span>
+<span class="g">   ✓ 本地数据依然完整</span>
+
+<span class="d">▌ 场景 9 · 平台限流（429 + Retry-After）</span>
+<span class="g">   ✓ 最终同步成功 · retries=1 · throttledMs=1000</span>
+
+<span class="d">▌ 场景 11 · 时间推进 3.1 天</span>
+<span class="g">   ✓ 相对截止时间的锚点未被重置（平台仍返回「还剩 3 天」）</span>
+<span class="g">   ✓ 该任务已逾期，而不是永远显示「还剩 3 天」</span>
+<span class="g">   ✓ 锚定后未产生虚假的「截止时间变更」</span>
+
+<span class="w">全部通过：57 通过 / 0 失败</span>
+</div>
+
+<h2><span class="num">07</span>下一步</h2>
+
+<div class="tw">
+<table>
+<thead><tr><th>优先级</th><th>事项</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td><span class="tag no">P0</span></td><td class="name">真实平台账号校准</td>
+  <td>逐个抓包 → 修正端点表与解析 → 用 <code>HH_LOG=debug</code> 验证。不做这一步，项目只能跑 mock</td></tr>
+<tr><td><span class="tag mid">P1</span></td><td class="name">Tauri 2 桌面壳层</td>
+  <td>核心已就绪，缺 UI、系统通知、开机自启、托盘常驻</td></tr>
+<tr><td><span class="tag mid">P1</span></td><td class="name">凭据存储升级</td>
+  <td>当前用密钥文件；应接 macOS Keychain / Windows Credential Manager / Linux libsecret。<code>KeyProvider</code> 端口已预留</td></tr>
+<tr><td><span class="tag gray">P2</span></td><td class="name">移动壳层</td>
+  <td>需补：后台任务调度、推送通知、免登录本地存储</td></tr>
+<tr><td><span class="tag gray">P2</span></td><td class="name">学期周次坐标系</td>
+  <td>支持教务系统那种「第 4 周周五第 3-4 节」，需引入学期日历</td></tr>
+<tr><td><span class="tag gray">P3</span></td><td class="name">多设备同步 / SQLite</td>
+  <td>核心已是纯函数 + 幂等写入，两种方案都容易接入</td></tr>
+</tbody>
+</table>
+</div>
+
+<div class="callout warn">
+  <span class="t">合规声明</span>
+  <p>
+    本项目<b>只读取</b>作业与考试信息，不包含任何提交答案、自动签到、刷课或绕过考试的功能；
+    也不读取或存储明文密码（只保存平台下发的会话凭证，且 AES-256-GCM 加密落盘）。
+    请遵守所在学校的学术规范与平台用户协议。
+  </p>
+</div>
+
+<footer>
+  HomeworkHub · 调研与架构设计 · 2026-09-22 · 源码位于 <span class="mono">homework-hub/</span>，
+  实现细节见 <span class="mono">docs/设计说明.md</span>，完整验证输出见 <span class="mono">docs/demo-output.txt</span>
+</footer>
+
+</div>
+</body>
+</html>
