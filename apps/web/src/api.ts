@@ -19,6 +19,7 @@ import {
   HubError,
   canSkip,
   validateConfig,
+  normalizeAdapterConfig,
   hasPendingAc,
   ADAPTER_PROMPT,
   ADAPTER_PITFALLS,
@@ -486,7 +487,17 @@ export function createApiHandler(deps: ApiDeps): ApiHandler {
         if (!cfg) {
           return { status: 200, body: { ok: false, error: fallbackError ?? '没有找到接入配置' } };
         }
-        const missing = validateConfig(cfg);
+        // AI 给的是 { platform: {name, origin}, ... }，内部要的是摊平后的形状；
+        // key 由域名派生（它从来不是提示词要求的字段，之前当必填把正确配置全拒了）。
+        const normalized = normalizeAdapterConfig(cfg);
+        // 接口要课程 ID，而 AI 只能给占位符 —— 从用户粘贴的原文里捞一个真实值兜底
+        // （证据包的页面地址里通常就有 ?courseId=11430986）。
+        if (!(normalized as unknown as { defaultCourseId?: string }).defaultCourseId && body.text) {
+          const m = /[?&]courseId=(\d{3,})/.exec(String(body.text));
+          if (m) (normalized as unknown as { defaultCourseId?: string }).defaultCourseId = m[1];
+        }
+        cfg = normalized as unknown as Record<string, unknown>;
+        const missing = validateConfig(normalized);
         if (missing.length > 0) {
           return { status: 200, body: { ok: false, error: `配置还缺：${missing.join('、')}` } };
         }

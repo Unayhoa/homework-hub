@@ -228,6 +228,29 @@ export class DeclarativeAdapter implements PlatformAdapter {
     return { items, hasMore: false, declaredTotal: items.length };
   }
 
+  /**
+   * 替换 URL 里的 `{var}` / `${var}` 占位符。
+   *
+   * 支持 `{pageIndex}`（当前页码）与 `{courseId}`（配置里的 defaultCourseId）。
+   * 拿不到 courseId 时**宁可报错也不发一个 courseId 空值** ——
+   * 空值会返回空列表，用户会以为"这个平台没作业"，其实是配置没填全。
+   */
+  #applyVars(raw: string, page: number): string {
+    let out = raw.replace(/\$?\{pageIndex\}/g, String(page)).replace(/\$?\{page\}/g, String(page));
+    const cid = String((this.#cfg as unknown as { defaultCourseId?: string }).defaultCourseId ?? '');
+    if (/\$?\{courseId\}/.test(out)) {
+      if (!cid) {
+        throw new HubError(
+          'UPSTREAM',
+          `${this.displayName}：这个接口需要课程 ID，但配置里没给（在配置里加 "defaultCourseId"，或把占位符换成具体值）`,
+          { platformId: this.id, requiresUserAction: true },
+        );
+      }
+      out = out.replace(/\$?\{courseId\}/g, encodeURIComponent(cid));
+    }
+    return out;
+  }
+
   async fetchTasks(ctx: AdapterContext, session: Session, _req: FetchTasksRequest): Promise<Page<PlatformTask>> {
     const http = new SessionHttpClient(ctx, session);
     const cfg = this.#cfg;
@@ -240,10 +263,11 @@ export class DeclarativeAdapter implements PlatformAdapter {
     let declaredTotal: number | undefined;
 
     for (let page = 0; page < maxPages; page += 1) {
-      let url = this.#abs(cfg.tasks.url);
-      if (pag.type === 'page' && pag.param) {
-        const v = start + page;
-        url += `${url.includes('?') ? '&' : '?'}${encodeURIComponent(pag.param)}=${v}`;
+      const pageValue = start + page;
+      let url = this.#abs(this.#applyVars(cfg.tasks.url, pageValue));
+      // 配置里已经带了分页参数就不重复拼；没带才追加。
+      if (pag.type === 'page' && pag.param && !url.includes(`${pag.param}=`)) {
+        url += `${url.includes('?') ? '&' : '?'}${encodeURIComponent(pag.param)}=${pageValue}`;
       }
       const res = await http.getJson<unknown>(url);
       const list = getByPath(res.body, cfg.tasks.listPath ?? '$.data');
@@ -303,16 +327,70 @@ export class DeclarativeAdapter implements PlatformAdapter {
   }
 }
 
+/**
+ * 把 AI 给的配置**摊平**成内部用的形状。
+ *
+ * AI 按提示词输出的是 { platform: { name, origin }, tasks, fields }，
+ * 而内部要用的是 { key, name, origin, ... }。更关键的是：**key 从来不是提示词要求的字段**，
+ * 之前把它当必填校验，等于把所有正确的配置都拒了（真机 2026-10-23 就是这么卡住的）。
+ * 所以 key 一律由这里派生，用户/AI 都不用管。
+ */
+export function normalizeAdapterConfig(raw: unknown): AdapterConfig {
+  const o = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+  const platform = (o.platform && typeof o.platform === 'object' ? o.platform : {}) as Record<string, unknown>;
+  const name = String(platform.name ?? o.name ?? '未命名平台').trim();
+  const origin = String(platform.origin ?? o.origin ?? '').trim();
+
+  // key 从域名派生（zhihuishu.com → zhihuishu），拿不到就退回名字的 ASCII 部分
+  let key = '';
+  try {
+    const host = new URL(origin).hostname.replace(/^www\./, '');
+    const parts = host.split('.');
+    key = (parts.length >= 2 ? parts[parts.length - 2] : parts[0]) ?? '';
+  } catch {
+    key = '';
+  }
+  key = key.toLowerCase().replace(/[^a-z0-9-]/g, '');
+  if (!key) {
+    key = name.toLowerCase().replace(/[^a-z0-9-]/g, '').slice(0, 24);
+  }
+  if (!key) key = `p${Math.abs(hashCode(name || origin)).toString(36)}`;
+
+  // AI 常见的笔误：把课程 ID 参数写成了页码占位符（courseId={pageIndex}）。
+  // 那会请求到一个完全不存在的课程，返回空列表，用户以为"平台没作业"。
+  const tasks = { ...((o.tasks ?? { url: '' }) as AdapterConfig['tasks']) };
+  if (typeof tasks.url === 'string') {
+    tasks.url = tasks.url.replace(
+      /([?&]courseId=)(?:\0\{pageIndex\}|\0\{page\})/gi,
+      '\{courseId\}',
+    );
+  }
+
+  return {
+    ...(o as unknown as AdapterConfig),
+    key,
+    name,
+    origin,
+    tasks,
+    fields: (o.fields ?? {}) as AdapterConfig['fields'],
+  };
+}
+
+function hashCode(s: string): number {
+  let h = 0;
+  for (let i = 0; i < s.length; i += 1) h = (h * 31 + s.charCodeAt(i)) | 0;
+  return h;
+}
+
 /** 粗略校验一份配置够不够跑起来。返回缺失项（空数组 = 可用）。 */
 export function validateConfig(cfg: unknown): string[] {
   const missing: string[] = [];
   const c = cfg as Partial<AdapterConfig> | null;
   if (!c || typeof c !== 'object') return ['配置不是一个对象'];
-  if (!c.key || !/^[a-z0-9-]+$/.test(String(c.key))) missing.push('key（只能用小写字母、数字、短横线）');
-  if (!c.name) missing.push('name');
-  if (!c.origin) missing.push('origin');
+  // 只校验"没有它就跑不起来"的两项。name/origin 由 normalize 兜底，key 由域名派生 ——
+  // 它们不是 AI 该负责的东西，卡在这上面等于把正确的配置拒之门外。
   if (!c.tasks || typeof c.tasks !== 'object') missing.push('tasks');
-  else if (!c.tasks.url) missing.push('tasks.url');
+  else if (!(c.tasks as { url?: string }).url) missing.push('tasks.url');
   if (!c.fields || typeof c.fields !== 'object') missing.push('fields');
   else {
     if (!c.fields.title?.path) missing.push('fields.title.path');
