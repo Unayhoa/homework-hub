@@ -196,6 +196,27 @@ export function parseImport(text: string): ParsedImport {
 
   const looksLikeAdapter = typeof o.tasks === 'object' && o.tasks !== null && 'url' in (o.tasks as object);
 
+  // DOM 模式配置：由「点选作业行」当场生成并验证过（rows 一定存在）。
+  // 它没有 tasks 字段，所以要在普通校验之前认出来。
+  if (o.mode === 'dom' && typeof o.rows === 'string' && o.rows) {
+    const url = typeof o.url === 'string' ? o.url : '';
+    if (!url) {
+      return { kind: 'adapter', notes, adapterDraft: json, error: 'DOM 配置缺少要打开的页面地址（url）' };
+    }
+    notes.push(`要打开的页面：${url}`);
+    notes.push(`作业行选择器：${o.rows}（已在本机试抓通过）`);
+    notes.push('确认无误后点「启用为平台」，之后同步会自己打开这个页面读取，不需要 AI');
+    return {
+      kind: 'adapter',
+      notes,
+      adapterDraft: json,
+      platformName:
+        typeof o.platform === 'object' && o.platform !== null
+          ? String((o.platform as Record<string, unknown>).name ?? '')
+          : undefined,
+    };
+  }
+
   if (arr && arr.length > 0 && !looksLikeAdapter) {
     const homework: ImportedHomework[] = [];
     for (const item of arr) {

@@ -167,3 +167,28 @@ describe('预判「这接口需要动态签名」（该走 DOM 模式）', () =>
     assert.equal(looksLikeNeedsSignature('/api/homework?courseId=11430986'), false);
   });
 });
+
+describe('DOM 配置（点选当场生成的）能被导入', () => {
+  const domCfg = JSON.stringify({
+    platform: { name: 'zhihuishu', origin: 'https://wenda.zhihuishu.com' },
+    mode: 'dom',
+    url: 'https://wenda.zhihuishu.com/stu/courseInfo/homeworkExam/?courseId=11430986',
+    readyWhen: '.homework-item',
+    rows: '.homework-item',
+    fields: { title: { find: '.title' }, deadline: { regex: '\\d{4}' } },
+    defaultCourseId: '11430986',
+  });
+
+  it('认成 adapter 而不是"认不出"', () => {
+    const r = parseImport(domCfg);
+    assert.equal(r.kind, 'adapter');
+    assert.equal(r.error, undefined);
+    assert.ok(r.notes.some((n) => n.includes('已在本机试抓通过')));
+  });
+
+  it('缺 url 时说清楚缺什么', () => {
+    const bad = JSON.stringify({ mode: 'dom', rows: '.x', fields: { title: {} } });
+    const r = parseImport(bad);
+    assert.match(String(r.error), /url/);
+  });
+});

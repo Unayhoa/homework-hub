@@ -278,11 +278,49 @@ public class BrowseActivity extends Activity {
                 JSONArray arr = new JSONArray(payload);
                 JSONObject first = arr.optJSONObject(0);
                 String sample = first == null ? "" : first.optString("title");
-                status.setText("✅ 抓到 " + arr.length() + " 条。第一条：" + sample);
+                // 试抓成功就**直接把配置复制出来** —— 用户不用再理解选择器，
+                // 回设置页粘一下就能启用。少一步操作，少一次放弃。
+                String cfg = buildDomConfig(rowSel, fields);
+                copyToClipboard(cfg);
+                status.setText("✅ 抓到 " + arr.length() + " 条。第一条：" + sample
+                        + "\n配置已复制 —— 返回应用 → 设置 → 添加平台 → 粘贴 → 启用");
             } catch (Exception e) {
                 status.setText("试抓结果异常：" + e.getMessage());
             }
         });
+    }
+
+    /** 把刚验证过的选择器拼成一份 DOM 配置（和 API 模式共用同一套导入/启用流程）。 */
+    private String buildDomConfig(String rowSel, JSONObject fields) {
+        String url = webView.getUrl() == null ? "" : webView.getUrl();
+        try {
+            JSONObject platform = new JSONObject();
+            // 名字用域名主体，比"未命名平台"好认；用户以后可以改
+            String host = android.net.Uri.parse(url).getHost();
+            String key = host == null ? "custom" : host.replaceFirst("^www\\.", "").split("\\.")[0];
+            platform.put("name", key);
+            platform.put("origin", "https://" + (host == null ? "" : host));
+
+            JSONObject cfg = new JSONObject();
+            cfg.put("platform", platform);
+            cfg.put("mode", "dom");
+            cfg.put("url", url);
+            cfg.put("readyWhen", rowSel);
+            cfg.put("rows", rowSel);
+            cfg.put("fields", fields);
+            cfg.put("timeoutMs", 20000);
+            // 页面地址里通常带 courseId，存下来：同步时就不用再让用户填
+            String cid = android.net.Uri.parse(url).getQueryParameter("courseId");
+            if (cid != null && !cid.isEmpty()) cfg.put("defaultCourseId", cid);
+            return cfg.toString(2);
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    private void copyToClipboard(String text) {
+        ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+        if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("DOM 配置", text));
     }
 
     /** evaluateJavascript 返回的是 JSON 字符串字面量（带引号、转义），先解一层。 */
