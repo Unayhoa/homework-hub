@@ -690,9 +690,13 @@ function renderPlatformOptions() {
   const options = platforms
     .map((p) => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.displayName)}${p.experimental ? '（实验性）' : ''}</option>`)
     .join('');
-  for (const id of ['platformSelect', 'harPlatform', 'attachPlatform']) {
+  for (const id of ['harPlatform', 'attachPlatform']) {
     $(id).innerHTML = options;
   }
+  // 平台下拉多一个入口：自定义平台本质是「加一个账号」的一种方式，
+  // 所以它应该出现在这一页，而不是设置页。
+  $('platformSelect').innerHTML =
+    options + '<option value="__add_custom">＋ 添加自定义平台…</option>';
 
   // 手机端没有「CDP 附着」这个概念（依赖本机浏览器调试端口）
   if (IS_ANDROID) {
@@ -1447,7 +1451,11 @@ async function enablePlatform() {
   }
   busy(true);
   try {
-    const r = await api('/api/adapter/enable', { method: 'POST', body: JSON.stringify({ text }) });
+    const name = ($('customName')?.value || '').trim();
+    const r = await api('/api/adapter/enable', {
+      method: 'POST',
+      body: JSON.stringify({ text, ...(name ? { name } : {}) }),
+    });
     if (r.ok) {
       $('importResult').textContent = `已启用「${r.name}」—— 现在去账号页同步一次，它就会和内置平台一样工作。`;
       $('importBox').value = '';
@@ -1910,7 +1918,11 @@ async function markCompleted(taskId, completed) {
   }
 }
 $('syncBtn').addEventListener('click', () => doSync());
-$('platformSelect').addEventListener('change', renderMethods);
+$('platformSelect').addEventListener('change', () => {
+  const custom = $('platformSelect').value === '__add_custom';
+  $('customBox').classList.toggle('hidden', !custom);
+  if (!custom) renderMethods();
+});
 $('methodSelect').addEventListener('change', renderFields);
 $('accountSave').addEventListener('click', saveAccount);
 $('harImport').addEventListener('click', () => {

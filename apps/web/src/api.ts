@@ -516,6 +516,10 @@ export function createApiHandler(deps: ApiDeps): ApiHandler {
         const normalized = normalizeAdapterConfig(cfg);
         // 接口要课程 ID，而 AI 只能给占位符 —— 从用户粘贴的原文里捞一个真实值兜底
         // （证据包的页面地址里通常就有 ?courseId=11430986）。
+        // 平台名：配置里的往往是域名（wenda），用户在界面上填的优先
+        if (body.name && String(body.name).trim()) {
+          (normalized as unknown as { name?: string }).name = String(body.name).trim();
+        }
         if (!(normalized as unknown as { defaultCourseId?: string }).defaultCourseId && body.text) {
           const m = /[?&]courseId=(\d{3,})/.exec(String(body.text));
           if (m) (normalized as unknown as { defaultCourseId?: string }).defaultCourseId = m[1];

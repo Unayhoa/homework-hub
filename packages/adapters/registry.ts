@@ -23,7 +23,10 @@ import { PintiaAdapter } from './pintia/src/index.ts';
 export function createProductionRegistry(): AdapterRegistry {
   const registry = new AdapterRegistry();
   registry.register(new ChaoxingAdapter());
-  registry.register(new YuketangAdapter());
+  // 雨课堂主站（www.yuketang.cn）不注册 —— 用户只用长江部署（changjiang.yuketang.cn），
+  // 两个都列出来时容易点错，而且主站的作业模型不同（课次而非作业），实测不可用。
+  // 适配器本体保留，将来要恢复只需放开下面一行。
+  // registry.register(new YuketangAdapter());
   // 长江雨课堂是独立部署，id 会自动变成 yuketang-changjiang
   registry.register(new YuketangAdapter({ baseUrl: 'https://changjiang.yuketang.cn' }));
   registry.register(new IsmartAdapter());
