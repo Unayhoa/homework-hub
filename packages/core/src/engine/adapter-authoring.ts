@@ -202,6 +202,7 @@ function truncate(s: string, max: number): string {
  * 只改错处，风险面小得多。
  */
 export function drillPack(platformId: string, error: string, config: unknown): string {
+  const isDom = (config as { mode?: string } | null)?.mode === 'dom';
   return [
     '# 平台接入诊断',
     '',
@@ -219,9 +220,15 @@ export function drillPack(platformId: string, error: string, config: unknown): s
     '',
     '## 要求',
     '',
-    '1. **只改错的地方**，其余字段原样保留 —— 不要重写、不要精简、不要换风格。',
-    '2. 如果错误信息里的「接口返回」表明地址不对，用证据里出现过的真实地址替换。',
-    '3. 如果表明字段路径不对，按接口返回的真实结构修正 listPath 或 fields.*.path。',
+    isDom
+      ? '1. **只改错的选择器**：readyWhen / rows / fields.*.find，其余原样保留。'
+      : '1. **只改错的地方**，其余字段原样保留 —— 不要重写、不要精简、不要换风格。',
+    isDom
+      ? '2. 报「页面没出现预期元素」= readyWhen 不对；报「抓到 0 条」= rows 不对；报「字段为空」= fields 不对。'
+      : '2. 如果错误信息里的「接口返回」表明地址不对，用证据里出现过的真实地址替换。',
+    isDom
+      ? '3. 改完仍是同一个 mode=dom 的结构，**不要改成接口模式** —— 这个平台的数据只能从页面读。'
+      : '3. 如果表明字段路径不对，按接口返回的真实结构修正 listPath 或 fields.*.path。',
     '4. 只输出完整的修正版 JSON，不要解释。',
     '5. 仍不确定就输出 {"need_more":["还需要什么"],"confidence":0.3}。',
   ].join('\n');

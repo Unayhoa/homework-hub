@@ -445,8 +445,12 @@ async function extractViaBridge(url: string, rule: Record<string, unknown>): Pro
     HH?: Record<string, unknown>;
   };
   const bridge = g.Android;
-  const extract = bridge?.domExtract;
-  if (!extract) {
+  // **不要解构**成 const extract = bridge.domExtract。
+  // Java 桥方法必须在注入对象上调用 —— 解构之后 this 丢了，
+  // Chromium 会抛 "Java bridge method can't be invoked on a non-injected object"，
+  // 看起来像"手机端不支持 DOM 模式"，其实只是 this 没了（真机 2026-10-24）。
+  const hasExtract = typeof bridge?.domExtract === 'function';
+  if (!hasExtract) {
     throw new Error('当前环境没有「后台页面」能力（DOM 模式只在手机端应用里可用）');
   }
 
@@ -487,7 +491,8 @@ async function extractViaBridge(url: string, rule: Record<string, unknown>): Pro
     });
 
     try {
-      extract(id, url, JSON.stringify(rule));
+      // 用可选链调用，this 仍然是 bridge —— 这是桥方法能被执行的前提
+      bridge.domExtract?.(id, url, JSON.stringify(rule));
     } catch (e) {
       clearTimeout(timer);
       waiters.delete(id);

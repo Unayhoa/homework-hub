@@ -297,7 +297,10 @@ public class BrowseActivity extends Activity {
             JSONObject platform = new JSONObject();
             // 名字用域名主体，比"未命名平台"好认；用户以后可以改
             String host = android.net.Uri.parse(url).getHost();
-            String key = host == null ? "custom" : host.replaceFirst("^www\\.", "").split("\\.")[0];
+            // 取域名主体（wenda.zhihuishu.com → zhihuishu）。
+            // 第一段往往只是子域（wenda），拿它当平台名认不出来。
+            String[] parts = host == null ? new String[0] : host.split("\\.");
+            String key = parts.length >= 2 ? parts[parts.length - 2] : (parts.length == 1 ? parts[0] : "custom");
             platform.put("name", key);
             platform.put("origin", "https://" + (host == null ? "" : host));
 
