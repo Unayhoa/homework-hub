@@ -21,7 +21,7 @@ import { completionOrigin, effectiveStatus, hasPendingAc, isTerminalStatus } fro
 import { makeCourseId } from '../domain/ids.ts';
 import { effectiveInstant } from '../domain/deadline.ts';
 import { courseTitle, maskUsername } from '../domain/course.ts';
-import { DeclarativeAdapter, validateConfig } from './declarative-adapter.ts';
+import { DeclarativeAdapter, DomAdapter, validateConfig } from './declarative-adapter.ts';
 import type { AdapterConfig } from './declarative-adapter.ts';
 import { describe, HubError, schemaDrift, toHubError } from '../domain/errors.ts';
 import { isSessionExpired, mayReauthenticate } from '../ports/vault.ts';
@@ -1685,7 +1685,13 @@ export class SyncEngine {
         continue;
       }
       try {
-        this.#registry.register(new DeclarativeAdapter(cfg));
+        // DOM 模式与 API 模式是**平级的两种实现**，按配置里的 mode 选。
+        // 两者都实现 PlatformAdapter，所以上层同步/提醒/变更历史完全一样。
+        const adapter =
+          (cfg as unknown as { mode?: string }).mode === 'dom'
+            ? new DomAdapter(cfg as unknown as ConstructorParameters<typeof DomAdapter>[0])
+            : new DeclarativeAdapter(cfg);
+        this.#registry.register(adapter);
         ids.push(id);
       } catch {
         // 单个配置有问题不该拖垮启动

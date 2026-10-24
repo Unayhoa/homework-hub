@@ -457,6 +457,27 @@ public class MainActivity extends Activity {
         startActivity(i);
     }
 
+    /**
+     * DOM 模式入口：交给 DomExtractor 在后台跑一个页面，结果回给网页层。
+     *
+     * 回调统一走 window.HH.domResult —— 和 httpRequest 的 resolve/reject 是同一套思路：
+     * **所有原生异步都给"成功/失败 + 数据"两态**，绝不静默。
+     */
+    void domExtract(String id, String url, String ruleJson) {
+        final String prefix =
+                "window.HH&&window.HH.domResult&&window.HH.domResult(" + org.json.JSONObject.quote(id) + ",";
+        try {
+            org.json.JSONObject rule = new org.json.JSONObject(ruleJson);
+            DomExtractor.extract(this, url, rule, (ok, payload) ->
+                    webView.evaluateJavascript(
+                            prefix + ok + "," + org.json.JSONObject.quote(payload) + ")", null));
+        } catch (Exception e) {
+            webView.evaluateJavascript(
+                    prefix + "false," + org.json.JSONObject.quote("提取规则格式不对：" + e.getMessage()) + ")",
+                    null);
+        }
+    }
+
     /** 打开「录制新平台」窗口（设置页 → 添加平台）。 */
     void openCapturePage(String prompt) {
         android.content.Intent i = new android.content.Intent(this, BrowseActivity.class);

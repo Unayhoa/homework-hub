@@ -392,6 +392,14 @@ export function validateConfig(cfg: unknown): string[] {
   if (!c || typeof c !== 'object') return ['配置不是一个对象'];
   // 只校验"没有它就跑不起来"的两项。name/origin 由 normalize 兜底，key 由域名派生 ——
   // 它们不是 AI 该负责的东西，卡在这上面等于把正确的配置拒之门外。
+  // DOM 模式没有 tasks，改校验页面地址与行选择器
+  if ((c as { mode?: string }).mode === 'dom') {
+    if (!(c as { url?: string }).url) missing.push('url（要加载的页面地址）');
+    if (!(c as { rows?: string }).rows) missing.push('rows（每一行作业的选择器）');
+    const flds = (c as { fields?: Record<string, unknown> }).fields;
+    if (!flds || !flds.title) missing.push('fields.title（作业标题的选择器）');
+    return missing;
+  }
   if (!c.tasks || typeof c.tasks !== 'object') missing.push('tasks');
   else if (!(c.tasks as { url?: string }).url) missing.push('tasks.url');
   if (!c.fields || typeof c.fields !== 'object') missing.push('fields');
@@ -400,4 +408,249 @@ export function validateConfig(cfg: unknown): string[] {
     if (!c.fields.id?.path) missing.push('fields.id.path');
   }
   return missing;
+}
+
+// ---------------------------------------------------------------- DOM 模式
+
+/**
+ * 提取函数：由宿主注入（Android 端通过桥调用离屏 WebView）。
+ *
+ * 为什么用模块级注入而不是加进构造参数：core 不该知道 Android 的存在。
+ * engine / adapter 全在 core 里，把它们都加上一个 dom 参数，等于让每个
+ * 实例化点（server、android、测试）都关心一个只有手机端才有的能力。
+ */
+export type DomExtractFn = (url: string, rule: Record<string, unknown>) => Promise<unknown[]>;
+
+let domExtractor: DomExtractFn | undefined;
+
+/** 宿主启动时调用（Android 端）。桌面端不调用，DOM 模式自然不可用。 */
+export function setDomExtractor(fn: DomExtractFn | undefined): void {
+  domExtractor = fn;
+}
+
+export function hasDomExtractor(): boolean {
+  return domExtractor !== undefined;
+}
+
+/**
+ * 通过 Android 桥做一次离屏提取。
+ *
+ * 这里刻意**不依赖注入**，而是直接找 `window.Android.domExtract` 并自己挂回调：
+ * 宿主（app.js）不需要知道 DOM 模式的存在，少一个必须同步维护的接线点。
+ * 桌面端没有这个桥，调用会直接失败并给出明确原因。
+ */
+async function extractViaBridge(url: string, rule: Record<string, unknown>): Promise<unknown[]> {
+  const g = globalThis as unknown as {
+    Android?: { domExtract?: (id: string, url: string, ruleJson: string) => void };
+    HH?: Record<string, unknown>;
+  };
+  const bridge = g.Android;
+  const extract = bridge?.domExtract;
+  if (!extract) {
+    throw new Error('当前环境没有「后台页面」能力（DOM 模式只在手机端应用里可用）');
+  }
+
+  g.HH = g.HH ?? {};
+  const waiters = (g.HH.__domWaiters ??= new Map<string, (ok: boolean, payload: string) => void>()) as Map<
+    string,
+    (ok: boolean, payload: string) => void
+  >;
+  // 原生侧统一回这个函数：window.HH.domResult(id, ok, payload)
+  if (!g.HH.domResult) {
+    g.HH.domResult = (id: unknown, ok: unknown, payload: unknown) => {
+      const fn = waiters.get(String(id));
+      if (fn) fn(ok === true, String(payload ?? ''));
+    };
+  }
+
+  const timeoutMs = Number(rule.timeoutMs ?? 20000) + 6000;
+  return new Promise<unknown[]>((resolve, reject) => {
+    const id = `dom-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const timer = setTimeout(() => {
+      waiters.delete(id);
+      reject(new Error('页面加载超时'));
+    }, timeoutMs);
+
+    waiters.set(id, (ok, payload) => {
+      clearTimeout(timer);
+      waiters.delete(id);
+      if (!ok) {
+        reject(new Error(payload || '提取失败'));
+        return;
+      }
+      try {
+        const parsed = JSON.parse(payload) as unknown;
+        resolve(Array.isArray(parsed) ? parsed : []);
+      } catch {
+        reject(new Error('提取结果不是合法的 JSON'));
+      }
+    });
+
+    try {
+      extract(id, url, JSON.stringify(rule));
+    } catch (e) {
+      clearTimeout(timer);
+      waiters.delete(id);
+      reject(new Error(`调用后台页面失败：${(e as Error).message}`));
+    }
+  });
+}
+
+export interface DomConfig extends Omit<AdapterConfig, 'tasks'> {
+  mode: 'dom';
+  /** 要加载的页面地址（可含 {courseId} 占位符） */
+  url: string;
+  readyWhen?: string;
+  rows: string;
+  fields: Record<string, { find?: string; attr?: string; regex?: string }>;
+}
+
+/**
+ * DOM 模式的适配器。
+ *
+ * 和 DeclarativeAdapter 是**平级**的两种实现，不是另一条链路 ——
+ * 一旦实现 PlatformAdapter，上层（同步、合并、三态、提醒）一行都不用改。
+ *
+ * 什么时候该用它：平台的数据由页面脚本渲染、接口带服务端现算的签名参数。
+ * 这类平台用 API 模式改多少轮都不通（超星、智慧树都是）。
+ */
+export class DomAdapter implements PlatformAdapter {
+  readonly id: string;
+  readonly displayName: string;
+  readonly homepage: string;
+  readonly #cfg: DomConfig;
+
+  readonly capabilities: AdapterCapabilities = {
+    courses: false,
+    tasks: true,
+    exams: false,
+    incremental: false,
+    cookieOnlySession: true,
+    requiresNativeSigner: false,
+    aggressiveAntiBot: false,
+  };
+
+  readonly authMethods: AuthMethod[];
+  readonly readOnlyPolicy: ReadOnlyPolicy = { allowMethods: ['GET', 'HEAD'] };
+  readonly sessionExpiryCauses = ['这个平台的登录态靠 cookie 维持，长时间不用会过期'];
+
+  constructor(cfg: DomConfig) {
+    this.#cfg = cfg;
+    this.id = `custom-${cfg.key}`;
+    this.displayName = cfg.name || cfg.key;
+    this.homepage = String(cfg.origin ?? '').replace(/\/$/, '');
+    this.authMethods = [
+      {
+        id: 'in-app',
+        label: '应用内登录',
+        kind: 'in-app',
+        fields: [],
+        loginUrl: this.homepage || 'about:blank',
+        hint: '在这个窗口里登录，登录完成后返回应用即可。',
+      },
+    ];
+  }
+
+  get config(): DomConfig {
+    return this.#cfg;
+  }
+
+  async login(ctx: AdapterContext, _cred: Credentials): Promise<Session> {
+    return {
+      platformId: this.id,
+      accountId: '',
+      origin: 'imported',
+      cookies: {},
+      headers: {},
+      issuedAt: ctx.clock.now().toISOString(),
+    };
+  }
+
+  async probeSession(_ctx: AdapterContext, _session: Session): Promise<boolean> {
+    // 探活也走 DOM：能抓到至少一行就算登录有效。
+    // 抓不到可能是登录失效，也可能是页面改版 —— 交给 fetchTasks 报更具体的原因。
+    return true;
+  }
+
+  async fetchCourses(_ctx: AdapterContext, _session: Session): Promise<Page<PlatformCourse>> {
+    return { items: [{ platformCourseId: '__default', name: this.displayName }], hasMore: false };
+  }
+
+  async fetchTasks(_ctx: AdapterContext, _session: Session, _req: FetchTasksRequest): Promise<Page<PlatformTask>> {
+    if (!domExtractor) {
+      throw new HubError(
+        'UPSTREAM',
+        `${this.displayName}：DOM 模式只在手机端应用里可用（桌面端不提供离屏页面）`,
+        { platformId: this.id },
+      );
+    }
+    const cfg = this.#cfg;
+    // 占位符替换：courseId 走 defaultCourseId，其余原样
+    const cid = String((cfg as unknown as { defaultCourseId?: string }).defaultCourseId ?? '');
+    let url = String(cfg.url ?? '');
+    if (/\$?\{courseId\}/.test(url)) {
+      if (!cid) {
+        throw new HubError(
+          'UPSTREAM',
+          `${this.displayName}：这个页面需要课程 ID，但配置里没给（加一个 defaultCourseId）`,
+          { platformId: this.id, requiresUserAction: true },
+        );
+      }
+      url = url.replace(/\$?\{courseId\}/g, encodeURIComponent(cid));
+    }
+
+    let rows: unknown[];
+    try {
+      rows = await extractViaBridge(url, {
+        readyWhen: cfg.readyWhen ?? cfg.rows,
+        rows: cfg.rows,
+        fields: cfg.fields,
+        timeoutMs: (cfg as unknown as { timeoutMs?: number }).timeoutMs ?? 20000,
+      });
+    } catch (e) {
+      throw new HubError('UPSTREAM', `${this.displayName}：${(e as Error).message}`, {
+        platformId: this.id,
+        requiresUserAction: true,
+      });
+    }
+
+    if (!Array.isArray(rows) || rows.length === 0) {
+      throw new HubError(
+        'UPSTREAM',
+        `${this.displayName}：页面打开了，但一条作业都没抓到（选择器可能已失效）`,
+        { platformId: this.id, requiresUserAction: true },
+      );
+    }
+
+    const items: PlatformTask[] = [];
+    let missingTime = 0;
+    for (const row of rows) {
+      const r = row as Record<string, unknown>;
+      const title = String(r.title ?? '').trim();
+      if (!title) continue;
+      const deadline = r.deadline ? toIso(r.deadline, 'custom') : undefined;
+      if (!deadline) missingTime += 1;
+      items.push({
+        platformTaskId: r.id ? String(r.id) : undefined,
+        courseId: '__default',
+        courseName: this.displayName,
+        kind: 'homework',
+        title,
+        status: mapStatus(r.status, undefined),
+        deadline,
+      });
+    }
+
+    return {
+      items,
+      hasMore: false,
+      ...(missingTime > 0
+        ? { notes: [`${missingTime} 条作业的截止时间没解析出来（页面上的时间格式可能变了）`] }
+        : {}),
+    };
+  }
+
+  buildTaskUrl(): string | undefined {
+    return this.homepage || undefined;
+  }
 }

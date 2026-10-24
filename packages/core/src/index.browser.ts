@@ -126,7 +126,7 @@ export type {
 
 export { mergeTasks, materializeTask, diffTask, DEFAULT_MERGE_OPTIONS } from './engine/merge.ts';
 export { ADAPTER_PROMPT, ADAPTER_PITFALLS, buildEvidencePack, drillPack } from './engine/adapter-authoring.ts';
-export { DeclarativeAdapter, validateConfig, normalizeAdapterConfig, getByPath, mapStatus } from './engine/declarative-adapter.ts';
+export { DeclarativeAdapter, DomAdapter, validateConfig, normalizeAdapterConfig, setDomExtractor, hasDomExtractor, getByPath, mapStatus } from './engine/declarative-adapter.ts';
 export type { AdapterConfig } from './engine/declarative-adapter.ts';
 export type { MergePlan, MergeOptions, TaskEvent } from './engine/merge.ts';
 

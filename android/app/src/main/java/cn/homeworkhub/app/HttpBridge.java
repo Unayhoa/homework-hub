@@ -95,10 +95,20 @@ public class HttpBridge {
         activity.runOnUiThread(() -> activity.openBrowsePage(url, referer));
     }
 
+    /**
+     * DOM 模式：离屏加载页面并按选择器抓表格。结果通过 window.HH.domResult(id, ok, payload) 回来。
+     *
+     * 走桥而不是让 JS 自己开窗口，是因为「创建 WebView」这件事只有原生能做，
+     * 而且必须复用系统 CookieManager 里已有的登录态。
+     */
+    @android.webkit.JavascriptInterface
+    public void domExtract(final String id, final String url, final String ruleJson) {
+        activity.domExtract(id, url, ruleJson);
+    }
+
     /** 打开「录制新平台」界面：注入记录器 → 用户操作 → 导出证据包给 AI。 */
     @android.webkit.JavascriptInterface
-    public void openCapture(final String prompt) {
-        activity.runOnUiThread(() -> activity.openCapturePage(prompt));
+    public void openCapture(final String prompt) {        activity.runOnUiThread(() -> activity.openCapturePage(prompt));
     }
 
     @android.webkit.JavascriptInterface
