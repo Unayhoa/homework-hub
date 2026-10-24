@@ -141,6 +141,23 @@ export function normalizeDeadline(v: unknown): string | undefined {
   return Number.isFinite(iso.getTime()) ? iso.toISOString() : undefined;
 }
 
+/**
+ * 判断一个接口地址是否依赖「页面现算」的签名参数。
+ *
+ * 这类参数（key / uuid / sign / token / nonce / timestamp / dateFormate）由前端 JS 生成，
+ * 寿命往往只有几十秒。声明式配置**拿不到**它们 —— 这不是配置写错了，是原理上不可行。
+ *
+ * 真机案例：智慧树 ?key={uuid}&dateFormate=${dateFormate}。
+ * 之前让用户点启用、同步失败、再回来诊断，绕了一大圈；在导入这一步就该拦住。
+ */
+export function looksLikeNeedsSignature(url: string): boolean {
+  if (!url) return false;
+  // 显式占位符：{uuid} / ${sign} / {dateFormate}
+  if (/\$?\{[^}]*(uuid|sign|token|nonce|timestamp|dateformate)[^}]*\}/i.test(url)) return true;
+  // query 里出现签名类参数名（即使有值，那个值也是短命的）
+  return /[?&](key|uuid|sign|signature|token|nonce|timestamp|dateformate|secretstr)=/i.test(url);
+}
+
 /** 平台报的状态 → 这个应用里算不算"已经不用做了"。 */
 export function looksDone(status: unknown): boolean {
   const s = String(status ?? '');
@@ -234,7 +251,17 @@ export function parseImport(text: string): ParsedImport {
     }
     notes.push(`作业列表接口：${url}`);
     if (missing.length > 0) notes.push(`缺少关键字段映射：${missing.join('、')}`);
-    notes.push('这条配置暂时只能保存，还不能自动同步（需要配置执行器，尚未实现）');
+    // 关键判断：接口里出现动态签名参数，API 模式**原理上**跑不通。
+    // 与其让用户点启用、同步失败、再回来诊断，不如在导入这一步就说清楚。
+    // 真机例（智慧树）：?key={uuid}&dateFormate=${dateFormate} —— 这两个由页面 JS 现算。
+    if (looksLikeNeedsSignature(url)) {
+      notes.push(
+        '⚠️ 这个接口要带动态签名参数（key / uuid / sign / dateFormate 之类），它们由页面脚本现算，' +
+          'App 拿不到。这类平台要走 DOM 模式（直接读页面表格），API 模式改多少轮都不会通。',
+      );
+    } else {
+      notes.push('确认无误后点「启用为平台」，它就会和内置平台一样同步');
+    }
     return {
       kind: 'adapter',
       notes,

@@ -13,6 +13,7 @@ import assert from 'node:assert/strict';
 import {
   extractJson,
   looksDone,
+  looksLikeNeedsSignature,
   normalizeDeadline,
   parseImport,
 } from '../../../apps/web/src/adapter-import.ts';
@@ -111,7 +112,7 @@ describe('识别「接入配置」格式（另一种可能）', () => {
     assert.equal(r.kind, 'adapter');
     assert.equal(r.error, undefined);
     assert.ok(r.notes.some((n) => n.includes('/api/homework')));
-    assert.ok(r.notes.some((n) => n.includes('还不能自动同步')));
+    assert.ok(r.notes.some((n) => n.includes('启用为平台')), '应提示可以启用');
   });
 
   it('配置缺少作业列表地址时，明确说缺什么', () => {
@@ -152,5 +153,17 @@ describe('修复 AI 造成的 JSON 破损', () => {
 
   it('正常 JSON 不受影响', () => {
     assert.deepEqual(extractJson('{"a":"b","c":[1,2]}'), { a: 'b', c: [1, 2] });
+  });
+});
+
+describe('预判「这接口需要动态签名」（该走 DOM 模式）', () => {
+  it('智慧树那种 key={uuid} / dateFormate 能被识别', () => {
+    const url = 'https://hiexam-server.zhihuishu.com/x?courseId=1&key={uuid}&dateFormate=${dateFormate}';
+    assert.equal(looksLikeNeedsSignature(url), true);
+  });
+
+  it('普通课程接口不该误判', () => {
+    assert.equal(looksLikeNeedsSignature('/api/courses/1/assignments?page=1'), false);
+    assert.equal(looksLikeNeedsSignature('/api/homework?courseId=11430986'), false);
   });
 });
