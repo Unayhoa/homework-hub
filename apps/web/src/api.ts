@@ -281,8 +281,31 @@ export function createApiHandler(deps: ApiDeps): ApiHandler {
     });
   }
 
+  /**
+   * 确保「用户添加的平台」已注册进适配器表。
+   *
+   * 配置持久化在库里，但注册表是内存态：**进程一重启就空了**。
+   * 之前只在启用那一刻注册过，于是重启后同步直接报「未找到平台适配器」——
+   * 看起来像配置丢了，其实是没人把它变成适配器。
+   */
+  let customLoaded = false;
+  async function ensureCustomAdaptersLoaded(): Promise<void> {
+    if (customLoaded) return;
+    await deps.engine.loadCustomAdapters();
+    customLoaded = true;
+  }
+
   async function handle(req: ApiRequest): Promise<ApiResponse> {
     const { method, pathname: path, search } = req;
+
+    // 「用户自己添加的平台」配置存在库里，但注册表是内存态 —— 每次进程启动都是空的。
+    // 之前只在「启用」那一刻注册过，于是重启后同步会报「未找到平台适配器 custom-xxx」：
+    // 配置明明在，就是没人把它变成适配器。所以每个请求进门前都确保注册一次（幂等）。
+    try {
+      await ensureCustomAdaptersLoaded();
+    } catch {
+      // 注册失败不该让整个 API 挂掉；具体哪些平台不可用会在同步日志里体现
+    }
 
     try {
       const parseBody = (): Record<string, unknown> => {
