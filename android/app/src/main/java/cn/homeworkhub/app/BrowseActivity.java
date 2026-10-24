@@ -123,7 +123,7 @@ public class BrowseActivity extends Activity {
         status.setTextColor(Color.GRAY);
         status.setPadding(24, 2, 24, 6);
         status.setText(recording
-                ? "① 打开平台并登录  ② 点进「作业列表」  ③ 点「标记为列表页」  ④ 导出给 AI"
+                ? "① 打开平台并登录  ② 点进「作业列表」  ③ 点「点选作业行」，再点一条作业标题"
                 : "");
         root.addView(status);
 

@@ -1919,10 +1919,30 @@ async function markCompleted(taskId, completed) {
 }
 $('syncBtn').addEventListener('click', () => doSync());
 $('platformSelect').addEventListener('change', () => {
-  const custom = $('platformSelect').value === '__add_custom';
-  $('customBox').classList.toggle('hidden', !custom);
-  if (!custom) renderMethods();
+  setCustomMode($('platformSelect').value === '__add_custom');
 });
+
+/**
+ * 自定义平台模式下的界面互斥。
+ *
+ * 两块必须**完全互斥**。真机反馈过三种混乱：选了自定义平台却还能选登录方式、
+ * 切回普通平台后自定义的按钮还留着、超星的「保存」和自定义的「开始录制」同时出现。
+ * 根因是之前只切了 customBox 一个元素，其余各自管各自的显隐。
+ */
+function setCustomMode(on) {
+  $('customBox').classList.toggle('hidden', !on);
+  const methodLabel = $('methodSelect').closest('label');
+  for (const el of [methodLabel, $('fieldArea'), $('accountSave'), $('methodHint')]) {
+    if (el) el.classList.toggle('hidden', on);
+  }
+  if (on) {
+    $('captchaRow').classList.add('hidden');
+    $('saveCredRow').classList.add('hidden');
+  } else {
+    // 回到普通平台时，让原有逻辑重新算一遍（验证码 / 记住密码由平台能力决定）
+    renderMethods();
+  }
+}
 $('methodSelect').addEventListener('change', renderFields);
 $('accountSave').addEventListener('click', saveAccount);
 $('harImport').addEventListener('click', () => {

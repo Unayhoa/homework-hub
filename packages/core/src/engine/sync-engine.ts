@@ -1716,6 +1716,33 @@ export class SyncEngine {
     }
   }
 
+  /**
+   * 删掉一份自定义平台配置（账号被移除时调用）。
+   *
+   * 不删会出现"幽灵平台"：账号没了，但配置还在库里，
+   * 下次启动 loadCustomAdapters 又把它注册回来，平台下拉里留着一项点进去什么都没有。
+   */
+  async deleteCustomAdapter(platformId: string): Promise<void> {
+    const key = platformId.replace(/^custom-/, '');
+    const c = await this.#store.getCursor('__system', 'custom-adapters');
+    if (!c?.cursor) return;
+    let list: unknown[] = [];
+    try {
+      const v = JSON.parse(c.cursor);
+      if (Array.isArray(v)) list = v;
+    } catch {
+      return;
+    }
+    const rest = list.filter((x) => (x as { key?: string } | null)?.key !== key);
+    if (rest.length === list.length) return;
+    await this.#store.setCursor({
+      accountId: '__system',
+      kind: 'custom-adapters',
+      cursor: JSON.stringify(rest),
+      updatedAt: this.#clock.now().toISOString(),
+    });
+  }
+
   /** 保存/覆盖一份自定义平台配置（按 key 去重）。 */
   async saveCustomAdapter(cfg: AdapterConfig): Promise<void> {
     const c = await this.#store.getCursor('__system', 'custom-adapters');

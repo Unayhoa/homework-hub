@@ -539,6 +539,9 @@ export function createApiHandler(deps: ApiDeps): ApiHandler {
         await deps.engine.registerOfflineAccount(platformId, 'web', {
           label: c.name,
           freshLogin: true,
+          // 用户点了「启用为平台」—— 这就是明确确认。
+          // 否则会撞上'这个账号此前已被你移除'的墓碑保护，而界面上并没有第二个确认键。
+          explicit: true,
         });
         return { status: 200, body: { ok: true, platformId, name: c.name } };
       }
@@ -886,9 +889,18 @@ export function createApiHandler(deps: ApiDeps): ApiHandler {
       if (method === 'POST' && path === '/api/account/remove') {
         const accountId = String(parseBody().accountId ?? '');
         if (!accountId) throw new Error('缺少 accountId');
+        const acc = (await deps.engine.listAccounts()).find((a) => a.id === accountId);
         // 走引擎而不是直接删存储：引擎会同时留下墓碑并立即落盘 ——
         // 否则下次从平台页返回时账号会被静默重建（真机踩过）。
         await deps.engine.removeAccount(accountId);
+        // 自定义平台：账号删了，它那份「平台配置」也得一起删。
+        // 否则下次启动 loadCustomAdapters 又把适配器注册回来，
+        // 平台下拉里留一个没有账号的幽灵项（真机反馈过）。
+        if (acc?.platformId?.startsWith('custom-')) {
+          await deps.engine.deleteCustomAdapter(acc.platformId);
+          deps.registry.unregister(acc.platformId);
+          customLoaded = false; // 下次请求重新加载，避免注册表里留着已删的
+        }
         return { status: 200, body: { ok: true } };
       }
 
