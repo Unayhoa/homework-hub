@@ -577,13 +577,10 @@ export class DomAdapter implements PlatformAdapter {
   }
 
   async fetchTasks(_ctx: AdapterContext, _session: Session, _req: FetchTasksRequest): Promise<Page<PlatformTask>> {
-    if (!domExtractor) {
-      throw new HubError(
-        'UPSTREAM',
-        `${this.displayName}：DOM 模式只在手机端应用里可用（桌面端不提供离屏页面）`,
-        { platformId: this.id },
-      );
-    }
+    // 不要在这里检查 domExtractor —— 真正的可用性判断在 extractViaBridge 里
+    //（它找的是 window.Android.domExtract）。之前这里多了一道「模块变量是否注入」的检查，
+    // 而宿主根本不注入（改成直接找桥了），于是每次同步都在这里被拦下：
+    // 报「DOM 模式只在手机端可用」，而实际手机端完全能跑。
     const cfg = this.#cfg;
     // 占位符替换：courseId 走 defaultCourseId，其余原样
     const cid = String((cfg as unknown as { defaultCourseId?: string }).defaultCourseId ?? '');
