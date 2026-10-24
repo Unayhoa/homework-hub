@@ -132,3 +132,25 @@ describe('基础工具', () => {
     assert.equal(normalizeDeadline('不是时间'), undefined);
   });
 });
+
+describe('修复 AI 造成的 JSON 破损', () => {
+  it('字符串里的裸双引号（真机原文）能被救回来', () => {
+    // 2026-10-23 智慧树那次：AI 在 note 里写了 status为"200"，直接弄坏 JSON
+    const broken = `{
+      "probe": { "note": "响应体业务status为"200"且包含rt字段则登录有效" },
+      "tasks": { "url": "https://x/api?courseId=1", "listPath": "$.rt.list" }
+    }`;
+    const r = parseImport(broken);
+    assert.equal(r.kind, 'adapter');
+    assert.ok(r.adapterDraft, '必须能解析出来');
+  });
+
+  it('中文引号和尾逗号也能处理', () => {
+    const broken = '{ "a": “x”, "b": 1, }';
+    assert.deepEqual(extractJson(broken), { a: 'x', b: 1 });
+  });
+
+  it('正常 JSON 不受影响', () => {
+    assert.deepEqual(extractJson('{"a":"b","c":[1,2]}'), { a: 'b', c: [1, 2] });
+  });
+});

@@ -37,6 +37,49 @@ export interface ParsedImport {
   error?: string;
 }
 
+/**
+ * 修复 AI 常见的 JSON 破损。
+ *
+ * 真机实例（2026-10-23）：AI 在 note 里写 `响应体业务status为"200"且...`，
+ * 字符串内部的裸双引号直接把 JSON 弄坏了 —— 用户看到的是"没有找到 JSON"。
+ * 这类错误 AI 每天都在犯，不该让用户去手工转义。
+ *
+ * 做法：走一遍字符流，判断每个 `"` 是「字符串结束」还是「内容里的引号」。
+ * 判据是它后面紧跟的字符：JSON 里字符串结束后面只可能是 `,` `}` `]` `:`。
+ */
+export function repairJson(s: string): string {
+  const src = s.replace(/[\u201c\u201d]/g, '"'); // 中文引号 → 英文
+  let out = '';
+  let inStr = false;
+  for (let i = 0; i < src.length; i += 1) {
+    const c = src[i]!;
+    if (inStr) {
+      if (c === '\\') {
+        out += c + (src[i + 1] ?? '');
+        i += 1;
+        continue;
+      }
+      if (c === '"') {
+        const rest = src.slice(i + 1).replace(/^\s+/, '');
+        const next = rest[0];
+        if (next === ':' || next === ',' || next === '}' || next === ']' || next === undefined) {
+          inStr = false;
+          out += c;
+        } else {
+          out += '\\"';
+        }
+        continue;
+      }
+      out += c;
+    } else {
+      if (c === '"') inStr = true;
+      out += c;
+    }
+  }
+  // 尾逗号：`,` 后面直接跟 `}` 或 `]`
+  return out.replace(/,\s*([}\]])/g, '$1');
+}
+
 /** 从 AI 回复里抠出 JSON —— 它经常裹在 ```json 里，或者前后带解释文字。 */
 export function extractJson(text: string): unknown | null {
   const raw = String(text ?? '').trim();
@@ -58,7 +101,13 @@ export function extractJson(text: string): unknown | null {
       const v = JSON.parse(c) as unknown;
       if (v && typeof v === 'object') return v;
     } catch {
-      // 继续试下一个候选
+      // 原样解析失败 → 修一遍再试（裸引号 / 中文引号 / 尾逗号）
+      try {
+        const v = JSON.parse(repairJson(c)) as unknown;
+        if (v && typeof v === 'object') return v;
+      } catch {
+        // 继续试下一个候选
+      }
     }
   }
   return null;
@@ -168,7 +217,8 @@ export function parseImport(text: string): ParsedImport {
   // ── 配置型：有 tasks.url 与 fields ──
   if (looksLikeAdapter || (o.tasks && o.fields)) {
     const tasks = o.tasks as Record<string, unknown>;
-    const fields = o.fields as Record<string, unknown>;
+    // fields 可能整个缺失（AI 有时只给 tasks）—— 不能假设它存在
+    const fields = (o.fields && typeof o.fields === 'object' ? o.fields : {}) as Record<string, unknown>;
     const url = typeof tasks.url === 'string' ? tasks.url : '';
     if (!url) {
       return {
