@@ -104,10 +104,9 @@ public class BrowseActivity extends Activity {
             bar.addView(open, weight(1f));
 
             Button mark = new Button(this);
-            mark.setText("标记为列表页");
+            mark.setText("点选作业行");
             mark.setAllCaps(false);
-            mark.setOnClickListener(v -> webView.evaluateJavascript(
-                    "window.__hhMark&&window.__hhMark('list_view')", null));
+            mark.setOnClickListener(v -> pickAndTest());
             bar.addView(mark, weight(1.3f));
 
             Button export = new Button(this);
@@ -213,6 +212,77 @@ public class BrowseActivity extends Activity {
                         toast("导出失败：" + e.getMessage());
                     }
                 });
+    }
+
+    /**
+     * 点选 + 当场试抓。
+     *
+     * 这是 DOM 模式对用户唯一「立刻能判断对错」的入口：
+     * 不用等同步、不用问 AI —— 点一下就知道这个选择器能不能抓到作业。
+     */
+    private void pickAndTest() {
+        status.setText("请在页面上点一下任意一条作业的标题");
+        webView.evaluateJavascript("window.__hhPickStart&&window.__hhPickStart()", null);
+        pollPick(0);
+    }
+
+    private void pollPick(int attempt) {
+        webView.evaluateJavascript("window.__hhTakePick?window.__hhTakePick():'null'", v -> {
+            String json = DomExtractor.decodeJsString(v);
+            if (json == null || json.equals("null")) {
+                if (attempt < 120) {
+                    new android.os.Handler(android.os.Looper.getMainLooper())
+                            .postDelayed(() -> pollPick(attempt + 1), 500);
+                }
+                return;
+            }
+            try {
+                handlePick(new JSONObject(json));
+            } catch (Exception e) {
+                status.setText("点选结果解析失败：" + e.getMessage());
+            }
+        });
+    }
+
+    private void handlePick(JSONObject r) throws Exception {
+        if (!r.optBoolean("ok")) {
+            status.setText("没识别出来：" + r.optString("error"));
+            return;
+        }
+        String rowSel = r.optString("rowSelector");
+        String titleSel = r.optString("titleSelector");
+
+        JSONObject fields = new JSONObject();
+        JSONObject title = new JSONObject();
+        if (!titleSel.isEmpty()) title.put("find", titleSel);
+        fields.put("title", title);
+        // 截止时间不让人再点一次：行内文本里能匹配到日期就用它。
+        // 匹配不到只是这一列为空，不影响"能抓到几条"这个判断。
+        JSONObject dl = new JSONObject();
+        dl.put("regex", "(\\d{4}[-/.年]\\d{1,2}[-/.月]\\d{1,2}[^\\s]*)");
+        fields.put("deadline", dl);
+
+        JSONObject rule = new JSONObject();
+        rule.put("readyWhen", rowSel);
+        rule.put("rows", rowSel);
+        rule.put("fields", fields);
+        rule.put("timeoutMs", 15000);
+
+        status.setText("已识别：" + rowSel + "，正在试抓…");
+        DomExtractor.extract(this, webView.getUrl(), rule, (ok, payload) -> {
+            if (!ok) {
+                status.setText("试抓失败：" + payload);
+                return;
+            }
+            try {
+                JSONArray arr = new JSONArray(payload);
+                JSONObject first = arr.optJSONObject(0);
+                String sample = first == null ? "" : first.optString("title");
+                status.setText("✅ 抓到 " + arr.length() + " 条。第一条：" + sample);
+            } catch (Exception e) {
+                status.setText("试抓结果异常：" + e.getMessage());
+            }
+        });
     }
 
     /** evaluateJavascript 返回的是 JSON 字符串字面量（带引号、转义），先解一层。 */

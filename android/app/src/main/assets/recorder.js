@@ -117,3 +117,69 @@
   /** 供给 UI 显示的计数。 */
   window.__hhCount = function () { return rec.requests.length; };
 })();
+
+/**
+ * 点选模式：用户点一下某个作业标题，自动推出「行选择器 + 标题选择器」。
+ *
+ * 为什么让用户点一下而不是让 AI 从 DOM 里猜：这是唯一**当场可验证**的路径。
+ * 猜出来的选择器要等同步失败才知道错，点选出来的立刻能试抓一次。
+ */
+window.__hhPickStart = function () {
+  if (window.__hhPicking) return 'already';
+  window.__hhPicking = true;
+
+  function clsOf(el) {
+    if (!el || !el.className) return '';
+    var c = String(el.className).trim().split(/\s+/)[0];
+    // 过滤掉带状态/序号的动态类名（list-item-3、active、hover 之类）
+    if (!c || /\d/.test(c) || /^(active|on|hover|selected|cur)$/i.test(c)) return '';
+    return '.' + c;
+  }
+
+  function pickHandler(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    window.__hhPicking = false;
+    document.removeEventListener('click', pickHandler, true);
+
+    var el = e.target;
+    while (el && el.nodeType !== 1) el = el.parentElement;
+    if (!el) {
+      window.__hhPickResult = { ok: false, error: '没点到元素' };
+      return;
+    }
+
+    // 向上找「有多个同类兄弟」的祖先 —— 那就是一行作业
+    var row = el;
+    var rowSel = '';
+    for (var i = 0; i < 6 && row.parentElement; i += 1) {
+      var p = row.parentElement;
+      var c = clsOf(row);
+      if (c && p.querySelectorAll(c).length > 1) {
+        rowSel = c;
+        break;
+      }
+      row = p;
+    }
+
+    var titleSel = clsOf(el);
+    window.__hhPickResult = {
+      ok: !!rowSel,
+      rowSelector: rowSel,
+      titleSelector: titleSel,
+      sample: String(el.innerText || '').slice(0, 60),
+      error: rowSel ? '' : '没找到重复出现的作业行（这个列表可能只有一条，或者结构太特殊）',
+    };
+  }
+
+  document.addEventListener('click', pickHandler, true);
+  return 'ok';
+};
+
+/** 取点选结果（原生轮询用）。 */
+window.__hhPickResult = null;
+window.__hhTakePick = function () {
+  var r = window.__hhPickResult;
+  window.__hhPickResult = null;
+  return r ? JSON.stringify(r) : 'null';
+};
