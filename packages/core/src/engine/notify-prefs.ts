@@ -28,6 +28,11 @@ export const DEFAULT_NOTIFY_PREFS: Required<NotifyPrefs> = {
   daily: true,
   dailyHour: 8,
   dailyDays: 7,
+  // 夜间顺延：默认开。22 点后的提醒顺延到次日 8 点 ——
+  // 很多平台把截止时间设成 23:59，'提前 24 小时'正好落在深夜。
+  quietEnabled: true,
+  quietFromHour: 22,
+  quietToHour: 8,
 };
 
 export interface PrefsStorage {
@@ -78,6 +83,15 @@ export function normalizeNotifyPrefs(raw: unknown): Required<NotifyPrefs> {
     ? Math.min(Math.max(Math.round(daysNum), 1), 14)
     : DEFAULT_NOTIFY_PREFS.dailyDays;
 
+  // 静默时段：小时限定 0–23；起止相同视为"没有静默"（否则整段一天都被吞掉）
+  const hourOf = (v: unknown, d: number) => {
+    const x = Number(v);
+    return Number.isFinite(x) ? Math.min(Math.max(Math.round(x), 0), 23) : d;
+  };
+  const quietFromHour = hourOf(o.quietFromHour, DEFAULT_NOTIFY_PREFS.quietFromHour);
+  let quietToHour = hourOf(o.quietToHour, DEFAULT_NOTIFY_PREFS.quietToHour);
+  if (quietToHour === quietFromHour) quietToHour = DEFAULT_NOTIFY_PREFS.quietToHour;
+
   return {
     level,
     task: normalizeSpec(o.task, DEFAULT_NOTIFY_PREFS.task),
@@ -85,6 +99,9 @@ export function normalizeNotifyPrefs(raw: unknown): Required<NotifyPrefs> {
     daily: o.daily === undefined ? DEFAULT_NOTIFY_PREFS.daily : Boolean(o.daily),
     dailyHour,
     dailyDays,
+    quietEnabled: o.quietEnabled === undefined ? DEFAULT_NOTIFY_PREFS.quietEnabled : Boolean(o.quietEnabled),
+    quietFromHour,
+    quietToHour,
   };
 }
 

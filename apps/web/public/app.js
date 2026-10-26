@@ -1265,6 +1265,7 @@ async function renderSettings() {
   const minGap = Number(data.minGapHours ?? 1);
   const opened = (k) => (setOpen.has(k) ? ' open' : '');
   const dailyOn = s.daily !== false;
+  const quietOn = s.quietEnabled !== false;
   presetCache = presets;
 
   const task = s.task ?? { firstHours: 24, lastHours: 12, times: 2 };
@@ -1348,6 +1349,30 @@ async function renderSettings() {
         </label>
         <p class="muted">排期只在**同步那一刻**算一次。所以越靠后的那几条数据越旧 ——
           它们会自己标明"数据截至 X 日"并提示你去同步，不会假装自己是最新的。</p>
+      </div>
+    </details>
+
+    <details class="set-item" data-set="quiet"${opened('quiet')}>
+      <summary>
+        <span class="set-name">夜间顺延</span>
+        <span class="set-now">${
+          quietOn ? `${Number(s.quietFromHour)} 点后 → 次日 ${Number(s.quietToHour)} 点` : '已关闭'
+        }</span>
+      </summary>
+      <div class="set-body">
+        <p class="muted">很多平台把截止时间设成 23:59，「截止前 24 小时」正好是前一天深夜。
+          落在静默时段的提醒会顺延到结束时间，而不是半夜弹出来。</p>
+        <label class="set-row">
+          <input type="checkbox" id="setQuietOn"${quietOn ? ' checked' : ''}>
+          <span>开启夜间顺延</span>
+        </label>
+        <label class="set-row">静默时段
+          <input type="number" id="setQuietFrom" min="0" max="23" value="${Number(s.quietFromHour)}"> 点
+          到次日
+          <input type="number" id="setQuietTo" min="0" max="23" value="${Number(s.quietToHour)}"> 点
+        </label>
+        <p class="muted"><b>护栏</b>：顺延后如果已经过了截止时间，这条提醒直接丢弃 ——
+          提醒的意义是「还来得及」，迟到的提醒只会制造焦虑。</p>
       </div>
     </details>
 
@@ -1479,6 +1504,9 @@ $('settingsList').addEventListener('change', (e) => {
   if (id === 'setDailyOn') saveSettings({ daily: e.target.checked });
   else if (id === 'setDailyHour') saveSettings({ dailyHour: Number(e.target.value) });
   else if (id === 'setDailyDays') saveSettings({ dailyDays: Number(e.target.value) });
+  else if (id === 'setQuietOn') saveSettings({ quietEnabled: e.target.checked });
+  else if (id === 'setQuietFrom') saveSettings({ quietFromHour: Number(e.target.value) });
+  else if (id === 'setQuietTo') saveSettings({ quietToHour: Number(e.target.value) });
   // 区间输入（含单位下拉，id 都以 spec 开头）
   else if (id.startsWith('spec')) saveSpec();
 });

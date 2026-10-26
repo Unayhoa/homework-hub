@@ -173,6 +173,12 @@ export interface NotifyPrefs {
   level?: NotifyLevel;
   /** 每日汇总开关，默认开 */
   daily?: boolean;
+  /** 夜间静默顺延开关（默认开）。关掉后提醒按原时间弹，哪怕在深夜 */
+  quietEnabled?: boolean;
+  /** 静默开始（本地小时，含），默认 22 */
+  quietFromHour?: number;
+  /** 静默结束（本地小时，不含），默认 8 */
+  quietToHour?: number;
   /** 每日汇总的发送小时（本地），默认跟随静默结束 */
   dailyHour?: number;
   /** 每日汇总排未来几天，默认 7（1–14） */
@@ -377,10 +383,11 @@ export function buildNotificationSchedule(
   now: Date,
   opts: NotifyScheduleOptions = {},
 ): ScheduledNotification[] {
-  const quietFrom = opts.quietFromHour ?? 22;
-  const quietTo = opts.quietToHour ?? 8;
-  const useQuiet = opts.quiet !== false;
   const prefs = opts.prefs ?? {};
+  // 用户偏好优先于调用方默认值：这是设置页里能改的东西
+  const quietFrom = prefs.quietFromHour ?? opts.quietFromHour ?? 22;
+  const quietTo = prefs.quietToHour ?? opts.quietToHour ?? 8;
+  const useQuiet = prefs.quietEnabled !== false && opts.quiet !== false;
   const nowMs = now.getTime();
   const out: ScheduledNotification[] = [];
 
