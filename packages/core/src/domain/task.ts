@@ -259,6 +259,27 @@ export function canMarkCompleted(task: UnifiedTask): boolean {
 }
 
 /**
+ * 这条任务的完成状态**只能靠用户自己标** —— 平台根本没报（`statusSource: 'inferred'`）。
+ *
+ * 与 {@link canMarkCompleted} 的分工（两个问法，不是同一件事）：
+ *   canMarkCompleted  → 「此刻**能不能**标」（会被平台优先规则压住）
+ *   needsManualCompletion → 「这条**必须你标**才会消掉」（平台的属性，与是否过期无关）
+ *
+ * 为什么要这个函数、而不让界面自己判 `statusSource === 'inferred'`：
+ * 这条判据决定要不要在卡片上教用户"点 ✓"，判错一边就是噪音（平台明明报状态、
+ * 却让他去标），判错另一边就是静默失败（他做完了、卡片永远不清）。
+ * 判据一旦写进前端，就变成"core 一套、UI 一套"，迟早漂移 —— 见 LESSONS 第 2 条。
+ *
+ * 已标过（完成 / 不用交）就不再啰嗦：那时卡片已经不在待办里，提示没有意义。
+ * **注意不判 status 是否终态**：平台沉默是平台的属性，不是这条任务当前状态的属性；
+ * 雨课堂的作业过了截止时间也一样需要用户自己去标。
+ */
+export function needsManualCompletion(task: UnifiedTask): boolean {
+  if (task.statusSource !== 'inferred') return false;
+  return !task.userCompletedAt && !task.userSkippedAt;
+}
+
+/**
  * 这条任务的「已完成」是谁给的？
  * 界面靠它标出「手动」—— 本地数据绝不能伪装成平台数据（口径洁癖）。
  */

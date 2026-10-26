@@ -12,6 +12,7 @@ import assert from 'node:assert/strict';
 import { rm } from 'node:fs/promises';
 
 import { completionOrigin, effectiveStatus, isTerminalStatus, canMarkCompleted } from '../src/index.ts';
+import { needsManualCompletion } from '../src/index.ts';
 import { materializeTask } from '../src/index.ts';
 import { makeEngine, makeStubAdapter, type StubControl } from './relogin.test.ts';
 
@@ -76,6 +77,39 @@ describe('effectiveStatus：平台优先的四条分支', () => {
   it('statusSource 缺省视同"平台说的"（保守：老数据不该被自动放行）', () => {
     const t = task({ status: 'pending', userCompletedAt: MARK });
     assert.equal(effectiveStatus(t), 'pending');
+  });
+});
+
+describe('needsManualCompletion：哪条任务必须用户自己标', () => {
+  // 这条判据的唯一消费者是任务卡片上那句「XX 不报完成状态 · 做完点 ✓ 自己标」。
+  // 它判错是双向静默：多给 → 每张卡多一行噪音（用户不知道哪些平台真需要标）；
+  // 少给 → 做完了卡片永远不清，用户以为 App 坏了。所以三条分支逐个钉死。
+
+  it('平台沉默（inferred）+ 没标过 → true（雨课堂的真实处境）', () => {
+    assert.equal(needsManualCompletion(task({ status: 'pending', statusSource: 'inferred' })), true);
+  });
+
+  it('平台报状态 → false（超星 / iSmart / PTA 不该多出任何提示）', () => {
+    assert.equal(needsManualCompletion(task({ status: 'pending', statusSource: 'platform' })), false);
+  });
+
+  it('statusSource 缺省（老数据）→ false：保守处理，不乱教用户', () => {
+    // 与 effectiveStatus 同一条口径：undefined 视同"平台说的"
+    assert.equal(needsManualCompletion(task({ status: 'pending' })), false);
+  });
+
+  it('已经标过完成 / 不用交 → false（别再啰嗦）', () => {
+    assert.equal(
+      needsManualCompletion(task({ status: 'pending', statusSource: 'inferred', userCompletedAt: MARK })),
+      false,
+    );
+    const skipped = { ...task({ status: 'pending', statusSource: 'inferred' }), userSkippedAt: MARK };
+    assert.equal(needsManualCompletion(skipped), false);
+  });
+
+  it('过了截止时间也一样要标 —— 平台沉默是平台的属性，不随这条任务的状态变', () => {
+    // 雨课堂的作业逾期后仍留在「已逾期」分组里，用户还是得自己标掉它
+    assert.equal(needsManualCompletion(task({ status: 'expired', statusSource: 'inferred' })), true);
   });
 });
 

@@ -48,6 +48,7 @@ export {
   effectiveStatus,
   completionOrigin,
   canMarkCompleted,
+  needsManualCompletion,
   canSkip,
   hasPendingAc,
 } from './domain/task.ts';

@@ -253,6 +253,23 @@ function renderProgress(t) {
   </button>`;
 }
 
+/**
+ * 「这条得你自己标」—— 平台不报完成状态时的**唯一**告知点。
+ *
+ * 为什么必须在卡片上：这句话以前写在设置页的「关于与说明」里，而需要它的人
+ * 正在待办页做作业，不会跑去设置里读一条 FAQ。结果就是最典型的静默失败 ——
+ * 他在雨课堂交了，卡片却一直在，提醒也一直在响，于是他开始不信这个 App 了。
+ * （LESSONS 第 6 条：文案里出现"请到 XX 页"，先确认那一步在当前上下文里找得到。）
+ *
+ * 判据来自后端 `needsManualComplete`，前端**不自己判 statusSource** ——
+ * 这条判据决定教不教用户点 ✓，多给是每张卡多一行噪音、少给是永远不清，
+ * 两种错都静默。判据只能有一处（LESSONS 第 2 条）。
+ */
+function renderManualNeed(t) {
+  if (!t.needsManualComplete) return '';
+  return `<div class="manual-need">${escapeHtml(taskPlatform(t))}不报完成状态 · 做完点 ✓ 自己标</div>`;
+}
+
 /** 点进度条 → 打开题目详情。 */
 function openTaskDetail(taskId) {
   const all = [
@@ -347,6 +364,7 @@ function renderTodo(state) {
             <div class="task-meta"><span class="kind">${KIND[t.kind] ?? t.kind}</span><span class="plat">${escapeHtml(taskPlatform(t))}</span>${status}${manualHint}</div>
             <div class="countdown ${cd.cls}">${cd.text}${fmtDueDate(t) ? ` · 截止 ${fmtDueDate(t)}` : ''}</div>
             ${renderProgress(t)}
+            ${renderManualNeed(t)}
           </div>
           ${t.revision > 1 ? `<span class="rev-dot">有变更</span>` : ''}
           <button class="done-btn menu" data-menu-task="${escapeHtml(t.id)}" aria-label="处理这条" title="完成 / 不用交 / 删除">✓</button>

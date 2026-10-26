@@ -623,13 +623,35 @@ details summary { cursor: pointer; font-size: 14px; font-weight: 600; }
 /* 标题旁的版本号：小、浅，但要能看清 —— 它的用途是"确认我装的是哪一版" */
 .ver { font-size: 10.5px; font-weight: 400; color: var(--text-3); vertical-align: 1px; }
 
-/* ---------- 关于与说明 ----------
-   按「困惑」组织：每条一个问句当标题 + 两三句解释。
-   不做二次折叠 —— 用户点开这一栏本来就是来读的，再折一层只多一次点击。 */
-.faq h4 {
-  margin: 14px 0 4px; font-size: 13.5px; font-weight: 600; color: var(--text);
+/* 「这条得你自己标」：平台不报完成状态时的唯一告知点。
+   放在倒计时下面、贴着右侧那个 ✓ —— 读卡片的顺序是
+   「这是什么 → 什么时候截止 → 我要做什么」，它回答的是最后一步。
+   字号压在 11.5px / 次要文字色：它是**每次都成立**的恒定事实，
+   不是"还剩 2 小时"那种会变的紧急信息，不该抢倒计时的注意力。
+   但也不能更淡 —— 淡到看不见就等于没有，那正是它当初留在设置页的结局。 */
+.manual-need {
+  margin-top: 6px; font-size: 11.5px; line-height: 1.5; color: var(--text-2);
 }
-.faq h4:first-child { margin-top: 0; }
+
+/* ---------- 关于与说明 ----------
+   两级：分组标题（h4）+ 每条困惑（h5）。
+   以前是一条条 h4 平铺，读起来像一篇没有小标题的文章 —— 想找"提醒为什么不响"
+   得整段扫过去。分组给的是**检索入口**，不是新交互。
+   分组**不做二次折叠**：用户点开这一栏本来就是来读的，再折一层只多一次点击。 */
+.faq-group + .faq-group {
+  margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border);
+}
+.faq-group > h4 {
+  /* 与待办页的 .group-title 用同一套分组标题语言（12.5px / 650 / --text-3）——
+     全 App 只有一种"这是分组"的视觉说法。另起一套的话，两处迟早各长各的。 */
+  margin: 0 0 8px; font-size: 12.5px; font-weight: 650; color: var(--text-3);
+  letter-spacing: .02em;
+}
+.faq h5 {
+  margin: 12px 0 4px; font-size: 13.5px; font-weight: 600; color: var(--text);
+}
+/* 组内第一条紧贴组标题 —— 分开的话"标题"和它的第一条内容就断开了 */
+.faq-group > h5:first-of-type { margin-top: 0; }
 .faq p {
   margin: 0 0 6px; font-size: 12.5px; line-height: 1.6; color: var(--text-2);
 }

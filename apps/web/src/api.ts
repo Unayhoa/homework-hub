@@ -12,6 +12,7 @@
 import {
   CdpHttpClient,
   canMarkCompleted,
+  needsManualCompletion,
   completionOrigin,
   DEFAULT_NOTIFY_PREFS,
   effectiveStatus,
@@ -69,6 +70,15 @@ export interface TaskDto {
   manualCompleted: boolean;
   /** 该不该显示「标记完成」按钮 —— 判据与生效规则同源，所以有按钮就必然点了有效 */
   canManualComplete: boolean;
+  /**
+   * 这条任务**必须用户自己标已完成**才会消掉 —— 因为平台根本不报完成状态
+   * （目前只有长江雨课堂，见 yuketang 适配器的字段取证）。
+   *
+   * 为什么由后端算而不是把 statusSource 丢给前端判：这条判据决定卡片上教不教
+   * 用户"点 ✓"。判错是双向的 —— 多给就是每张卡都多一行噪音，少给就是
+   * 「做完了、卡片永远不清」的静默失败。判据只能有一处。
+   */
+  needsManualComplete: boolean;
   /** 用户标过「不用交」（小组由别人交 / 免修 / 换课） */
   manualSkipped: boolean;
   /**
@@ -114,6 +124,7 @@ export function taskDto(t: UnifiedTask): TaskDto {
     completionOrigin: completionOrigin(t),
     manualCompleted: Boolean(t.userCompletedAt),
     canManualComplete: canMarkCompleted(t),
+    needsManualComplete: needsManualCompletion(t),
     manualSkipped: Boolean(t.userSkippedAt),
     canSkip: canSkip(t),
     deadline: t.deadline,
