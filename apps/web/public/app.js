@@ -2127,17 +2127,61 @@ function applyCourseFilter(kind, next) {
   if (lastState) (kind === 'todo' ? renderTodo : renderDone)(lastState);
 }
 
-/** 用户主动清除（点「清除」或再点一次课程名）：退掉自己压的那条，由 popstate 统一收尾。 */
+/** 用户主动清除（点「清除」或再点一次课程名）。
+ *
+ * 关键：**先恢复界面，再退历史**。
+ * 之前是 `history.back()` 然后指望 popstate 回来清状态 —— 只要那一下没触发
+ * （WebView 历史条目被合并、页面重载过），筛选就永远卡着，用户怎么看都是"点了没反应"。
+ * 现在界面立刻恢复；history 条目顺手退掉，并用 skipPop 告诉 popstate「这条我自己处理了」。
+ */
+let skipPop = false;
 function clearCourseFilter(kind) {
-  if (filterDepth > 0) {
-    history.back();
-    return;
-  }
   courseFilter[kind] = null;
   if (lastState) (kind === 'todo' ? renderTodo : renderDone)(lastState);
+  if (filterDepth > 0) {
+    filterDepth -= 1;
+    skipPop = true;
+    history.back();
+  }
 }
 
+window.HH = window.HH || {};
+/**
+ * 给原生返回键用：网页层还有没有可以「退」的东西（弹层 / 筛选）。
+ *
+ * 为什么需要它：WebView 的 canGoBack 不一定反映 pushState 的层级 ——
+ * 真机上出现过「筛选中按返回直接退出 App」。所以原生在 canGoBack 为 false 时
+ * 先问一句这里，有东西就让网页先处理，不要直接 finish。
+ */
+window.HH.backDepth = function () {
+  if (overlayDepth > 0) return 1;
+  if (filterDepth > 0 || courseFilter.todo || courseFilter.done) return 1;
+  return 0;
+};
+window.HH.back = function () {
+  // 顺序与 popstate 保持一致：弹层优先
+  if (overlayDepth > 0) {
+    overlayDepth -= 1;
+    for (const el of document.querySelectorAll('.sheet')) {
+      if (!el.classList.contains('hidden')) el.classList.add('hidden');
+    }
+    return true;
+  }
+  if (courseFilter.todo || courseFilter.done) {
+    clearCourseFilter('todo');
+    clearCourseFilter('done');
+    filterDepth = 0;
+    return true;
+  }
+  return false;
+};
+
 window.addEventListener('popstate', () => {
+  // 自己主动退的那一条（见 clearCourseFilter），状态已经处理过了
+  if (skipPop) {
+    skipPop = false;
+    return;
+  }
   // 覆盖层优先：它是压在筛选之上的临时界面，先关它
   if (overlayDepth > 0) {
     overlayDepth -= 1;

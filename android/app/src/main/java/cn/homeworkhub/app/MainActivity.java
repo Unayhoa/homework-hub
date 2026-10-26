@@ -525,7 +525,17 @@ public class MainActivity extends Activity {
             webView.goBack();
             return;
         }
-        super.onBackPressed();
+        // canGoBack 为 false，但网页层可能还有筛选 / 弹层 —— 先问一句再决定退不退。
+        // 真机反馈：筛选中按返回直接退出 App，因为 pushState 的层级没有反映到 canGoBack。
+        webView.evaluateJavascript(
+                "window.HH&&window.HH.backDepth?window.HH.backDepth():0",
+                depth -> {
+                    if (depth != null && !depth.equals("0") && !depth.equals("null")) {
+                        webView.evaluateJavascript("window.HH&&window.HH.back&&window.HH.back()", null);
+                    } else {
+                        finish();
+                    }
+                });
     }
 
     @Override
