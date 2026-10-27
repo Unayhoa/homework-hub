@@ -15,7 +15,7 @@ import type { HttpClient } from '../ports/http.ts';
 import type { Limiter, LimiterOptions } from '../ports/limiter.ts';
 import type { Logger } from '../ports/logger.ts';
 import type { Clock } from '../domain/time.ts';
-import type { PlatformAccount } from '../domain/course.ts';
+import type { PlatformAccount, UnifiedCourse } from '../domain/course.ts';
 import type { TaskKind, UnifiedTask } from '../domain/task.ts';
 import { completionOrigin, effectiveStatus, hasPendingAc, isTerminalStatus } from '../domain/task.ts';
 import { makeCourseId } from '../domain/ids.ts';
@@ -991,6 +991,25 @@ export class SyncEngine {
     const nameByPlatformCourse = new Map<string, string>(
       courses.map((c) => [c.platformCourseId, c.name] as const),
     );
+
+    // ---- 课程维度兜底：**课程是任务的投影** ----
+    //
+    // 不变量：只要本轮看到了作业，课程页就不能是空的。
+    // 违背它的后果就是真机 2026-10-27 报的那个形态 —— 待办里有作业、课程页写着
+    // 「这个账号下还没有课程」。两个界面读的是同一个库，却在讲两个相反的故事，
+    // 用户只能得出「这 App 的数据乱了」。
+    //
+    // 为什么必须补在引擎层，而不是让适配器自己给全：适配器的 fetchCourses 跑在
+    // fetchTasks **之前**，那一刻它还不知道平台上有哪些课程；而声明式配置里
+    // 课程常常根本不是一个独立接口，只是任务行上的一个字段（courseName）。
+    // 只有引擎同时看得见「任务」和「课程表」，才补得起来。
+    //
+    // 对内置平台这是幂等空操作（本来就一致），所以不必区分是谁 —— 判据挂在
+    // 「库里有没有」上，而不是挂在「是不是自定义平台」上（后者会立刻变成第二个真源）。
+    if (!opts.dryRun) {
+      await this.#backfillCourses(account, collected, nameByPlatformCourse, excludedCourses);
+    }
+
     const incoming = collected.map((t) => {
       const task = materializeTask({
         platformId: account.platformId,
@@ -1085,7 +1104,10 @@ export class SyncEngine {
     return finish(
       status,
       {
-        courses: courses.length,
+        // 「本轮涉及的课程数」= 课程接口给的 ∪ 任务里出现的。
+        // 只报 courses.length 的话，课程靠任务投影出来的自定义平台会显示"0 门课"，
+        // 而课程页明明有 2 门 —— 日志和界面又讲两个故事（本项目最忌讳的那种）。
+        courses: new Set([...courses.map((c) => c.platformCourseId), ...collected.map((t) => t.courseId)]).size,
         fetched: collected.length,
         created: plan.created,
         updated: plan.updated,
@@ -1097,6 +1119,54 @@ export class SyncEngine {
       },
       message,
     );
+  }
+
+  /**
+   * 给「任务引用了、但课程表里没有」的课程补一条记录。
+   *
+   * 为什么不是"给自定义平台用的补丁"：判据是「库里有没有这门课」，
+   * 对内置平台它天然不会触发。一旦写成 `if (是自定义平台)`，就多出一个必须
+   * 和注册表保持同步的真源 —— 本项目已经在这类"两份清单"上栽过多次。
+   *
+   * 名字优先级：课程接口给的名字 > 任务行上的 courseName。
+   * 用户删掉的课程（排除清单）**不补** —— 否则「删除课程」下一轮同步就被复活。
+   */
+  async #backfillCourses(
+    account: PlatformAccount,
+    collected: PlatformTask[],
+    knownNames: Map<string, string>,
+    excludedInternalIds: Set<string>,
+  ): Promise<void> {
+    const existing = new Set((await this.#store.listCourses([account.id])).map((c) => c.id));
+    const at = this.#clock.now().toISOString();
+    const add: UnifiedCourse[] = [];
+    const seen = new Set<string>();
+
+    for (const t of collected) {
+      const platformCourseId = t.courseId;
+      if (!platformCourseId || seen.has(platformCourseId)) continue;
+      seen.add(platformCourseId);
+      const id = makeCourseId(account.platformId, account.id, platformCourseId);
+      if (existing.has(id) || excludedInternalIds.has(id)) continue;
+      const name = (knownNames.get(platformCourseId) ?? t.courseName ?? '').trim();
+      if (!name) continue;
+      add.push({
+        id,
+        platformId: account.platformId,
+        accountId: account.id,
+        platformCourseId,
+        name,
+        sourceUrl: undefined,
+        lastSeenAt: at,
+      });
+    }
+
+    if (add.length === 0) return;
+    await this.#store.upsertCourses(add);
+    this.#logger.info('补齐了任务引用的课程记录（课程是任务的投影）', {
+      accountId: account.id,
+      count: add.length,
+    });
   }
 
   /** 提醒投递 + 记账。把「已发送」和「已消费但未发送」的窗口都落库，防止后续补发风暴。 */

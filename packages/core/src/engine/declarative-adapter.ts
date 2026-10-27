@@ -44,7 +44,14 @@ export interface AdapterConfig {
     id?: { path?: string };
     title?: { path?: string };
     deadline?: { path?: string; format?: string };
-    course?: { path?: string };
+    /**
+     * 课程。`path` 取课程名，`idPath` 取课程 ID（可选）。
+     *
+     * 只有名字也够：课程名在同一个平台内是稳定的，用它当平台课程 ID
+     * （`name:<课程名>`）就能把作业按课程分开 —— 否则所有作业都会挤在
+     * 一条 `__default` 课程里，课程页只能看到一门"课"，点课程名筛选也失效。
+     */
+    course?: { path?: string; idPath?: string };
     status?: { path?: string; values?: Record<string, string>; usableForCompletion?: boolean };
   };
   link?: { type?: string; value?: string };
@@ -74,6 +81,64 @@ export function getByPath(obj: unknown, path: string | undefined): unknown {
     }
   }
   return cur;
+}
+
+/**
+ * 从一行任务里取「它属于哪门课」。**全项目唯一**计算课程标识的地方
+ * （API 模式与 DOM 模式共用，避免两处各算一遍 —— 那必然对不上）。
+ *
+ * 优先级从高到低：
+ *   1. 配置了课程 ID 字段 → 用它（最准，是平台自己认可的标识）
+ *   2. 课程名能在**课程接口给的列表**里对上 → 用列表里的真 ID
+ *   3. 只有课程名 → 用 `name:<课程名>`（课程名在同一平台内稳定）
+ *   4. 什么都没有 → `__default`（必须与 fetchCourses 的兜底课程对齐）
+ *
+ * 第 2 条是踩出来的（2026-10-27）：配置里声明了课程接口（c1/c2），而任务行上
+ * 只有课程名。若这里只按名字造 ID，同一门课会同时存在 `c1` 和 `name:高等数学`
+ * 两条记录 —— 课程页直接翻倍，每条作业还都挂在"假"的那一条上。
+ * 课程列表是权威，任务行只是它的引用。
+ */
+export function courseKeyOf(
+  nameRaw: unknown,
+  idRaw: unknown,
+  fallbackName: string,
+  nameToId?: Map<string, string>,
+): { id: string; name: string } {
+  const name = String(nameRaw ?? '').trim() || fallbackName;
+  const explicitId = idRaw === undefined || idRaw === null ? '' : String(idRaw).trim();
+  if (explicitId) return { id: explicitId, name };
+  const known = nameToId?.get(name);
+  if (known) return { id: known, name };
+  if (name === fallbackName) return { id: '__default', name };
+  return { id: `name:${name}`, name };
+}
+
+/** 课程名 → 平台课程 ID。索引来自引擎传进来的课程表（也就是 fetchCourses 存下的那批）。 */
+export function courseIndexOf(courses: readonly PlatformCourse[] | undefined): Map<string, string> {
+  const m = new Map<string, string>();
+  for (const c of courses ?? []) {
+    const name = String(c.name ?? '').trim();
+    if (name && !m.has(name)) m.set(name, c.platformCourseId);
+  }
+  return m;
+}
+
+/**
+ * 这条「待完成」是平台说的，还是我们推的？
+ *
+ * 判据只有一条：**配置里有没有一个能表达完成状态的字段**。
+ *   · 有 status 字段且 usableForCompletion !== false → 平台说的（'platform'）
+ *   · 没有 / 明确不可用于判断完成 → 我们推的（'inferred'）
+ *
+ * 为什么这条必须分清（真机教训，与雨课堂章节树同源）：标成 'platform' 之后，
+ * 「平台优先」规则会认为"平台明确说未完成"，于是 `canMarkCompleted` 返回 false ——
+ * 用户点不动「标记已完成」。一个没配状态字段的自定义平台，作业做完后**永远无法标记**、
+ * 永远留在待办里催他。它跟内置平台的差别不该是"少个功能"，而这正是配置决定的事。
+ */
+function statusSourceOf(cfg: AdapterConfig['fields']['status']): 'platform' | 'inferred' {
+  if (!cfg?.path) return 'inferred';
+  if (cfg.usableForCompletion === false) return 'inferred';
+  return 'platform';
 }
 
 /** 把配置里的状态映射成这个应用的状态。认不出就一律 pending（不假装完成）。 */
@@ -116,6 +181,35 @@ function toIso(v: unknown, format?: string): string | undefined {
 }
 
 
+/**
+ * 能力 = **配置的函数**，不是常量。
+ *
+ * 这是「自定义平台和内置平台等价」的第一条前提，也是真机故障（2026-10-27）的根因：
+ * 这里原本写死 `courses: false`，而引擎只在 capabilities.courses 为真时才调用
+ * fetchCourses（sync-engine 的 shouldRefreshCourses）—— 于是下面那个
+ * **已经写好**的 fetchCourses 从头到尾没被执行过，课程表永远是空的：
+ * 待办里有作业，课程页却写着"这个账号下还没有课程"。
+ *
+ * `courses` 恒为真：最差的情况（平台没有任何课程概念）我们也能给出一条兜底课程。
+ * 声明"没有课程能力"只会让引擎跳过课程，而**课程页空白和"平台没课程"在用户眼里
+ * 没有区别** —— 这正是本项目反复踩的「留白 = 坏了」。
+ */
+export function resolveCapabilities(cfg: {
+  courses?: { url?: string };
+  exams?: unknown;
+}): AdapterCapabilities {
+  return {
+    courses: true,
+    tasks: true,
+    exams: Boolean(cfg.exams),
+    // 没有增量接口：每轮都重新拉列表。配置里没有"游标"这个概念，别假装有。
+    incremental: false,
+    cookieOnlySession: true,
+    requiresNativeSigner: false,
+    aggressiveAntiBot: false,
+  };
+}
+
 export class DeclarativeAdapter implements PlatformAdapter {
   readonly id: string;
   readonly displayName: string;
@@ -123,16 +217,12 @@ export class DeclarativeAdapter implements PlatformAdapter {
   readonly #cfg: AdapterConfig;
   readonly #origin: string;
 
-  readonly capabilities: AdapterCapabilities = {
-    courses: false,
-    tasks: true,
-    exams: false,
-    // 没有增量接口：每轮都重新拉列表。配置里没有"游标"这个概念，别假装有。
-    incremental: false,
-    cookieOnlySession: true,
-    requiresNativeSigner: false,
-    aggressiveAntiBot: false,
-  };
+  /**
+   * 注意：**不能**用字段初始化器（`readonly capabilities = resolveCapabilities(this.#cfg)`）——
+   * 字段初始化器在构造函数体之前执行，那时 #cfg 还是 undefined，
+   * 于是所有能力都变成 false，又回到这次故障的原点。必须在构造函数里赋值。
+   */
+  readonly capabilities: AdapterCapabilities;
 
   readonly authMethods: AuthMethod[];
 
@@ -149,6 +239,7 @@ export class DeclarativeAdapter implements PlatformAdapter {
     this.id = `custom-${cfg.key}`;
     this.displayName = cfg.name || cfg.key;
     this.homepage = this.#origin;
+    this.capabilities = resolveCapabilities(cfg);
     this.authMethods = [
       {
         id: 'in-app',
@@ -202,9 +293,13 @@ export class DeclarativeAdapter implements PlatformAdapter {
     session: Session,
     _req?: FetchCoursesRequest,
   ): Promise<Page<PlatformCourse>> {
-    // 没有配置课程接口 → 给一个虚拟课程，保证任务有地方挂。
-    // 硬要塞进"未分类"会让人在课程页找不到它。
+    // 没有课程接口 → 两种情况必须分开，否则课程页会说谎：
+    //   ① 任务行里带课程名（fields.course）→ 课程由任务投影出来，这里**不要**造虚拟课程。
+    //      造了就会和投影出来的真课程并存，课程页平白多一条 0 作业的"平台名"课程。
+    //   ② 连课程名都没有 → 给一条兜底课程，保证作业有地方挂，课程页不至于空白。
+    //      （硬塞进"未分类"会让人在课程页找不到它。）
     if (!this.#cfg.courses?.url) {
+      if (this.#cfg.fields?.course?.path) return { items: [], hasMore: false };
       return {
         items: [{ platformCourseId: '__default', name: this.displayName }],
         hasMore: false,
@@ -251,11 +346,13 @@ export class DeclarativeAdapter implements PlatformAdapter {
     return out;
   }
 
-  async fetchTasks(ctx: AdapterContext, session: Session, _req: FetchTasksRequest): Promise<Page<PlatformTask>> {
+  async fetchTasks(ctx: AdapterContext, session: Session, req: FetchTasksRequest): Promise<Page<PlatformTask>> {
     const http = new SessionHttpClient(ctx, session);
     const cfg = this.#cfg;
     const items: PlatformTask[] = [];
     const notes: string[] = [];
+    /** 课程名 → 真课程 ID：来自引擎传进来的课程表，保证任务和课程表挂在同一门课上 */
+    const nameToId = courseIndexOf(req.courses);
 
     const pag = cfg.tasks.pagination ?? {};
     const maxPages = Math.min(Math.max(1, Number(pag.maxPages ?? 1)), 20);
@@ -291,17 +388,24 @@ export class DeclarativeAdapter implements PlatformAdapter {
         const idRaw = getByPath(row, cfg.fields.id?.path ?? 'id');
         const titleRaw = getByPath(row, cfg.fields.title?.path ?? 'title');
         if (titleRaw === undefined || String(titleRaw).trim() === '') continue;
-        const courseName = cfg.fields.course?.path
-          ? String(getByPath(row, cfg.fields.course.path) ?? '')
-          : this.displayName;
+        // 这条作业属于哪门课 —— 决定课程页能不能按课程分开，不是显示细节
+        const course = courseKeyOf(
+          cfg.fields.course?.path ? getByPath(row, cfg.fields.course.path) : undefined,
+          cfg.fields.course?.idPath ? getByPath(row, cfg.fields.course.idPath) : undefined,
+          this.displayName,
+          nameToId,
+        );
         const statusRaw = cfg.fields.status?.path ? getByPath(row, cfg.fields.status.path) : undefined;
         items.push({
           platformTaskId: idRaw === undefined ? undefined : String(idRaw),
-          courseId: '__default',
-          courseName: courseName || this.displayName,
+          courseId: course.id,
+          courseName: course.name,
           kind: 'homework',
           title: String(titleRaw).trim(),
           status: mapStatus(statusRaw, cfg.fields.status),
+          // 「平台能不能报告完成状态」在任务上必须显式标出来，
+          // 否则界面会替平台断言"你还没交"，用户也标不动（见 statusSourceOf）
+          statusSource: statusSourceOf(cfg.fields.status),
           deadline: cfg.fields.deadline?.path
             ? toIso(getByPath(row, cfg.fields.deadline.path), cfg.fields.deadline.format)
             : undefined,
@@ -525,15 +629,7 @@ export class DomAdapter implements PlatformAdapter {
   readonly homepage: string;
   readonly #cfg: DomConfig;
 
-  readonly capabilities: AdapterCapabilities = {
-    courses: false,
-    tasks: true,
-    exams: false,
-    incremental: false,
-    cookieOnlySession: true,
-    requiresNativeSigner: false,
-    aggressiveAntiBot: false,
-  };
+  readonly capabilities: AdapterCapabilities;
 
   readonly authMethods: AuthMethod[];
   readonly readOnlyPolicy: ReadOnlyPolicy = { allowMethods: ['GET', 'HEAD'] };
@@ -544,6 +640,7 @@ export class DomAdapter implements PlatformAdapter {
     this.id = `custom-${cfg.key}`;
     this.displayName = cfg.name || cfg.key;
     this.homepage = String(cfg.origin ?? '').replace(/\/$/, '');
+    this.capabilities = resolveCapabilities(cfg);
     this.authMethods = [
       {
         id: 'in-app',
@@ -578,10 +675,13 @@ export class DomAdapter implements PlatformAdapter {
   }
 
   async fetchCourses(_ctx: AdapterContext, _session: Session): Promise<Page<PlatformCourse>> {
+    // 与 API 模式同一套规矩：页面里能选课程名就让任务投影出真课程，
+    // 选不到才给一条兜底课程。这个分支决定了课程页是 1 门"平台名"还是真的几门课。
+    if (this.#cfg.fields?.course?.find) return { items: [], hasMore: false };
     return { items: [{ platformCourseId: '__default', name: this.displayName }], hasMore: false };
   }
 
-  async fetchTasks(_ctx: AdapterContext, _session: Session, _req: FetchTasksRequest): Promise<Page<PlatformTask>> {
+  async fetchTasks(_ctx: AdapterContext, _session: Session, req: FetchTasksRequest): Promise<Page<PlatformTask>> {
     // 不要在这里检查 domExtractor —— 真正的可用性判断在 extractViaBridge 里
     //（它找的是 window.Android.domExtract）。之前这里多了一道「模块变量是否注入」的检查，
     // 而宿主根本不注入（改成直接找桥了），于是每次同步都在这里被拦下：
@@ -632,13 +732,18 @@ export class DomAdapter implements PlatformAdapter {
       if (!title) continue;
       const deadline = r.deadline ? toIso(r.deadline, 'custom') : undefined;
       if (!deadline) missingTime += 1;
+      // 页面上选过「课程名」就按课程分开；没选过就归到兜底课程。
+      // 与 API 模式同一套判据（courseKeyOf），不另写一份。
+      const course = courseKeyOf(r.course, r.courseId, this.displayName, courseIndexOf(req.courses));
       items.push({
         platformTaskId: r.id ? String(r.id) : undefined,
-        courseId: '__default',
-        courseName: this.displayName,
+        courseId: course.id,
+        courseName: course.name,
         kind: 'homework',
         title,
         status: mapStatus(r.status, undefined),
+        // 页面上没选「状态」这一列 → 平台沉默，用户自己说了算（否则他永远标不动）
+        statusSource: r.status === undefined || String(r.status).trim() === '' ? 'inferred' : 'platform',
         deadline,
       });
     }
