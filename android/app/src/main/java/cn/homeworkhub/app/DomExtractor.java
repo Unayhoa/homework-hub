@@ -116,7 +116,14 @@ final class DomExtractor {
             onReady.run();
             return;
         }
-        String js = "!!document.querySelector(" + JSONObject.quote(sel) + ")";
+        // readyWhen 也要能看 iframe 内：超星的作业列表就在 iframe 里，
+        // 只查顶层 document 会一直等不到，最后报"页面加载超时"（看起来像网络问题，方向全错）。
+        String selQ = JSONObject.quote(sel);
+        String js = "(function(){function qa(d,s,dep){try{if(d.querySelector(s))return true;"
+                + "if(dep>4)return false;var f=d.querySelectorAll('iframe,frame');"
+                + "for(var i=0;i<f.length;i++){var dd=null;try{dd=f[i].contentDocument;}catch(e){}"
+                + "if(dd&&qa(dd,s,dep+1))return true;}return false;}catch(e){return false;}}"
+                + "return qa(document," + selQ + ",0);})()";
         Runnable tick = new Runnable() {
             @Override
             public void run() {
@@ -144,7 +151,17 @@ final class DomExtractor {
         js.append("if(f.regex){var m=new RegExp(f.regex).exec(v);return m?(m[1]!==undefined?m[1]:m[0]):'';}");
         js.append("return String(v||'').replace(/\\s+/g,' ').trim();");
         js.append("}catch(e){return '';}}");
-        js.append("var rows=Array.prototype.slice.call(document.querySelectorAll(rule.rows||''));");
+        // 递归进同源 iframe 找行 —— 超星的作业列表在 iframe 内。
+        // 只查顶层 document 会得到 0 条，然后报"选择器已失效"，
+        // 把人引去重新点选（而点选出来的选择器其实是对的，只是查错了文档）。
+        js.append("function docs(root){var out=[root];(function walk(d,dep){if(dep>4)return;");
+        js.append("var f;try{f=d.querySelectorAll('iframe,frame');}catch(e){return;}");
+        js.append("for(var i=0;i<f.length;i++){var dd=null;try{dd=f[i].contentDocument;}catch(e){dd=null;}");
+        js.append("if(dd){out.push(dd);walk(dd,dep+1);}}})(root,0);return out;}");
+        js.append("var rows=[];(function(){var ds=docs(document);");
+        js.append("for(var i=0;i<ds.length;i++){try{");
+        js.append("var l=ds[i].querySelectorAll(rule.rows||'');");
+        js.append("for(var j=0;j<l.length;j++)rows.push(l[j]);}catch(e){}}})();");
         js.append("var out=rows.map(function(el){var o={};");
         js.append("for(var k in (rule.fields||{})){o[k]=pick(el,rule.fields[k]);}return o;});");
         js.append("return JSON.stringify(out);})()");

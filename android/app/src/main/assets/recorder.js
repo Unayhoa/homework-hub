@@ -273,29 +273,94 @@ window.__hhPickStart = function () {
    * 于是永远点不中任何东西。这个冲突必须靠"取元素时解冻、取完立刻冻结"来绕。
    * 同步执行，中间不会插入任何事件，所以没有闪烁也不会漏点击。
    */
+  /** 这一层文档里坐标处的元素（跳过遮罩/提示条/body）。 */
+  function hitIn(doc, x, y) {
+    var list = [];
+    if (doc.elementsFromPoint) list = doc.elementsFromPoint(x, y) || [];
+    else {
+      var one = doc.elementFromPoint(x, y);
+      list = one ? [one] : [];
+    }
+    for (var i = 0; i < list.length; i += 1) {
+      var n = list[i];
+      if (!n) continue;
+      if (n === mask || n === tip) continue;
+      if (n.id === MASK_ID || n.id === TIP_ID) continue;
+      if (n === doc.body || n === doc.documentElement) continue;
+      return n;
+    }
+    return null;
+  }
+
+  /**
+   * 遮罩下面那个真实元素 —— **要能钻进 iframe**。
+   *
+   * 真机 2026-10-27：超星的作业列表在右侧的 iframe 里（右上角那个"展开"图标就是证据）。
+   * 遮罩在顶层，点击被挡住了，但 elementsFromPoint 在顶层只会返回 iframe 这个盒子本身，
+   * 拿不到里面的作业行 —— 于是"点中了，但算不出选择器"。
+   *
+   * 所以这里坐标逐层换算：命中 iframe 就进它的 contentDocument 再找，最多 6 层。
+   * 跨源 iframe 的 contentDocument 是 null（浏览器直接拒绝，不抛错），
+   * 此时停下来并打标记 —— 那不是我们能做到的事，必须如实告诉用户。
+   */
   function elUnder(x, y) {
     var st = document.getElementById('__hhPickStyle');
     var wasDisabled = false;
     if (st) {
       wasDisabled = !!st.disabled;
-      st.disabled = true; // 解冻
+      st.disabled = true; // 解冻：pointer-events:none 的元素不参与命中测试
     }
+    window.__hhPickFrameBlocked = false;
     try {
-      if (document.elementsFromPoint) {
-        var list = document.elementsFromPoint(x, y) || [];
-        for (var i = 0; i < list.length; i += 1) {
-          var n = list[i];
-          if (n === mask || n === tip) continue;
-          if (n === document.body || n === document.documentElement) continue;
-          return n;
+      var doc = document;
+      var dx = x;
+      var dy = y;
+      var el = null;
+      for (var depth = 0; depth < 6; depth += 1) {
+        el = hitIn(doc, dx, dy);
+        if (!el) return null;
+        var tag = String(el.tagName || '').toUpperCase();
+        if (tag !== 'IFRAME' && tag !== 'FRAME') return el;
+        var innerDoc = null;
+        try {
+          innerDoc = el.contentDocument;
+        } catch (e) {
+          innerDoc = null;
         }
+        if (!innerDoc) {
+          window.__hhPickFrameBlocked = true; // 跨源：读不到里面的结构
+          return el;
+        }
+        var r = el.getBoundingClientRect();
+        dx -= r.left;
+        dy -= r.top;
+        doc = innerDoc;
       }
-      var el = document.elementFromPoint(x, y);
-      if (el === mask || el === tip || el === document.body) return null;
       return el;
     } finally {
       if (st && !wasDisabled) st.disabled = false; // 重新冻结
     }
+  }
+
+  /** 坐标处的滚动容器（可能是 iframe 内部），滚动转发用。 */
+  function scrollerUnder(x, y) {
+    var el = elUnder(x, y);
+    var guard = 0;
+    while (el && guard < 8) {
+      try {
+        var doc = el.ownerDocument;
+        var win = doc && doc.defaultView;
+        if (win && el.scrollHeight > el.clientHeight + 4) {
+          return { el: el };
+        }
+        if (win && win !== window && doc.scrollingElement === el) return { win: win };
+        el = el.parentElement;
+      } catch (e) {
+        break;
+      }
+      guard += 1;
+    }
+    return null;
   }
 
   function clsOf(el) {
@@ -330,29 +395,52 @@ window.__hhPickStart = function () {
 
   function select(x, y) {
     var el = elUnder(x, y);
+    var frameBlocked = !!window.__hhPickFrameBlocked;
     done();
-    if (!el || el === document.body || el === document.documentElement) {
+    if (frameBlocked) {
+      // 跨源 iframe：这不是"没点中"，是浏览器不允许读 —— 说清楚，别让人反复试
+      window.__hhPickResult = {
+        ok: false,
+        error: '这一块是嵌入的另一个网站，浏览器不允许读取它的结构，点选方式接不了这个平台',
+      };
+      return;
+    }
+    if (!el) {
       window.__hhPickResult = { ok: false, error: '没点到具体内容，再试一次' };
       return;
     }
     // 向上找「有多个同类兄弟」的祖先 —— 那就是一行作业
     var row = el;
     var rowSel = '';
+    var mostSiblings = 1;
     for (var i = 0; i < 6 && row.parentElement; i += 1) {
-      var p = row.parentElement;
+      var up = row.parentElement;
       var c = clsOf(row);
-      if (c && p.querySelectorAll(c).length > 1) {
-        rowSel = c;
-        break;
+      if (c) {
+        var n = up.querySelectorAll(c).length;
+        if (n > mostSiblings) mostSiblings = n;
+        if (n > 1) {
+          rowSel = c;
+          break;
+        }
       }
-      row = p;
+      row = up;
+    }
+    // 两种失败原因必须分开：一个是"这一条列表就一条"，一个是"样式不稳定"。
+    // 揉成一句话会让人反复重点（用户真机上就是这么被卡住的）。
+    var why = '';
+    if (!rowSel) {
+      why =
+        mostSiblings <= 1
+          ? '这一片里只找到 1 条内容 —— 点选需要至少 2 条同类条目才能认出「行」的结构。可以切到「已完成」或换一门作业更多的课再试'
+          : '找不到稳定复用的行样式（它的 class 可能带在线序号）';
     }
     window.__hhPickResult = {
       ok: !!rowSel,
       rowSelector: rowSel,
       titleSelector: clsOf(el),
       sample: String(el.innerText || '').slice(0, 60),
-      error: rowSel ? '' : '没找到重复出现的作业行（这个列表可能只有一条，或者结构太特殊）',
+      error: why,
     };
   }
 
@@ -401,7 +489,11 @@ window.__hhPickStart = function () {
       if (Math.abs(dy) > 6 || Math.abs(startX - t.clientX) > 6) moved = true;
       // 手动转发滚动：遮罩把原生滚动挡住了，不转发的话长列表根本翻不动
       if (moved) {
-        window.scrollBy(0, dy);
+        // 页面内容常在 iframe 里（超星就是），顶层 window.scrollBy 滚不动它
+        var sc = scrollerUnder(t.clientX, t.clientY);
+        if (sc && sc.el) sc.el.scrollTop += dy;
+        else if (sc && sc.win) sc.win.scrollBy(0, dy);
+        else window.scrollBy(0, dy);
         startY = t.clientY;
         startX = t.clientX;
         highlight(null);
