@@ -18,6 +18,7 @@ import {
   detectTimeFormat,
   courseNameFromTitle,
   looksLikeCourseName,
+  guessDefaultCourseId,
 } from '../src/engine/probe.ts';
 import { DeclarativeAdapter } from '../src/index.ts';
 import type { HttpClient, HttpRequest, HttpResponse } from '../src/index.ts';
@@ -346,5 +347,28 @@ describe('用户动作是信号：翻页之后出现的接口更可能是完整�
     // 加权只影响排序，不改变判据：两份都仍然是作业列表
     assert.equal(plain.rowCount, 2);
     assert.equal(late.rowCount, 2);
+  });
+});
+
+describe('课程 ID 参数名：各平台大小写不统一', () => {
+  it('超星用全小写 courseid，也必须认出锚点', () => {
+    // 真机反例（2026-10-27）：超星课内页地址是
+    //   ?courseid=201764055&clazzid=152266486&cpi=...
+    // 原来的正则只认 courseId（驼峰），于是锚点判定整条失效 ——
+    // 而失效的表现是"课程数不对"，没人能看出是这个原因。
+    assert.equal(
+      guessDefaultCourseId(
+        'https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/stu?courseid=201764055&clazzid=152266486&cpi=487116507',
+      ),
+      '201764055',
+    );
+    // 驼峰写法仍然要认（智慧树）
+    assert.equal(
+      guessDefaultCourseId('https://wenda.zhihuishu.com/stu/courseInfo/homeworkExam/?courseId=11430986'),
+      '11430986',
+    );
+    // class_id / cid 变体
+    assert.equal(guessDefaultCourseId('https://x.edu/a?class_id=998877'), '998877');
+    assert.equal(guessDefaultCourseId('https://x.edu/a?clazzid=123'), undefined, 'clazzid 不是课程 ID，别乱认');
   });
 });

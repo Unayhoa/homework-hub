@@ -79,8 +79,22 @@ describe('样本库：识别器改动不能拿一个平台的修复换另一个�
         pageUrl: pack.context.pageUrl,
         pageTitle: pack.context.pageTitle,
       });
+      // 负样本（taskCount: 0）：这个平台的数据根本不在 JSON 里，
+      // 「一个候选都没有」才是正确答案。任何误报都会让用户启用一个坏配置，
+      // 所以这里要反过来断言 —— 误报比放过危险得多。
+      if (pack.expect?.taskCount === 0) {
+        assert.equal(
+          r.tasks.length,
+          0,
+          `${file}: 这是负样本，不该认出任何作业接口（误报会让人启用坏配置）`,
+        );
+        return;
+      }
       const best = r.tasks[0];
       assert.ok(best, `${file}: 曾经认出来过，现在一个候选都没有`);
+      if (typeof pack.expect?.taskCount === 'number' && pack.expect.taskCount > 0) {
+        assert.equal(best.rowCount, pack.expect.taskCount, `${file}: 作业条数变了`);
+      }
       if (pack.expect?.courseName) {
         assert.equal(r.singleCourse?.name, pack.expect.courseName, `${file}: 课程名变了`);
       }

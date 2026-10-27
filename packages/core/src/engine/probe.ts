@@ -76,6 +76,15 @@ export interface ProbeResult {
   tasks: TaskCandidate[];
   courses: CourseCandidate[];
   singleCourse?: SingleCourseHint;
+  /**
+   * 采集到的响应里有没有出现过**任何**对象数组。
+   *
+   * 为什么它值得单独报出来：如果没有，说明这个页面根本不靠 JSON 拉列表
+   * （服务端直接把 HTML 渲染好）—— 此时"再翻一遍页面"是**无效建议**，
+   * 翻多少次都不会出现接口。超星真机（2026-10-27）就是这样：页面能看见作业，
+   * 但发出的 JSON 全是 AI 助手/配置，作业在 HTML 里。
+   */
+  sawAnyArray: boolean;
   /** 看过但不合格的东西，以及为什么 —— 「没找到」必须是可解释的 */
   rejected: Array<{ url: string; reason: string }>;
   /** 一个候选都没有时，告诉用户下一步该做什么 */
@@ -424,6 +433,7 @@ export function analyzeSamples(samples: ProbeSample[], ctx: ProbeContext = {}, l
   // 结构上和"课程列表"一模一样。按结构判，它们就会被认成 4 门课。
   // 而地址里的 courseId 明确说了"你在这门课里"—— 此时课程有且只有一门。
   const anchorId = guessDefaultCourseId(ctx.pageUrl ?? samples[0]?.url ?? '');
+  let sawAnyArray = false;
 
   for (const s of samples) {
     let json: unknown;
@@ -434,6 +444,7 @@ export function analyzeSamples(samples: ProbeSample[], ctx: ProbeContext = {}, l
       continue;
     }
     const arrays = findArrays(json);
+    if (arrays.length > 0) sawAnyArray = true;
     if (arrays.length === 0) {
       rejected.push({ url: s.url, reason: '里面没有对象数组（不像列表接口）' });
       continue;
@@ -491,8 +502,14 @@ export function analyzeSamples(samples: ProbeSample[], ctx: ProbeContext = {}, l
     // 课内录制 → 课程就是那一门，不参与"从响应里认课程"（那只会认成内容）
     courses: anchorId ? [] : topCourses,
     ...(anchorId ? { singleCourse: { platformCourseId: anchorId, ...(name ? { name } : {}) } } : {}),
+    sawAnyArray,
     rejected,
-    needsMore,
+    needsMore: sawAnyArray
+      ? needsMore
+      : [
+          '这个页面的数据看起来不在接口里（页面直接渲染出来的），所以一个列表接口都没采到。',
+          '这种情况下用「点选页面」接入更快：在作业列表页点一条作业标题就行。',
+        ],
   };
 }
 
@@ -558,7 +575,10 @@ export function configIsUsable(cfg: AdapterConfig): { ok: boolean; missing: stri
 
 /** 从一份 URL 里抽出课程 ID（`?courseId=11430986` 这类）—— 试抓单个课程页面时常需要。 */
 export function guessDefaultCourseId(url: string): string | undefined {
-  const m = /[?&](courseId|course_id|classId|class_id|cid)=([A-Za-z0-9_-]{3,})/.exec(url);
+  // 大小写不敏感：同名参数的写法各平台不一致（超星用 `courseid`，智慧树用 `courseId`）。
+  // 漏掉大小写会让「课内录制 → 单课程锚点」整条逻辑对某些平台失效，
+  // 而失效表现为"课程数不对"，用户根本看不出是这个原因。
+  const m = /[?&](course_?id|class_?id|cid)=([A-Za-z0-9_-]{3,})/i.exec(url);
   return m?.[2];
 }
 

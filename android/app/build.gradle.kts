@@ -10,8 +10,8 @@ android {
         applicationId = "cn.homeworkhub.app"
         minSdk = 26          // adaptive icon / WebViewAssetLoader 都要求 26+
         targetSdk = 34
-        versionCode = 110
-        versionName = "0.2.9"
+        versionCode = 111
+        versionName = "0.2.10"
     }
 
     buildTypes {

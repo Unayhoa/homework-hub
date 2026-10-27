@@ -235,8 +235,17 @@ ${RULES}
  * 现在材料由 core 生成，如果靠在各个拼装点自觉脱敏，漏一处就是一次凭据外泄。
  * 所以收口成一个函数，在 buildFixPack 返回前对**所有** payload 跑一遍。
  */
+/**
+ * URL 里像凭据的查询参数 → `***`。
+ *
+ * **按"参数名包含关键词"匹配，不是精确等于**。真机反例（2026-10-27）：超星的
+ * `appAuthToken=...` 是一个真凭据，但它的名字既不是 token 也不是 auth，
+ * 精确匹配全漏了 —— 而它正好出现在导出给我看的样本里。
+ * 这类参数名的变体是无穷的（authToken / accessToken / appAuthToken / apiKey…），
+ * 只能按包含判定。
+ */
 const SECRET_PARAM =
-  /([?&](token|auth|access_token|sign|signature|ticket|key|session|enc|uid|uuid|secretstr|uuidstr|nonce|timestamp|dateformate)=)[^&\s"'\\,)]*/gi;
+  /([?&]([^=&#\s]*(?:token|auth|sign|secret|key|ticket|nonce|uuid|enc)[^=&#\s]*)=)[^&\s"'\\,)]*/gi;
 
 export function maskSecrets(text: string): string {
   return String(text ?? '').replace(SECRET_PARAM, '$1***');
@@ -262,6 +271,11 @@ export interface FixInput {
   /** 平台名与站点（材料自包含需要） */
   platformName?: string;
   origin?: string;
+  /**
+   * 采集到的响应里一个对象数组都没有。
+   * 为真时说明"再翻一遍页面"是无效建议 —— 数据根本不在 JSON 里，只能读页面。
+   */
+  noJsonList?: boolean;
 }
 
 /**
@@ -307,6 +321,18 @@ function buildFixPackInner(input: FixInput): FixPack {
       };
 
     case 'probe-empty': {
+      // 关键分叉：**数据不在接口里**和**只是没翻到**，给的建议必须相反。
+      // 前者让他再翻一遍是白费力气（超星真机：页面有作业，JSON 里全是 AI 助手配置），
+      // 而且会让用户以为是自己操作错了。
+      if (input.noJsonList) {
+        return {
+          kind,
+          headline: `${name} 的作业不在接口里（页面直接渲染出来的），接口方式读不到。`,
+          nextStep: '改用「点选页面」：在作业列表页点一条作业标题，选中的那一行就是规则。',
+          actions: [{ label: '改用页面点选', kind: 'tap', id: 'use-dom' }],
+          aiCanFix: false,
+        };
+      }
       const pack = [
         '# 需要你判断：哪个接口是作业列表',
         '',

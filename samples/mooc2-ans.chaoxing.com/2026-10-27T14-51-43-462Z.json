@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "platformHint": "mooc2-ans.chaoxing.com",
+  "capturedAt": "2026-10-27T14:51:43.462Z",
+  "context": {
+    "pageUrl": "https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/stu?courseid=201764055&clazzid=152266486&cpi=487116507&enc=***&t=1793112694556&pageHeader=8&v=2&hideHead=0",
+    "pageTitle": "高级语言程序设计"
+  },
+  "requests": [
+    {
+      "url": "https://robot-lc.chaoxing.com/v1/api/websdk/verify",
+      "method": "POST",
+      "status": 200,
+      "body": "{\n  \"statusCode\": 0,\n  \"msg\": \"<s1 len=4>\",\n  \"data\": {\n    \"result\": true\n  }\n}"
+    },
+    {
+      "url": "https://robot-lc.chaoxing.com/v1/api/robot/course/getRobotId?courseId=201764055&unitId=181&appId=108366570&appAuthToken=***",
+      "method": "GET",
+      "status": 200,
+      "body": "{\n  \"statusCode\": 0,\n  \"msg\": \"<s1 len=4>\",\n  \"data\": {\n    \"cartoonSetting\": \"<s2 len=290>\",\n    \"unitId\": 181,\n    \"robotId\": \"<s3 len=32>\",\n    \"accessToken\": \"<s4 len=32>\"\n  }\n}"
+    },
+    {
+      "url": "https://robot-lc.chaoxing.com/v1/api/robot/course/getCartoonSetting?unitId=181&robotId=3fe92415c9d24d3cae0653acc9080897",
+      "method": "GET",
+      "status": 200,
+      "body": "{\n  \"statusCode\": 0,\n  \"msg\": \"<s1 len=4>\",\n  \"data\": {\n    \"cartoonSetting\": \"<s2 len=290>\",\n    \"accessToken\": \"<s3 len=32>\"\n  }\n}"
+    },
+    {
+      "url": "https://robot-lc.chaoxing.com/v1/api/doorChat/check?unitId=181&robotId=3fe92415c9d24d3cae0653acc9080897&enc=***",
+      "method": "GET",
+      "status": 200,
+      "body": "{\n  \"statusCode\": 0,\n  \"msg\": \"<s1 len=4>\",\n  \"data\": {\n    \"id\": 112498,\n    \"offsetRight\": \"20\",\n    \"offsetBottom\": \"100\",\n    \"width\": 120,\n    \"height\": 120,\n    \"buttonImg\": \"<s2 len=46>\",\n    \"robotId\": \"<s3 len=32>\",\n    \"unitId\": 181,\n    \"miniScale\": 100\n  }\n}"
+    },
+    {
+      "url": "https://robot-lc.chaoxing.com/v1/front/chat/digitalHuman/getCartoonMaterial?preset=normal",
+      "method": "GET",
+      "status": 200,
+      "body": "{\n  \"statusCode\": 0,\n  \"msg\": \"<s1 len=4>\",\n  \"data\": {\n    \"owner\": \"<s2 len=4>\",\n    \"preset\": \"<s3 len=6>\",\n    \"idleTime\": 3000,\n    \"updateTime\": \"2025-09-05 16:33:08\"\n  }\n}"
+    }
+  ],
+  "expect": {
+    "taskCount": 0,
+    "courseCount": 0
+  },
+  "dropped": []
+}

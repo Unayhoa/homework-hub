@@ -689,6 +689,8 @@ export function createApiHandler(deps: ApiDeps): ApiHandler {
               origin,
               samples,
               error: analysis.needsMore.join('；') || undefined,
+              // 一个数组都没出现过 → 数据不在 JSON 里，别再让他翻页面了
+              ...(analysis.sawAnyArray ? {} : { noJsonList: true }),
             })
           : passed.length === 0
             ? buildFixPack({

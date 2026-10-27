@@ -152,3 +152,52 @@ describe('探查失败时的闭环：分析 → 修复包', () => {
     assert.ok(p.actions.some((a) => a.kind === 'copy'));
   });
 });
+
+describe('脱敏：参数名的变体也是凭据（超星真机反例）', () => {
+  it('appAuthToken / authToken / accessToken / apiKey 都要打码', () => {
+    // 真机反例（2026-10-27）：超星样本里出现
+    //   ?courseId=...&appId=...&appAuthToken=b8336ee4b154ba8fabe630ee51e1ec54
+    // 它既不是 token 也不是 auth，精确匹配全漏了 —— 而它确实是一个凭据。
+    const p = buildFixPack({
+      code: 'PROBE_EMPTY',
+      samples: [
+        {
+          url: 'https://robot-lc.chaoxing.com/v1/api/robot/course/getRobotId?courseId=201764055&appAuthToken=b8336ee4b154ba8fabe630ee51e1ec54',
+          body: '{"statusCode":0,"data":{"robotId":"x"}}',
+        },
+        { url: 'https://x.edu/a?authToken=AAA111&apiKey=BBB222&page=2', body: '{"data":[]}' },
+      ],
+      platformName: '超星',
+      origin: 'https://mooc2-ans.chaoxing.com',
+    });
+    const payload = p.actions.find((a) => a.kind === 'copy')?.payload ?? '';
+    assert.ok(!payload.includes('b8336ee4b154ba8fabe630ee51e1ec54'), 'appAuthToken 泄漏');
+    assert.ok(!payload.includes('AAA111'), 'authToken 泄漏');
+    assert.ok(!payload.includes('BBB222'), 'apiKey 泄漏');
+    assert.ok(payload.includes('page=2'), '非敏感参数不该被抹（否则看不出分页）');
+  });
+});
+
+describe('「认不出」的两种原因，建议必须相反', () => {
+  // 真机（2026-10-27，超星）：页面能看见作业，但发出的 JSON 全是 AI 助手/配置，
+  // 一个数组都没有。此时让他"再翻一遍作业列表"是白费力气 —— 翻多少次都不会出现接口。
+  it('一个数组都没出现 → 直接引导页面点选，不给"再试一次"', () => {
+    const p = buildFixPack({
+      code: 'PROBE_EMPTY',
+      platformName: '超星学习通',
+      origin: 'https://mooc2-ans.chaoxing.com',
+      noJsonList: true,
+    });
+    assert.equal(p.aiCanFix, false, '数据不在接口里，AI 改配置也救不了');
+    assert.equal(p.actions.length, 1);
+    assert.equal(p.actions[0]!.id, 'use-dom', '唯一出路是改用页面点选');
+    assert.ok(!p.actions.some((a) => a.kind === 'copy'), '不要给"复制给 AI"——它没法让 HTML 变成接口');
+    assert.ok(/不在接口里|页面/.test(p.headline));
+  });
+
+  it('出现过数组但都不像列表 → 仍然让他再采一次（可能是页面没翻到）', () => {
+    const p = buildFixPack({ code: 'PROBE_EMPTY', platformName: 'P', origin: 'https://x.edu' });
+    assert.equal(p.aiCanFix, true);
+    assert.ok(p.actions.some((a) => a.id === 'recollect'));
+  });
+});
