@@ -198,10 +198,21 @@ window.__hhPickStart = function () {
   bye(MASK_ID);
   bye(TIP_ID);
 
+  var oldStyle = document.getElementById('__hhPickStyle');
+  if (oldStyle && oldStyle.parentNode) oldStyle.parentNode.removeChild(oldStyle);
+
   var style = document.createElement('style');
   style.id = '__hhPickStyle';
-  style.textContent = '.' + HL_CLASS + '{outline:2px solid #2563eb !important;outline-offset:2px !important;background:rgba(37,99,235,.08) !important}';
-  if (!document.getElementById('__hhPickStyle')) document.head.appendChild(style);
+  style.textContent =
+    '.' + HL_CLASS + '{outline:2px solid #2563eb !important;outline-offset:2px !important;background:rgba(37,99,235,.08) !important}' +
+    // 第三层防护：点选期间**页面所有元素都不接收点击**，只有遮罩和提示条例外。
+    // 这挡住的是"页面的高 z-index 浮层盖在遮罩之上"—— 那时点击落在浮层上，
+    // 既不在遮罩上、也拦不住它的内联 handler。pointer-events:none 让它直接不参与命中测试，
+    // 事件只能落到遮罩上。SPA 的浮层（AI 助手球、悬浮按钮）就是这样。
+    'html,body,body *{pointer-events:none !important}' +
+    '#' + MASK_ID + ',#' + TIP_ID + '{pointer-events:auto !important}';
+  if (document.head) document.head.appendChild(style);
+  else document.documentElement.appendChild(style);
 
   var mask = document.createElement('div');
   mask.id = MASK_ID;
@@ -221,6 +232,31 @@ window.__hhPickStart = function () {
   );
   tip.textContent = '选择模式 · 点一条作业标题（上下滑动可以滚动）';
 
+  /**
+   * 全局 capture 拦截：**这是最关键的一层**。
+   *
+   * 只把遮罩放上去是不够的：事件落在遮罩上，然后**继续冒泡**到 document / window，
+   * 而 SPA（超星就是）几乎都把点击委托绑在那上面。委托 handler 只看坐标、不看 target，
+   * 于是"点在遮罩上"对它来说和"点在作业行上"没有区别 —— 照样跳转。
+   * 真机 2026-10-27：遮罩看得见，但一点就穿透，就是这个原因。
+   *
+   * 所以要在**比页面更早的阶段**（window capture）把所有指针事件掐断，
+   * 只放行落在遮罩上的那些（由遮罩自己的 handler 处理）。
+   * 我们比页面脚本先注册（recorder 在 onPageStarted 注入），所以同一个节点上我们排在前面。
+   */
+  var STOP_TYPES = [
+    'touchstart', 'touchmove', 'touchend', 'touchcancel',
+    'pointerdown', 'pointermove', 'pointerup', 'pointercancel',
+    'mousedown', 'mousemove', 'mouseup',
+    'click', 'dblclick', 'contextmenu',
+  ];
+  function blocker(e) {
+    if (e.target === mask || (mask.contains && mask.contains(e.target))) return; // 放行给遮罩自己处理
+    e.stopPropagation();
+    if (e.stopImmediatePropagation) e.stopImmediatePropagation();
+    if (e.cancelable) e.preventDefault();
+  }
+
   var hl = null;
   function highlight(el) {
     if (hl === el) return;
@@ -229,21 +265,37 @@ window.__hhPickStart = function () {
     if (hl && hl.classList) hl.classList.add(HL_CLASS);
   }
 
-  /** 遮罩下面那个真实元素。 */
+  /**
+   * 遮罩下面那个真实元素。
+   *
+   * **必须先临时解冻**：`pointer-events:none` 的元素不参与 hit-testing，
+   * 冻结页面之后 elementsFromPoint 会跳过所有页面元素，只剩下遮罩和 body ——
+   * 于是永远点不中任何东西。这个冲突必须靠"取元素时解冻、取完立刻冻结"来绕。
+   * 同步执行，中间不会插入任何事件，所以没有闪烁也不会漏点击。
+   */
   function elUnder(x, y) {
-    if (document.elementsFromPoint) {
-      var list = document.elementsFromPoint(x, y) || [];
-      for (var i = 0; i < list.length; i += 1) {
-        var n = list[i];
-        if (n === mask || n === tip) continue;
-        return n;
-      }
+    var st = document.getElementById('__hhPickStyle');
+    var wasDisabled = false;
+    if (st) {
+      wasDisabled = !!st.disabled;
+      st.disabled = true; // 解冻
     }
-    // 兜底：临时不接收指针，取完立刻恢复（同步执行，用户看不出闪烁）
-    mask.style.pointerEvents = 'none';
-    var el = document.elementFromPoint(x, y);
-    mask.style.pointerEvents = 'auto';
-    return el;
+    try {
+      if (document.elementsFromPoint) {
+        var list = document.elementsFromPoint(x, y) || [];
+        for (var i = 0; i < list.length; i += 1) {
+          var n = list[i];
+          if (n === mask || n === tip) continue;
+          if (n === document.body || n === document.documentElement) continue;
+          return n;
+        }
+      }
+      var el = document.elementFromPoint(x, y);
+      if (el === mask || el === tip || el === document.body) return null;
+      return el;
+    } finally {
+      if (st && !wasDisabled) st.disabled = false; // 重新冻结
+    }
   }
 
   function clsOf(el) {
@@ -261,6 +313,12 @@ window.__hhPickStart = function () {
     if (mask.parentNode) mask.parentNode.removeChild(mask);
     if (tip.parentNode) tip.parentNode.removeChild(tip);
     window.removeEventListener('keydown', onKey, true);
+    for (var i = 0; i < STOP_TYPES.length; i += 1) {
+      window.removeEventListener(STOP_TYPES[i], blocker, true);
+    }
+    // 必须把冻结样式一起撤掉，否则退出后整个页面点不动（比穿透更难查）
+    var st = document.getElementById('__hhPickStyle');
+    if (st && st.parentNode) st.parentNode.removeChild(st);
   }
 
   function onKey(e) {
@@ -304,9 +362,26 @@ window.__hhPickStart = function () {
   var moved = false;
   var lastTouchAt = 0;
 
+  /**
+   * 遮罩上的事件必须**同时**做三件事：
+   *   1. stopPropagation —— 不让它冒泡到 document/window 的委托 handler（穿透的真正原因）；
+   *   2. preventDefault —— 阻止链接跳转、阻止合成后续 click；
+   *   3. 不使用 passive —— passive 下 preventDefault 是**空操作**，
+   *      上一版就是栽在这里：看着写了 preventDefault，实际一次都没生效。
+   */
+  function swallow(e) {
+    e.stopPropagation();
+    if (e.cancelable) e.preventDefault();
+  }
+
   mask.addEventListener(
     'touchstart',
     function (e) {
+      swallow(e);
+      // SPA 可能在我们之后又插入了更高层的浮层 —— 每次触摸把遮罩收回最上层
+      if (mask.parentNode !== document.body || document.body.lastElementChild !== mask) {
+        document.body.appendChild(mask);
+      }
       var t = e.touches[0];
       startY = t.clientY;
       startX = t.clientX;
@@ -314,12 +389,13 @@ window.__hhPickStart = function () {
       var el = elUnder(t.clientX, t.clientY);
       if (el) highlight(el);
     },
-    { passive: true },
+    { passive: false },
   );
 
   mask.addEventListener(
     'touchmove',
     function (e) {
+      swallow(e);
       var t = e.touches[0];
       var dy = startY - t.clientY;
       if (Math.abs(dy) > 6 || Math.abs(startX - t.clientX) > 6) moved = true;
@@ -334,33 +410,43 @@ window.__hhPickStart = function () {
         if (el) highlight(el);
       }
     },
-    { passive: true },
+    { passive: false },
   );
 
   mask.addEventListener('touchend', function (e) {
+    swallow(e);
     lastTouchAt = Date.now();
     // touchend 里 touches 已经空了，用 changedTouches
     var t = e.changedTouches && e.changedTouches[0];
     if (!t) return;
-    if (moved) {
-      window.__hhPicking = false;
-      return; // 滚动结束，继续留在选择模式
-    }
+    if (moved) return; // 滚动结束，继续留在选择模式
     select(t.clientX, t.clientY);
+  });
+
+  mask.addEventListener('touchcancel', function (e) {
+    swallow(e);
+    window.__hhPicking = false;
   });
 
   // ---- 鼠标（桌面 WebView / 外接鼠标）：悬停高亮，点击选中 ----
   mask.addEventListener('mousemove', function (e) {
+    swallow(e);
     var el = elUnder(e.clientX, e.clientY);
     if (el) highlight(el);
   });
+  mask.addEventListener('mousedown', swallow);
+  mask.addEventListener('mouseup', swallow);
   mask.addEventListener('click', function (e) {
+    swallow(e);
     // 触摸刚结束时不重复处理（Android 会在 touchend 后补一个 click）
     if (Date.now() - lastTouchAt < 600) return;
     select(e.clientX, e.clientY);
   });
 
   window.addEventListener('keydown', onKey, true);
+  for (var k = 0; k < STOP_TYPES.length; k += 1) {
+    window.addEventListener(STOP_TYPES[k], blocker, true);
+  }
   document.body.appendChild(mask);
   document.body.appendChild(tip);
   return 'ok';
