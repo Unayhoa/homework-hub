@@ -166,31 +166,117 @@
  * 为什么让用户点一下而不是让 AI 从 DOM 里猜：这是唯一**当场可验证**的路径。
  * 猜出来的选择器要等同步失败才知道错，点选出来的立刻能试抓一次。
  */
+/**
+ * 点选模式：用一个**全屏遮罩**接管所有指针事件。
+ *
+ * 为什么不能只拦 click（真机 2026-10-27 的教训）：
+ * 原来是在 document 的 capture 阶段拦 click + preventDefault，看起来无懈可击，
+ * 但超星的作业行点了之后**照样跳进了作业详情**。原因是它的跳转不在 click 上 ——
+ * 可能在 mousedown / touchstart，也可能挂在比我们更早注册的 capture handler 上。
+ * 拦一种事件类型，挡不住另一种。
+ *
+ * 遮罩的可靠性在于：事件**根本到不了页面**，不依赖"猜它挂在哪"。
+ * 代价是滚动也被挡住了，所以这里手动转发滚动（单指拖动 = 滚动，不拖动 = 选中）。
+ *
+ * 目标元素用 elementsFromPoint 取（遮罩在最上层，直接 elementFromPoint 会拿到自己）；
+ * 老 WebView 没有 elementsFromPoint 时，临时让遮罩不接收指针再取一次。
+ */
 window.__hhPickStart = function () {
   if (window.__hhPicking) return 'already';
   window.__hhPicking = true;
 
+  var Z = 2147483647;
+  var TIP_ID = '__hhPickTip';
+  var MASK_ID = '__hhPickMask';
+  var HL_CLASS = '__hhPickHl';
+
+  // 清掉上一次可能残留的东西（用户中途退出会留下）
+  function bye(id) {
+    var n = document.getElementById(id);
+    if (n && n.parentNode) n.parentNode.removeChild(n);
+  }
+  bye(MASK_ID);
+  bye(TIP_ID);
+
+  var style = document.createElement('style');
+  style.id = '__hhPickStyle';
+  style.textContent = '.' + HL_CLASS + '{outline:2px solid #2563eb !important;outline-offset:2px !important;background:rgba(37,99,235,.08) !important}';
+  if (!document.getElementById('__hhPickStyle')) document.head.appendChild(style);
+
+  var mask = document.createElement('div');
+  mask.id = MASK_ID;
+  mask.setAttribute(
+    'style',
+    'position:fixed;left:0;top:0;right:0;bottom:0;z-index:' + Z + ';' +
+      'background:rgba(37,99,235,.10);cursor:crosshair;touch-action:none',
+  );
+
+  var tip = document.createElement('div');
+  tip.id = TIP_ID;
+  tip.setAttribute(
+    'style',
+    'position:fixed;left:8px;right:8px;top:8px;padding:8px 12px;background:#2563eb;color:#fff;' +
+      'border-radius:8px;font:13px/1.4 system-ui,-apple-system,sans-serif;text-align:center;' +
+      'z-index:' + Z + ';box-shadow:0 2px 10px rgba(0,0,0,.25)',
+  );
+  tip.textContent = '选择模式 · 点一条作业标题（上下滑动可以滚动）';
+
+  var hl = null;
+  function highlight(el) {
+    if (hl === el) return;
+    if (hl && hl.classList) hl.classList.remove(HL_CLASS);
+    hl = el;
+    if (hl && hl.classList) hl.classList.add(HL_CLASS);
+  }
+
+  /** 遮罩下面那个真实元素。 */
+  function elUnder(x, y) {
+    if (document.elementsFromPoint) {
+      var list = document.elementsFromPoint(x, y) || [];
+      for (var i = 0; i < list.length; i += 1) {
+        var n = list[i];
+        if (n === mask || n === tip) continue;
+        return n;
+      }
+    }
+    // 兜底：临时不接收指针，取完立刻恢复（同步执行，用户看不出闪烁）
+    mask.style.pointerEvents = 'none';
+    var el = document.elementFromPoint(x, y);
+    mask.style.pointerEvents = 'auto';
+    return el;
+  }
+
   function clsOf(el) {
-    if (!el || !el.className) return '';
+    if (!el || !el.className || typeof el.className !== 'string') return '';
     var c = String(el.className).trim().split(/\s+/)[0];
-    // 过滤掉带状态/序号的动态类名（list-item-3、active、hover 之类）
+    // 过滤带状态/序号的动态类名（list-item-3、active、hover 之类）
     if (!c || /\d/.test(c) || /^(active|on|hover|selected|cur)$/i.test(c)) return '';
     return '.' + c;
   }
 
-  function pickHandler(e) {
-    e.preventDefault();
-    e.stopPropagation();
+  function done() {
     window.__hhPicking = false;
-    document.removeEventListener('click', pickHandler, true);
+    if (hl && hl.classList) hl.classList.remove(HL_CLASS);
+    hl = null;
+    if (mask.parentNode) mask.parentNode.removeChild(mask);
+    if (tip.parentNode) tip.parentNode.removeChild(tip);
+    window.removeEventListener('keydown', onKey, true);
+  }
 
-    var el = e.target;
-    while (el && el.nodeType !== 1) el = el.parentElement;
-    if (!el) {
-      window.__hhPickResult = { ok: false, error: '没点到元素' };
+  function onKey(e) {
+    if (e.key === 'Escape' || e.keyCode === 27) {
+      window.__hhPickResult = { ok: false, error: '已取消' };
+      done();
+    }
+  }
+
+  function select(x, y) {
+    var el = elUnder(x, y);
+    done();
+    if (!el || el === document.body || el === document.documentElement) {
+      window.__hhPickResult = { ok: false, error: '没点到具体内容，再试一次' };
       return;
     }
-
     // 向上找「有多个同类兄弟」的祖先 —— 那就是一行作业
     var row = el;
     var rowSel = '';
@@ -203,18 +289,80 @@ window.__hhPickStart = function () {
       }
       row = p;
     }
-
-    var titleSel = clsOf(el);
     window.__hhPickResult = {
       ok: !!rowSel,
       rowSelector: rowSel,
-      titleSelector: titleSel,
+      titleSelector: clsOf(el),
       sample: String(el.innerText || '').slice(0, 60),
       error: rowSel ? '' : '没找到重复出现的作业行（这个列表可能只有一条，或者结构太特殊）',
     };
   }
 
-  document.addEventListener('click', pickHandler, true);
+  // ---- 触摸：拖动 = 滚动，轻点 = 选中 ----
+  var startY = 0;
+  var startX = 0;
+  var moved = false;
+  var lastTouchAt = 0;
+
+  mask.addEventListener(
+    'touchstart',
+    function (e) {
+      var t = e.touches[0];
+      startY = t.clientY;
+      startX = t.clientX;
+      moved = false;
+      var el = elUnder(t.clientX, t.clientY);
+      if (el) highlight(el);
+    },
+    { passive: true },
+  );
+
+  mask.addEventListener(
+    'touchmove',
+    function (e) {
+      var t = e.touches[0];
+      var dy = startY - t.clientY;
+      if (Math.abs(dy) > 6 || Math.abs(startX - t.clientX) > 6) moved = true;
+      // 手动转发滚动：遮罩把原生滚动挡住了，不转发的话长列表根本翻不动
+      if (moved) {
+        window.scrollBy(0, dy);
+        startY = t.clientY;
+        startX = t.clientX;
+        highlight(null);
+      } else {
+        var el = elUnder(t.clientX, t.clientY);
+        if (el) highlight(el);
+      }
+    },
+    { passive: true },
+  );
+
+  mask.addEventListener('touchend', function (e) {
+    lastTouchAt = Date.now();
+    // touchend 里 touches 已经空了，用 changedTouches
+    var t = e.changedTouches && e.changedTouches[0];
+    if (!t) return;
+    if (moved) {
+      window.__hhPicking = false;
+      return; // 滚动结束，继续留在选择模式
+    }
+    select(t.clientX, t.clientY);
+  });
+
+  // ---- 鼠标（桌面 WebView / 外接鼠标）：悬停高亮，点击选中 ----
+  mask.addEventListener('mousemove', function (e) {
+    var el = elUnder(e.clientX, e.clientY);
+    if (el) highlight(el);
+  });
+  mask.addEventListener('click', function (e) {
+    // 触摸刚结束时不重复处理（Android 会在 touchend 后补一个 click）
+    if (Date.now() - lastTouchAt < 600) return;
+    select(e.clientX, e.clientY);
+  });
+
+  window.addEventListener('keydown', onKey, true);
+  document.body.appendChild(mask);
+  document.body.appendChild(tip);
   return 'ok';
 };
 

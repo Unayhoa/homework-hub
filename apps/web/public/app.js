@@ -1699,6 +1699,24 @@ async function copyText(text) {
   }
 }
 
+/**
+ * 点选模式该从哪一页开始。
+ *
+ * 优先回到刚才那一页；但**带短命签名参数的地址重开大概率失效**（超星的 enc、时间戳 t），
+ * 硬用会得到一个打不开的页面 —— 那比从首页进更糟，因为用户会以为功能坏了。
+ * 所以这类地址退回平台首页，让他自己点进去。
+ */
+function domStartUrl() {
+  const typed = ($('probeUrl')?.value || '').trim();
+  const page = (captureSession.pageUrl || '').trim();
+  if (!page) return typed;
+  // enc / sign / token / 10 位以上时间戳：都是一次性或短命的
+  if (/[?&](enc|sign|token|auth)=|[?&]t=\d{10,}/i.test(page)) {
+    return typed || originOf(page);
+  }
+  return page;
+}
+
 async function runFixAction(a) {
   if (!a) return;
   if (a.kind === 'copy') {
@@ -1729,7 +1747,11 @@ async function runFixAction(a) {
   // tap：动作语义由后端给，**不按按钮文字匹配**（改一个字就断，且断了没有任何提示）
   const url = ($('probeUrl')?.value || '').trim();
   const name = ($('probeName')?.value || '').trim();
-  if (a.id === 'use-dom' || a.id === 'repick') {
+  if (a.id === 'use-dom') {
+    // 回到**刚才采集时那一页**（他点「回应用」时正看着作业列表），而不是平台首页。
+    // 让他从首页重新点进课程 → 作业，是把已经走过的路再走一遍。
+    window.Android?.openCapture?.('dom', name, domStartUrl());
+  } else if (a.id === 'repick') {
     window.Android?.openCapture?.('dom', name, url);
   } else if (a.id === 'retry') {
     toast('正在重试…');
