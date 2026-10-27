@@ -1702,19 +1702,21 @@ async function copyText(text) {
 /**
  * 点选模式该从哪一页开始。
  *
- * 优先回到刚才那一页；但**带短命签名参数的地址重开大概率失效**（超星的 enc、时间戳 t），
- * 硬用会得到一个打不开的页面 —— 那比从首页进更糟，因为用户会以为功能坏了。
- * 所以这类地址退回平台首页，让他自己点进去。
+ * **必须用采集时那一页**，哪怕它带着 enc / 时间戳这类参数。
+ *
+ * 原因（真机 2026-10-27 的教训，是上一版的决定造成的）：
+ * 我当初担心 enc 重开会失效，于是这类地址退回平台首页。结果首页是用 **iframe 跨源**
+ * 嵌课程页的 —— 而跨源 iframe 的内容浏览器根本不允许读取，点选永远读不到，
+ * 报"这一块是嵌入的另一个网站"。也就是说：为了躲一个**可能**打不开的风险，
+ * 换来了一个**必然**读不到的结果。
+ *
+ * 用一个"可能失效、但同源"的地址，好过"肯定打得开、但跨源"的地址：
+ * 前者打不开是看得见的（页面白屏/报错），后者是看着正常、点选却永远失败。
  */
 function domStartUrl() {
   const typed = ($('probeUrl')?.value || '').trim();
   const page = (captureSession.pageUrl || '').trim();
-  if (!page) return typed;
-  // enc / sign / token / 10 位以上时间戳：都是一次性或短命的
-  if (/[?&](enc|sign|token|auth)=|[?&]t=\d{10,}/i.test(page)) {
-    return typed || originOf(page);
-  }
-  return page;
+  return page || typed;
 }
 
 async function runFixAction(a) {
