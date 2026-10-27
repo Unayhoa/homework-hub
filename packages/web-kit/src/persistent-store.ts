@@ -28,6 +28,7 @@ const MUTATORS = [
   'upsertAccount',
   'removeAccount',
   'upsertCourses',
+  'deleteCourses',
   'upsertTasks',
   'softDeleteTasks',
   'hardDeleteTasks',
@@ -157,6 +158,10 @@ export class PersistentStore implements HubStore {
   }
   async upsertCourses(courses: UnifiedCourse[]): Promise<void> {
     await this.#inner.upsertCourses(courses);
+    this.#schedule();
+  }
+  async deleteCourses(ids: string[]): Promise<void> {
+    await this.#inner.deleteCourses(ids);
     this.#schedule();
   }
   async upsertTasks(tasks: UnifiedTask[]): Promise<UpsertResult> {

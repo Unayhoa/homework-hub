@@ -56,6 +56,16 @@ export interface AdapterConfig {
   };
   link?: { type?: string; value?: string };
   confidence?: number;
+  /**
+   * 这份配置**对应哪一门课**（平台原始课程 ID，或 `__default`）。
+   *
+   * 什么时候该填：录制时人就在某一门课里（URL 带 courseId）—— 那么这份配置
+   * 天然是"这门课的读取器"，页面上任何列表都是**课程内容**，不是课程目录。
+   * 不填的话，课程维度只能靠任务行上的字段推，而那个字段常常是"资料名"。
+   */
+  defaultCourseId?: string;
+  /** 这门课叫什么。不填就退回平台名。用户随时可以改名（改名只动显示层）。 */
+  courseName?: string;
 }
 
 /** JSON 路径取值：支持 `$.a.b`、`a.b`、`a[0].b`。取不到返回 undefined（不抛）。 */
@@ -111,6 +121,26 @@ export function courseKeyOf(
   if (known) return { id: known, name };
   if (name === fallbackName) return { id: '__default', name };
   return { id: `name:${name}`, name };
+}
+
+/**
+ * 这条任务该挂到哪门课。
+ *
+ * **锚点优先**：配置里声明了 `defaultCourseId`，就说明"这份配置读的就是这一门课"，
+ * 于是任务行上的任何"课程"字段都不该参与判断 —— 那个字段是课程**内容**的名字
+ * （芭蕾舞 / 某个 .mp4），拿它切会切出假课（真机 2026-10-27）。
+ */
+export function courseOfTask(
+  cfg: { defaultCourseId?: string; courseName?: string },
+  platformName: string,
+  nameRaw: unknown,
+  idRaw: unknown,
+  nameToId?: Map<string, string>,
+): { id: string; name: string } {
+  if (cfg.defaultCourseId) {
+    return { id: cfg.defaultCourseId, name: cfg.courseName?.trim() || platformName };
+  }
+  return courseKeyOf(nameRaw, idRaw, platformName, nameToId);
 }
 
 /** 课程名 → 平台课程 ID。索引来自引擎传进来的课程表（也就是 fetchCourses 存下的那批）。 */
@@ -299,7 +329,19 @@ export class DeclarativeAdapter implements PlatformAdapter {
     //   ② 连课程名都没有 → 给一条兜底课程，保证作业有地方挂，课程页不至于空白。
     //      （硬塞进"未分类"会让人在课程页找不到它。）
     if (!this.#cfg.courses?.url) {
+      // ① 锚点课程：这份配置就是"某一门课"的读取器（录制时人在那门课里）。
+      //    这时不能再按任务行上的字段切课程 —— 那个字段是课程**内容**的名字，
+      //    拿它当课程名会把「芭蕾舞」「xxx.mp4」变成三门课（真机 2026-10-27 就是这么错的）。
+      const anchor = this.#cfg.defaultCourseId;
+      if (anchor || this.#cfg.courseName) {
+        return {
+          items: [{ platformCourseId: anchor ?? '__default', name: this.#cfg.courseName || this.displayName }],
+          hasMore: false,
+        };
+      }
+      // ② 任务行里有课程名 → 课程由任务投影出来（引擎补齐），这里不要造虚拟课程
       if (this.#cfg.fields?.course?.path) return { items: [], hasMore: false };
+      // ③ 什么都没有 → 一条兜底课程，保证作业有地方挂
       return {
         items: [{ platformCourseId: '__default', name: this.displayName }],
         hasMore: false,
@@ -389,10 +431,11 @@ export class DeclarativeAdapter implements PlatformAdapter {
         const titleRaw = getByPath(row, cfg.fields.title?.path ?? 'title');
         if (titleRaw === undefined || String(titleRaw).trim() === '') continue;
         // 这条作业属于哪门课 —— 决定课程页能不能按课程分开，不是显示细节
-        const course = courseKeyOf(
+        const course = courseOfTask(
+          cfg,
+          this.displayName,
           cfg.fields.course?.path ? getByPath(row, cfg.fields.course.path) : undefined,
           cfg.fields.course?.idPath ? getByPath(row, cfg.fields.course.idPath) : undefined,
-          this.displayName,
           nameToId,
         );
         const statusRaw = cfg.fields.status?.path ? getByPath(row, cfg.fields.status.path) : undefined;
@@ -734,7 +777,7 @@ export class DomAdapter implements PlatformAdapter {
       if (!deadline) missingTime += 1;
       // 页面上选过「课程名」就按课程分开；没选过就归到兜底课程。
       // 与 API 模式同一套判据（courseKeyOf），不另写一份。
-      const course = courseKeyOf(r.course, r.courseId, this.displayName, courseIndexOf(req.courses));
+      const course = courseOfTask(cfg, this.displayName, r.course, r.courseId, courseIndexOf(req.courses));
       items.push({
         platformTaskId: r.id ? String(r.id) : undefined,
         courseId: course.id,

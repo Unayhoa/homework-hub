@@ -618,7 +618,12 @@ export function createApiHandler(deps: ApiDeps): ApiHandler {
         }
         const origin = String(body.origin ?? samples[0]?.url ?? '');
         const name = String(body.name ?? '').trim() || hostOf(origin) || '未命名平台';
-        const analysis = analyzeSamples(samples);
+        // 页面上下文（标题/地址）一起进去：它决定"人当时在哪一层"，
+        // 而这是唯一不需要猜的信息 —— 课程维度对不对全看它。
+        const analysis = analyzeSamples(samples, {
+          pageUrl: String(body.pageUrl ?? ''),
+          pageTitle: String(body.pageTitle ?? ''),
+        });
 
         // 课程候选：优先用同一个站点、且不是作业列表的那个接口
         const courseCand = analysis.courses[0];
@@ -633,6 +638,7 @@ export function createApiHandler(deps: ApiDeps): ApiHandler {
               name,
               origin,
               ...(courseCand ? { courses: courseCand } : {}),
+              ...(analysis.singleCourse ? { singleCourse: analysis.singleCourse } : {}),
             }),
           );
           // 试抓：走真适配器、真会话、同一套解析器。不写库、不需要账号已存在。

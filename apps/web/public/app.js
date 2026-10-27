@@ -1526,7 +1526,9 @@ async function analyzeCapture(dump) {
   try {
     const r = await api('/api/adapter/probe', {
       method: 'POST',
-      body: JSON.stringify({ samples, origin, name }),
+      // 页面标题/地址必须一起给：地址里的 courseId 决定"人当时在某一门课里"，
+      // 而课内页面上的列表是课程**内容**，不是课程目录（真机踩过）。
+      body: JSON.stringify({ samples, origin, name, pageUrl: dump?.href || '', pageTitle: dump?.title || '' }),
     });
     renderProbeResult(r);
   } catch (e) {
@@ -1657,7 +1659,9 @@ async function adoptDomConfig(payload) {
  * 失败时后端连带返回修复建议，直接渲染。
  */
 async function enableConfig(config, name, knownCount) {
-  busy(true);
+  // **不要全屏蒙版**：它只增加等待成本，而用户此刻要的只是"它在动"。
+  // 就地给一行字 + 底部状态条（和同步一致）就够，界面其余部分照常可用。
+  renderProbe(`<div class="card muted">正在验证并启用…（会真发一次请求确认能读出来）</div>`);
   try {
     const r = await api('/api/adapter/enable', {
       method: 'POST',
@@ -1684,9 +1688,8 @@ async function enableConfig(config, name, knownCount) {
     $('pasteBox')?.classList.add('hidden');
     if ($('probeUrl')) $('probeUrl').value = '';
   } catch (e) {
+    renderFix(null);
     toast(`启用失败：${e.message}`, 5000);
-  } finally {
-    busy(false);
   }
 }
 
@@ -1703,7 +1706,7 @@ $('doImport').addEventListener('click', async () => {
     toast('先把 AI 的回答粘进来');
     return;
   }
-  busy(true);
+  $('importResult').textContent = '正在识别…';
   try {
     const parsed = await api('/api/adapter/import', { method: 'POST', body: JSON.stringify({ text }) });
     if (parsed.ok) {
@@ -1717,24 +1720,20 @@ $('doImport').addEventListener('click', async () => {
       return;
     }
     if (parsed.canEnable) {
-      // 交给 enableConfig：它会让后端先试抓，不通过就给出修复建议
+      // 交给 enableByText：它会让后端先试抓，不通过就给出修复建议
       $('importResult').textContent = '配置已识别，正在验证…';
-      const name = ($('probeName')?.value || '').trim();
-      busy(false);
-      await enableByText(text, name);
+      await enableByText(text, ($('probeName')?.value || '').trim());
       return;
     }
     $('importResult').textContent = parsed.error || '没能识别这段回复';
   } catch (e) {
     $('importResult').textContent = `导入失败：${e.message}`;
-  } finally {
-    busy(false);
   }
 });
 
 /** 文本形态的配置（AI 粘回来的）→ 走同一个启用闸门。 */
 async function enableByText(text, name) {
-  busy(true);
+  $('importResult').textContent = '正在验证…';
   try {
     const r = await api('/api/adapter/enable', {
       method: 'POST',
@@ -1756,8 +1755,6 @@ async function enableByText(text, name) {
     await refresh();
   } catch (e) {
     $('importResult').textContent = `启用失败：${e.message}`;
-  } finally {
-    busy(false);
   }
 }
 

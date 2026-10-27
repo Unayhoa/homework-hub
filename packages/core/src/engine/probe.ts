@@ -51,9 +51,23 @@ export interface CourseCandidate {
   confidence: number;
 }
 
+/** 录制时的页面上下文。判断"人当时在哪一层"比任何字段启发式都可靠。 */
+export interface ProbeContext {
+  pageTitle?: string;
+  pageUrl?: string;
+}
+
+/** 「这份配置读完的就是这一门课」—— 录制时人已经在这门课里了。 */
+export interface SingleCourseHint {
+  platformCourseId: string;
+  /** 从页面标题猜的课程名；猜不出就不给，让上层退回平台名（用户随时能改名） */
+  name?: string;
+}
+
 export interface ProbeResult {
   tasks: TaskCandidate[];
   courses: CourseCandidate[];
+  singleCourse?: SingleCourseHint;
   /** 看过但不合格的东西，以及为什么 —— 「没找到」必须是可解释的 */
   rejected: Array<{ url: string; reason: string }>;
   /** 一个候选都没有时，告诉用户下一步该做什么 */
@@ -62,12 +76,46 @@ export interface ProbeResult {
 
 // ──────────────────────────────────────────────────────────── 字段语义识别
 
-const TITLE_KEY = /^(title|name|homeworkname|taskname|examname|workname|content|标题|名称|作业名|题目)$/i;
+// 标题列：平台很少直接把字段叫 `name` —— 智慧树叫 `recruitName`、超星叫 `workName`。
+// 所以按**后缀**认（xxxName / xxxTitle），而不是要求精确等于 name。
+const TITLE_KEY = /(?:name|title)$|^(?:标题|名称|题目|作业名|内容)$/i;
 const DEADLINE_KEY = /(deadline|endtime|endat|enddate|dueat|duedate|expire|expiretime|close|closetime|截止|结束|限时)/i;
 const STATUS_KEY = /^(status|state|statuscode|statusname|状态|完成状态)$/i;
 const COURSE_KEY = /(course|class|subject|课程|班级|科目)/i;
 const ID_KEY = /(^id$|_id$|id$|uuid|key)/i;
 const PAGE_PARAM = /^(page|pageindex|pageno|pagenum|offset|start)$/i;
+
+/**
+ * 这个名字像不像**课程名**。
+ *
+ * 两个必须挡住的（真机 2026-10-27 的实际输出）：
+ *   · 纯数字 `11430986` —— 那是课程 ID 被当成名字用了
+ *   · `大型歌舞剧《孔子》.mp4` —— 那是课程里的**资料文件**，不是课程
+ * 只要出现这两种之一，就说明这个字段是"内容"，不是"课程"。
+ */
+export function looksLikeCourseName(v: unknown): boolean {
+  const s = String(v ?? '').trim();
+  if (s.length < 1) return false;
+  if (/^\d+$/.test(s)) return false;
+  if (/\.(mp4|mp3|m4a|pdf|docx?|pptx?|xlsx?|zip|rar|7z|txt|md|png|jpe?g|gif|wav|avi|mov)$/i.test(s)) return false;
+  return true;
+}
+
+/**
+ * 从页面标题里猜课程名：`舞蹈欣赏 - 智慧树` → `舞蹈欣赏`。
+ *
+ * 猜不出就返回 undefined —— 宁可让课程显示成平台名（用户能改名），
+ * 也不要拿"在线学堂"这种站点标语当课程名，那会让他更困惑。
+ */
+export function courseNameFromTitle(title: unknown, platformName?: string): string | undefined {
+  const raw = String(title ?? '').trim();
+  if (!raw) return undefined;
+  const head = raw.split(/\s*[-_|｜—–]\s*/)[0]?.trim() ?? '';
+  if (!head || head.length > 40) return undefined;
+  if (/^(课程|作业|任务|首页|学习|登录|我的|在线学堂|智慧树|超星|雨课堂)$/i.test(head)) return undefined;
+  if (platformName && head.toLowerCase() === platformName.toLowerCase()) return undefined;
+  return looksLikeCourseName(head) ? head : undefined;
+}
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -132,12 +180,15 @@ function columnStats(rows: Array<Record<string, unknown>>, key: string) {
   const filled = vals.filter((v) => v !== undefined && v !== null && String(v).trim() !== '');
   const uniq = new Set(filled.map((v) => String(v)));
   const timeHit = filled.filter(looksLikeRealTime).length;
+  // 「像名字」的比例：用来排除纯 ID 列和文件名列（它们不能当课程名/标题）
+  const nameHit = filled.filter(looksLikeCourseName).length;
   return {
     key,
     filled: filled.length,
     total: rows.length,
     uniq: uniq.size,
     timeRatio: filled.length > 0 ? timeHit / filled.length : 0,
+    nameRatio: filled.length > 0 ? nameHit / filled.length : 0,
     sample: filled[0],
   };
 }
@@ -215,7 +266,7 @@ function scoreTaskList(rows: Array<Record<string, unknown>>, url: string, path: 
   // 课程：名字像课程；名字不像就看"取值少且重复出现"的字符串列。
   // 兜底时必须排掉状态列 —— 状态同样"取值少"，拿它当课程会得到一门叫"未完成"的课。
   const courseNameCol =
-    cols.find((c) => COURSE_KEY.test(c.key) && c.filled > 0 && c.key !== idCol?.key) ??
+    cols.find((c) => COURSE_KEY.test(c.key) && c.filled > 0 && c.nameRatio >= 0.8 && c.key !== idCol?.key) ??
     cols
       .filter(
         (c) =>
@@ -223,6 +274,8 @@ function scoreTaskList(rows: Array<Record<string, unknown>>, url: string, path: 
           c.uniq <= Math.max(2, Math.ceil(rows.length / 2)) &&
           typeof c.sample === 'string' &&
           String(c.sample).trim().length >= 2 &&
+          // 兜底列也必须是"像名字"的：否则一门课会变成「11430986」或「xxx.mp4」
+          c.nameRatio >= 0.8 &&
           !detectTimeFormat(c.sample) &&
           c.key !== statusCol?.key &&
           c.key !== idCol?.key,
@@ -301,7 +354,9 @@ function scoreCourseList(rows: Array<Record<string, unknown>>, url: string, path
   const keys = Object.keys(rows[0] ?? {});
   if (keys.length < 2) return undefined;
   const cols = keys.map((k) => columnStats(rows, k));
-  const nameCol = cols.find((c) => TITLE_KEY.test(c.key) && c.filled === c.total && c.uniq >= Math.min(2, rows.length));
+  const nameCol = cols.find(
+    (c) => TITLE_KEY.test(c.key) && c.filled === c.total && c.uniq >= Math.min(2, rows.length) && c.nameRatio >= 0.8,
+  );
   const idCol = cols.find((c) => ID_KEY.test(c.key) && c.uniq === rows.length);
   if (!nameCol || !idCol) return undefined;
   // 有时间列 → 更可能是作业，别抢
@@ -324,10 +379,18 @@ function scoreCourseList(rows: Array<Record<string, unknown>>, url: string, path
  * 返回**排序后的候选**，而不是"唯一答案"：探错的代价是用户白点一次，
  * 而假装确定会让他失去判断依据。每份候选都带 evidence（凭什么）和 warnings（哪里还虚）。
  */
-export function analyzeSamples(samples: ProbeSample[], limit = 3): ProbeResult {
+export function analyzeSamples(samples: ProbeSample[], ctx: ProbeContext = {}, limit = 3): ProbeResult {
   const tasks: TaskCandidate[] = [];
   const courses: CourseCandidate[] = [];
   const rejected: Array<{ url: string; reason: string }> = [];
+
+  // 人当时在哪一层？这是**唯一**不需要猜的信息 —— 它就在地址里。
+  //
+  // 为什么它决定课程维度（真机 2026-10-27 的故障）：用户在「舞蹈欣赏」的作业列表页
+  // 点了回应用，页面上那些带 id + name 的列表是**这门课的内容**（芭蕾舞、某个 .mp4…），
+  // 结构上和"课程列表"一模一样。按结构判，它们就会被认成 4 门课。
+  // 而地址里的 courseId 明确说了"你在这门课里"—— 此时课程有且只有一门。
+  const anchorId = guessDefaultCourseId(ctx.pageUrl ?? samples[0]?.url ?? '');
 
   for (const s of samples) {
     let json: unknown;
@@ -347,9 +410,11 @@ export function analyzeSamples(samples: ProbeSample[], limit = 3): ProbeResult {
       const rows = a.rows as Array<Record<string, unknown>>;
       const t = scoreTaskList(rows, s.url, a.path, [], []);
       if (t) {
+        if (anchorId) t.evidence.push(`录制页在某一门课内（课程 ID ${anchorId}），这些作业都归到这门课`);
         tasks.push(t);
         hit = true;
-      } else {
+      } else if (!anchorId) {
+        // 课内录制的页面上不存在"课程列表"，任何像课程表的数组都是课程内容 —— 不认
         const c = scoreCourseList(rows, s.url, a.path);
         if (c) {
           courses.push(c);
@@ -380,7 +445,15 @@ export function analyzeSamples(samples: ProbeSample[], limit = 3): ProbeResult {
       needsMore.push(`看过的 ${rejected.length} 个响应都不像列表接口（比如只有用户信息、菜单、配置）。`);
     }
   }
-  return { tasks: topTasks, courses: topCourses, rejected, needsMore };
+  const name = anchorId ? courseNameFromTitle(ctx.pageTitle) : undefined;
+  return {
+    tasks: topTasks,
+    // 课内录制 → 课程就是那一门，不参与"从响应里认课程"（那只会认成内容）
+    courses: anchorId ? [] : topCourses,
+    ...(anchorId ? { singleCourse: { platformCourseId: anchorId, ...(name ? { name } : {}) } } : {}),
+    rejected,
+    needsMore,
+  };
 }
 
 /**
@@ -391,14 +464,25 @@ export function analyzeSamples(samples: ProbeSample[], limit = 3): ProbeResult {
  */
 export function buildConfig(
   candidate: TaskCandidate,
-  opts: { key: string; name: string; origin: string; courses?: CourseCandidate; probeUrl?: string },
+  opts: {
+    key: string;
+    name: string;
+    origin: string;
+    courses?: CourseCandidate;
+    probeUrl?: string;
+    singleCourse?: SingleCourseHint;
+  },
 ): AdapterConfig {
+  // 锚点模式下**不要**按任务行切课程：那些"课程名"其实是课程内容的名字。
+  const fields = { ...candidate.fields };
+  if (opts.singleCourse) delete fields.course;
+
   return {
     key: opts.key,
     name: opts.name,
     origin: opts.origin.replace(/\/$/, ''),
     ...(opts.probeUrl ? { probe: { url: opts.probeUrl, expectStatus: 200 } } : {}),
-    ...(opts.courses
+    ...(opts.courses && !opts.singleCourse
       ? {
           courses: {
             url: opts.courses.url,
@@ -408,12 +492,18 @@ export function buildConfig(
           },
         }
       : {}),
+    ...(opts.singleCourse
+      ? {
+          defaultCourseId: opts.singleCourse.platformCourseId,
+          ...(opts.singleCourse.name ? { courseName: opts.singleCourse.name } : {}),
+        }
+      : {}),
     tasks: {
       url: candidate.url,
       listPath: candidate.listPath,
       ...(candidate.pagination ? { pagination: candidate.pagination } : {}),
     },
-    fields: candidate.fields,
+    fields,
     confidence: candidate.confidence,
   };
 }

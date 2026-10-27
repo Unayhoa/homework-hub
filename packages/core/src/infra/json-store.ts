@@ -160,6 +160,11 @@ export class JsonFileStore implements HubStore {
     await this.#schedule();
   }
 
+  async deleteCourses(ids: string[]): Promise<void> {
+    for (const id of ids) delete this.#state.courses[id];
+    await this.#schedule();
+  }
+
   // ---- 任务 ----
   async listTasks(filter?: TaskFilter): Promise<UnifiedTask[]> {
     let all = Object.values(this.#state.tasks);

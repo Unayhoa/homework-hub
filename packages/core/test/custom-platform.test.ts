@@ -28,6 +28,8 @@ import {
   systemClock,
   DeclarativeAdapter,
   canMarkCompleted,
+  makeCourseId,
+  materializeTask,
 } from '../src/index.ts';
 import type { HttpClient, HttpRequest, HttpResponse } from '../src/index.ts';
 
@@ -118,7 +120,7 @@ async function setup(config: unknown) {
     explicit: true,
   });
   const account = (await engine.listAccounts())[0]!;
-  return { dir, engine, account, adapter };
+  return { dir, engine, account, adapter, store };
 }
 
 describe('自定义平台：课程维度必须和内置平台等价', () => {
@@ -203,6 +205,112 @@ describe('自定义平台：课程维度必须和内置平台等价', () => {
         assert.equal(t.statusSource, 'inferred', '没配状态字段就必须标成推断，不能替平台断言');
         assert.equal(canMarkCompleted(t), true, '标不动就等于这条作业永远清不掉');
       }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('课内录制：一门课就是一门课', () => {
+  // 现场：用户在「舞蹈欣赏」的作业列表页录制。config 带锚点课程，
+  // 任务行上的"课程"字段是课程内容的名字（芭蕾舞、某个 .mp4），绝不能拿来切课程。
+  const ANCHORED = {
+    ...CONFIG,
+    courses: undefined,
+    defaultCourseId: '11430986',
+    courseName: '舞蹈欣赏',
+    fields: {
+      id: { path: 'id' },
+      title: { path: 'title' },
+      deadline: { path: 'endAt', format: 'epoch_ms' },
+      status: { path: 'status' },
+      // 故意保留一个"看起来像课程名"的字段，它其实是资料名 —— 锚点模式下必须被忽略
+      course: { path: 'courseName' },
+    },
+  };
+
+  it('课程只有一门（锚点），作业都归到它', async () => {
+    const { dir, engine, account } = await setup(ANCHORED);
+    try {
+      await engine.syncAll({});
+      const courses = await engine.listCoursesWithState(account.id);
+      assert.equal(courses.length, 1, `应该只有一门课，实际 ${courses.length} 门`);
+      assert.equal(courses[0]!.name, '舞蹈欣赏');
+      assert.equal(courses[0]!.taskCount, 2, '作业要归到这门课下');
+
+      const tasks = await engine.upcoming({ withinDays: 365 });
+      assert.equal(new Set(tasks.map((t) => t.courseId)).size, 1, '所有作业必须落在同一门课上');
+      assert.equal(tasks[0]!.courseName, '舞蹈欣赏');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('平台不再报告、也没有任务引用的课程残留会被清掉', async () => {
+    // 他的库里现在就有这种残留：4 门假课（11430986 / 芭蕾舞 / xxx.mp4 / 古代舞蹈）。
+    // 修好识别之后旧记录不会自己消失 —— 必须有一次清理，否则课程页永远显示它们。
+    const { dir, engine, account, store } = await setup(ANCHORED);
+    try {
+      await store.upsertCourses([
+        {
+          id: 'custom-demo:deadbeef:2001',
+          platformId: 'custom-demo',
+          accountId: account.id,
+          platformCourseId: '2001',
+          name: '芭蕾舞',
+          lastSeenAt: new Date().toISOString(),
+        },
+        {
+          id: 'custom-demo:deadbeef:2002',
+          platformId: 'custom-demo',
+          accountId: account.id,
+          platformCourseId: '2002',
+          name: '大型歌舞剧《孔子》.mp4',
+          lastSeenAt: new Date().toISOString(),
+        },
+      ]);
+      assert.equal((await engine.listCoursesWithState(account.id)).length, 2, '先造出 2 条残留（同步前还没有锚点课程）');
+
+      await engine.syncAll({});
+
+      const after = await engine.listCoursesWithState(account.id);
+      assert.equal(after.length, 1, `残留应被清理，实际剩 ${after.map((c) => c.name).join('、')}`);
+      assert.equal(after[0]!.name, '舞蹈欣赏');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('有任务引用的课程绝不删（避免把任务变成孤儿）', async () => {
+    const { dir, engine, account, store } = await setup(ANCHORED);
+    try {
+      await engine.syncAll({});
+      const legacyId = makeCourseId('custom-demo', account.id, 'legacy');
+      // 造一条「平台不再报告、但有任务引用」的课程：比如老师换了课，旧作业还留在库里
+      await store.upsertCourses([
+        {
+          id: legacyId,
+          platformId: 'custom-demo',
+          accountId: account.id,
+          platformCourseId: 'legacy',
+          name: '旧课程',
+          lastSeenAt: new Date().toISOString(),
+        },
+      ]);
+      await store.upsertTasks([
+        materializeTask({
+          platformId: 'custom-demo',
+          accountId: account.id,
+          platformTask: { platformTaskId: 'legacy-1', courseId: 'legacy', courseName: '旧课程', kind: 'homework', title: '旧作业', status: 'pending' },
+          now: new Date(),
+        }),
+      ]);
+
+      await engine.syncAll({});
+
+      const names = (await engine.listCoursesWithState(account.id)).map((c) => c.name);
+      assert.ok(names.includes('舞蹈欣赏'), '锚点课程必须还在');
+      assert.ok(names.includes('旧课程'), '有任务引用的课程不能删 —— 删了任务就成孤儿了');
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

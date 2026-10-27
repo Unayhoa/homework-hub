@@ -92,6 +92,14 @@ export interface HubStore {
   // ---- 课程 ----
   listCourses(accountIds?: string[]): Promise<UnifiedCourse[]>;
   upsertCourses(courses: UnifiedCourse[]): Promise<void>;
+  /**
+   * 删掉若干课程记录（连同它们的行，不删任务）。
+   *
+   * 只给「课程残留」用：平台不再报告、也没有任何任务引用它 ——
+   * 它是历史误解留下的空壳（比如曾把课程内容误认成 4 门课）。
+   * 有任务引用的课程**永远不该删**：那会让任务变成孤儿。
+   */
+  deleteCourses(ids: string[]): Promise<void>;
 
   // ---- 任务 ----
   listTasks(filter?: TaskFilter): Promise<UnifiedTask[]>;

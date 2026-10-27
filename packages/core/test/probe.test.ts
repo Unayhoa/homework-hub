@@ -11,7 +11,14 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { analyzeSamples, buildConfig, configIsUsable, detectTimeFormat } from '../src/engine/probe.ts';
+import {
+  analyzeSamples,
+  buildConfig,
+  configIsUsable,
+  detectTimeFormat,
+  courseNameFromTitle,
+  looksLikeCourseName,
+} from '../src/engine/probe.ts';
 import { DeclarativeAdapter } from '../src/index.ts';
 import type { HttpClient, HttpRequest, HttpResponse } from '../src/index.ts';
 import { materializeTask } from '../src/index.ts';
@@ -190,5 +197,85 @@ describe('探查闭环：分析出来的配置必须真的能跑', () => {
       now: new Date(),
     });
     assert.equal(t2.status, 'submitted', '「已提交」要映射成终态');
+  });
+});
+
+describe('课内录制：课程有且只有一门（真机 2026-10-27 的故障）', () => {
+  // 现场还原：用户在「舞蹈欣赏」的作业列表页点了回应用。
+  // 页面上那些带 id + name 的列表是**这门课的内容**（资料名、文件名），
+  // 结构上和课程目录一模一样 —— 按结构判就会把一门课拆成 4 门。
+  const PAGE_URL = 'https://wenda.zhihuishu.com/stu/courseInfo/homeworkExam/?courseId=11430986';
+  const PAGE_TITLE = '舞蹈欣赏 - 智慧树';
+
+  const MATERIALS = {
+    data: [
+      { id: 11430986, name: '11430986' },
+      { id: 2001, name: '芭蕾舞' },
+      { id: 2002, name: '大型歌舞剧《孔子》.mp4' },
+      { id: 2003, name: '古代舞蹈' },
+    ],
+  };
+  const HOMEWORK = {
+    rt: {
+      dataList: [
+        { recruitId: 1, recruitName: '第一次作业', endTime: '2025-12-07 23:25', courseId: 11430986 },
+        { recruitId: 2, recruitName: '第二次作业', endTime: '2025-12-14 23:25', courseId: 11430986 },
+      ],
+    },
+  };
+
+  it('地址里的 courseId 让"课程=这一门"成为确定的事实，而不是猜', () => {
+    const r = analyzeSamples(
+      [
+        sample(`${PAGE_URL}`, MATERIALS),
+        sample('https://wenda.zhihuishu.com/api/homework/list?courseId=11430986', HOMEWORK),
+      ],
+      { pageUrl: PAGE_URL, pageTitle: PAGE_TITLE },
+    );
+    assert.ok(r.singleCourse, '必须识别出"这份配置就是这一门课"');
+    assert.equal(r.singleCourse?.platformCourseId, '11430986');
+    assert.equal(r.singleCourse?.name, '舞蹈欣赏', '课程名从页面标题取，不该是 11430986');
+    assert.equal(r.courses.length, 0, '课内页面上的列表是课程内容，不能当成课程目录');
+    assert.ok(r.tasks.length >= 1, '作业列表仍要能认出来');
+  });
+
+  it('生成的配置是锚点式的：带 defaultCourseId，且**不带**按行切课程的字段', () => {
+    const r = analyzeSamples([sample(PAGE_URL, HOMEWORK)], { pageUrl: PAGE_URL, pageTitle: PAGE_TITLE });
+    const cfg = buildConfig(r.tasks[0]!, {
+      key: 'zhihuishu',
+      name: '智慧树',
+      origin: 'https://wenda.zhihuishu.com',
+      ...(r.singleCourse ? { singleCourse: r.singleCourse } : {}),
+    });
+    assert.equal(cfg.defaultCourseId, '11430986');
+    assert.equal(cfg.courseName, '舞蹈欣赏');
+    assert.equal(cfg.fields.course, undefined, '锚点模式下不能按任务行切课程，那会切出"芭蕾舞"这种假课');
+    assert.equal(cfg.courses, undefined);
+  });
+
+  it('没有地址线索时，也要挡住「纯 ID」和「文件名」当课程名', () => {
+    // 没有 courseId 可锚（例如用户是在课程列表页录的），次要防线：
+    // 课程名必须是"像名字"的取值，否则退回兜底课程（1 门）而不是 4 门。
+    const r = analyzeSamples([sample('https://x.example.edu/api/material/list', MATERIALS)], {
+      pageUrl: 'https://x.example.edu/api/material/list',
+      pageTitle: '某平台',
+    });
+    assert.equal(r.courses.length, 0, '`11430986` 与 `xxx.mp4` 都不像课程名，不能当课程目录');
+  });
+});
+
+describe('课程名与前缀清理', () => {
+  it('从页面标题里剥掉站点后缀', () => {
+    assert.equal(courseNameFromTitle('舞蹈欣赏 - 智慧树'), '舞蹈欣赏');
+    assert.equal(courseNameFromTitle('舞蹈欣赏 | 在线学堂'), '舞蹈欣赏');
+    // 站点标语不能当课程名 —— 那比没有名字更让人困惑
+    assert.equal(courseNameFromTitle('在线学堂 - 智慧树'), undefined);
+    assert.equal(courseNameFromTitle(''), undefined);
+  });
+
+  it('纯数字与文件名不是课程名', () => {
+    assert.equal(looksLikeCourseName('11430986'), false);
+    assert.equal(looksLikeCourseName('大型歌舞剧《孔子》.mp4'), false);
+    assert.equal(looksLikeCourseName('舞蹈欣赏'), true);
   });
 });

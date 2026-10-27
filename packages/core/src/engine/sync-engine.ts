@@ -1066,6 +1066,21 @@ export class SyncEngine {
       }
     }
 
+    // ---- 课程残留清理 ----
+    //
+    // 什么时候会有残留：以前把课程**内容**误认成课程（真机 2026-10-27：一门课被拆成 4 门）。
+    // 修好识别之后，旧记录不会自己消失 —— 平台不再报告它、也没有任务引用它，
+    // 它就永远挂在课程页上，用户以为"这个平台有 4 门课"。
+    //
+    // 判据同时满足两条才删，缺一不可：
+    //   ① 本轮平台没有报告它（reported 是本轮的课程列表，含缓存）
+    //   ② 库里没有任何任务引用它
+    // 有任务引用的**永远不删** —— 那会让任务变成孤儿，比多一行空课糟得多。
+    // 只在"本轮数据完整"时做：分页中断 / 课程拉取失败时，缺的不是残留而是数据。
+    if (!opts.dryRun && courseError === undefined && complete) {
+      await this.#pruneStaleCourses(account, courses);
+    }
+
     // ---- 提醒 ----
     let reminders: PlannedReminder[] = [];
     if (!opts.dryRun && !opts.skipReminders && this.#reminderSink) {
@@ -1166,6 +1181,27 @@ export class SyncEngine {
     this.#logger.info('补齐了任务引用的课程记录（课程是任务的投影）', {
       accountId: account.id,
       count: add.length,
+    });
+  }
+
+  /**
+   * 删掉「平台不再报告、也没有任务引用」的课程记录。
+   *
+   * 只用于清理历史误解留下的空壳，**不是**通用的课程同步策略：
+   * 课程的增删语义仍由 fetchCourses 决定（它给的是完整列表）。
+   */
+  async #pruneStaleCourses(account: PlatformAccount, reported: UnifiedCourse[]): Promise<void> {
+    const reportedIds = new Set(reported.map((c) => c.platformCourseId));
+    const all = await this.#store.listCourses([account.id]);
+    const tasks = await this.#store.listTasks({ accountIds: [account.id] });
+    const used = new Set(tasks.map((t) => t.courseId));
+    const victims = all.filter((c) => !reportedIds.has(c.platformCourseId) && !used.has(c.id));
+    if (victims.length === 0) return;
+    await this.#store.deleteCourses(victims.map((c) => c.id));
+    this.#logger.info('清理了不再被平台报告、也没有任务引用的课程', {
+      accountId: account.id,
+      count: victims.length,
+      names: victims.slice(0, 5).map((c) => c.name),
     });
   }
 

@@ -104,6 +104,10 @@ export class MemoryStore implements HubStore {
     }
   }
 
+  async deleteCourses(ids: string[]): Promise<void> {
+    for (const id of ids) this.#courses.delete(id);
+  }
+
   async listTasks(filter?: TaskFilter): Promise<UnifiedTask[]> {
     let all = [...this.#tasks.values()];
     if (filter?.accountIds) all = all.filter((t) => filter.accountIds!.includes(t.accountId));
