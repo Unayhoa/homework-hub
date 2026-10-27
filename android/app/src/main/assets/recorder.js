@@ -329,6 +329,13 @@ window.__hhPickStart = function () {
         }
         if (!innerDoc) {
           window.__hhPickFrameBlocked = true; // 跨源：读不到里面的结构
+          // 把这个 iframe 的地址带出去：它有可能是能直接打开的页面。
+          // 直接打开它 = 顶层换成那个域 = 不再跨源，点选就可行了。
+          try {
+            window.__hhPickFrameSrc = el.src || el.getAttribute('src') || '';
+          } catch (e) {
+            window.__hhPickFrameSrc = '';
+          }
           return el;
         }
         var r = el.getBoundingClientRect();
@@ -401,10 +408,12 @@ window.__hhPickStart = function () {
       // 跨源 iframe：这不是"没点中"，是浏览器不允许读 —— 说清楚，别让人反复试
       window.__hhPickResult = {
         ok: false,
+        frameSrc: window.__hhPickFrameSrc || '',
         error:
-          '这一块嵌在别的网站里，浏览器不允许读取它。' +
-          '如果右侧内容有小窗、上面有「展开 / 全屏」图标，先点它把内容展开，再点选一次；' +
-          '或者用「作业列表」那一页的地址重新打开（不要从平台首页点进来）',
+          '这块内容来自另一个网站（' +
+          (window.__hhPickFrameSrc || '未知地址') +
+          '），浏览器不允许跨网站读取。' +
+          '如果上面地址栏已经换成内容页地址，点「打开」进去后再点选一次',
       };
       return;
     }

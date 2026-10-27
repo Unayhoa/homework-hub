@@ -70,6 +70,8 @@ public class BrowseActivity extends Activity {
 
     private WebView webView;
     private TextView status;
+    /** 录制模式的地址栏。点选发现"内容在别的网站"时，会把那个地址填进来复用。 */
+    private EditText urlInput;
     private boolean recording;
     /** "probe" | "dom" */
     private String mode = "probe";
@@ -106,6 +108,7 @@ public class BrowseActivity extends Activity {
             input.setSingleLine(true);
             input.setTextSize(13f);
             input.setInputType(InputType.TYPE_TEXT_VARIATION_URI);
+            urlInput = input; // 记下来：跨站内容页的地址要填回这里
             root.addView(input, wrap());
 
             LinearLayout bar = new LinearLayout(this);
@@ -290,6 +293,17 @@ public class BrowseActivity extends Activity {
 
     private void handlePick(JSONObject r) throws Exception {
         if (!r.optBoolean("ok")) {
+            // 跨网站的内容（超星把课程页嵌在另一个域里）读不到结构。
+            // 但它自己的地址是有可能直接打开的 —— 一旦它成了顶层页面，就不跨源了。
+            // 所以这里把地址填回输入框，用户点「打开」再点选即可，不用自己抄地址。
+            String frameSrc = r.optString("frameSrc", "");
+            if (!frameSrc.isEmpty() && urlInput != null) {
+                urlInput.setText(frameSrc);
+                status.setText(
+                        "这块内容在另一个网站里，读不到它的结构。已把它自己的地址填到上面 —— "
+                                + "点「打开」进去，再点一次「点选作业行」");
+                return;
+            }
             // 停在这个页面让人直接再点一次，比"退回应用 → 重新进入"便宜得多
             status.setText("没识别出来：" + r.optString("error") + "。再点一次「点选作业行」，或返回应用改用自动识别");
             return;
