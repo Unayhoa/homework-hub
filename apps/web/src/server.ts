@@ -17,8 +17,9 @@
  */
 import { createServer } from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { readFile } from 'node:fs/promises';
-import { join, normalize, isAbsolute } from 'node:path';
+import { readFile, mkdir, writeFile } from 'node:fs/promises';
+import { join, normalize, isAbsolute, resolve, relative } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { homedir, networkInterfaces } from 'node:os';
 import { randomBytes } from 'node:crypto';
 
@@ -73,6 +74,24 @@ const engine = new SyncEngine({
   },
 });
 
+/**
+ * 把样本包写到仓库里的 `samples/<host>/<ts>.json`。
+ *
+ * 只在桌面端注入：手机端没有可写的项目目录，样本存在 store 里靠「复制」带出来。
+ * 落进仓库的意义是它能被 `probe-samples.test.ts` 直接读进来当回归判据 ——
+ * 识别器每次改动都有真实现场可比，而不是靠手写 fixture 自说自话。
+ */
+async function saveSampleFile(pack: { platformHint: string; capturedAt: string }): Promise<{ path: string }> {
+  const root = resolve(fileURLToPath(new URL('../../../', import.meta.url)));
+  const host = String(pack.platformHint || 'unknown-host').replace(/[^A-Za-z0-9.-]/g, '_');
+  const dir = join(root, 'samples', host);
+  await mkdir(dir, { recursive: true });
+  const stamp = pack.capturedAt.replace(/[:.]/g, '-');
+  const file = join(dir, `${stamp}.json`);
+  await writeFile(file, JSON.stringify(pack, null, 2), 'utf8');
+  return { path: relative(root, file).replace(/\\/g, '/') };
+}
+
 const handleApi = createApiHandler({
   engine,
   store,
@@ -82,6 +101,7 @@ const handleApi = createApiHandler({
   clock: systemClock,
   reminders: recentReminders,
   buildTransport: createTransportFactory(),
+  saveSample: saveSampleFile,
 });
 
 // ---------------------------------------------------------------- 工具

@@ -22,6 +22,7 @@ import {
 import { DeclarativeAdapter } from '../src/index.ts';
 import type { HttpClient, HttpRequest, HttpResponse } from '../src/index.ts';
 import { materializeTask } from '../src/index.ts';
+import { mapStatus } from '../src/engine/declarative-adapter.ts';
 
 const ORIGIN = 'https://unknown.example.edu';
 
@@ -277,5 +278,73 @@ describe('课程名与前缀清理', () => {
     assert.equal(looksLikeCourseName('11430986'), false);
     assert.equal(looksLikeCourseName('大型歌舞剧《孔子》.mp4'), false);
     assert.equal(looksLikeCourseName('舞蹈欣赏'), true);
+  });
+});
+
+describe('状态语义：能不能看出"交没交"决定任务归谁管', () => {
+  it('中文完成态 → 可用（保住"平台优先"，作业交了会自动离开待办）', () => {
+    const r = analyzeSamples([
+      sample('https://x.edu/api/homework', {
+        data: [
+          { id: 1, title: '作业一', endTime: '2025-12-07 23:25', status: '已提交' },
+          { id: 2, title: '作业二', endTime: '2025-12-08 23:25', status: '未提交' },
+        ],
+      }),
+    ]);
+    assert.equal(r.tasks[0]!.fields.status?.usableForCompletion, undefined, '可用时不该写这个开关');
+  });
+
+  it('英文完成态 → 可用，且 "not submitted" 不能被当成已交', () => {
+    const r = analyzeSamples([
+      sample('https://x.edu/api/tasks', {
+        data: [
+          { id: 1, title: 'A', dueAt: '2025-12-07T23:25:00Z', state: 'submitted' },
+          { id: 2, title: 'B', dueAt: '2025-12-08T23:25:00Z', state: 'not submitted' },
+        ],
+      }),
+    ]);
+    const st = r.tasks[0]!.fields.status!;
+    assert.notEqual(st.usableForCompletion, false, 'submit 类词根应该认得出来');
+    assert.equal(mapStatus('not submitted', undefined), 'pending', 'not submitted 绝不能判成已交');
+    assert.equal(mapStatus('submitted', undefined), 'submitted');
+  });
+
+  it('取值看不出语义（阶段/数字）→ 标记"不可用于判断完成"，交给用户自己标', () => {
+    // 数字状态是最典型的：0/1 到底哪个是已交，没有通用答案。猜错会让作业
+    // 从待办里凭空消失（用户以为做完了），比"标不了"严重得多。
+    const r = analyzeSamples([
+      sample('https://x.edu/api/tasks', {
+        data: [
+          { id: 1, title: 'A', dueAt: '2025-12-07T23:25:00Z', state: '进行中' },
+          { id: 2, title: 'B', dueAt: '2025-12-08T23:25:00Z', state: '未开始' },
+        ],
+      }),
+    ]);
+    assert.equal(r.tasks[0]!.fields.status?.usableForCompletion, false);
+    assert.ok(
+      r.tasks[0]!.evidence.some((e) => e.includes('交给你自己标')),
+      '必须解释为什么它不自动判断完成',
+    );
+  });
+});
+
+describe('用户动作是信号：翻页之后出现的接口更可能是完整列表', () => {
+  it('mark > 0 的候选会被小幅加权，并说明依据', () => {
+    const body = {
+      data: [
+        { id: 1, title: '作业一', endTime: '2025-12-07 23:25' },
+        { id: 2, title: '作业二', endTime: '2025-12-08 23:25' },
+      ],
+    };
+    const plain = analyzeSamples([sample('https://x.edu/api/tasks', body)]).tasks[0]!;
+    const late = analyzeSamples([{ ...sample('https://x.edu/api/tasks', body), mark: 2 }]).tasks[0]!;
+    assert.ok(late.confidence > plain.confidence, '翻页后出现的候选置信度应更高');
+    assert.ok(
+      late.evidence.some((e) => e.includes('翻页')),
+      '必须把「凭什么更可信」写出来，否则用户看到的只是一个更高的分数',
+    );
+    // 加权只影响排序，不改变判据：两份都仍然是作业列表
+    assert.equal(plain.rowCount, 2);
+    assert.equal(late.rowCount, 2);
   });
 });

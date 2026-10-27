@@ -24,6 +24,7 @@ import type { PlatformTask, TaskStatus } from '../domain/task.ts';
 import type { Credentials, Session } from '../ports/vault.ts';
 import type { ReadOnlyPolicy } from '../ports/read-only.ts';
 import { HubError } from '../domain/errors.ts';
+import { urlRequiresSignature } from './probe.ts';
 import { SessionHttpClient } from '../engine/session-http.ts';
 
 
@@ -177,14 +178,36 @@ export function mapStatus(
   cfg: AdapterConfig['fields']['status'],
 ): TaskStatus {
   if (cfg?.usableForCompletion === false) return 'pending';
-  const v = String(raw ?? '');
+  const v = String(raw ?? '').trim();
   if (!v) return 'pending';
   // 配置里显式给了映射表，优先用它
   const mapped = cfg?.values?.[v];
   const label = String(mapped ?? v);
-  if (/(已完成|已交|已提交|已批|待批阅|阅卷中|已迟交)/.test(label)) return 'submitted';
-  if (/(过期|已结束|已关闭)/.test(label)) return 'expired';
+
+  // **先判"没交"再判"交了"**。顺序不能反：
+  // 英文状态里 "not submitted" / "incomplete" 都含有完成类词根，
+  // 先判完成会把这些全部误判成已交 —— 于是作业从待办里消失，用户以为做完了。
+  if (/(未完成|未交|待交|未提交|未批|not\s*submit|unsubmit|incomplete|not\s*done|pending|todo|undone)/i.test(label)) {
+    return 'pending';
+  }
+  if (/(已完成|已交|已提交|已批|待批阅|阅卷中|已迟交|submit|complet|done|finished|graded|approved|passed)/i.test(label)) {
+    return 'submitted';
+  }
+  if (/(过期|已结束|已关闭|expired|overdue|ended|closed)/i.test(label)) return 'expired';
   return 'pending';
+}
+
+/**
+ * 一组状态取值里，有没有任何一个能被认出"交了/没交"。
+ *
+ * 用途是决定 `usableForCompletion`：认不出就不要假装平台报了完成状态
+ * （否则「平台优先」会压住手动标记，用户作业做完永远标不掉）。
+ * 注意这里**不猜数字语义**（status: 0/1 到底哪个是已交，没有通用答案）。
+ */
+export function statusLooksUsable(values: unknown[]): boolean {
+  const seen = values.map((v) => String(v ?? '').trim()).filter(Boolean);
+  if (seen.length === 0) return false;
+  return seen.some((v) => mapStatus(v, undefined) !== 'pending');
 }
 
 /** 时间归一化：认得数字(秒/毫秒)、ISO、以及「2025-12-07 23:25」这类本地时间写法。 */
@@ -351,8 +374,9 @@ export class DeclarativeAdapter implements PlatformAdapter {
     const res = await http.getJson<unknown>(this.#abs(this.#cfg.courses.url));
     const list = getByPath(res.body, this.#cfg.courses.listPath ?? '$.data');
     if (!Array.isArray(list)) {
-      throw new HubError('UPSTREAM', `${this.displayName}：课程列表取不到（配置里的 listPath 可能不对）`, {
+      throw new HubError('PARSE_EMPTY', `${this.displayName}：课程列表取不到（配置里的 listPath 可能不对）`, {
         platformId: this.id,
+        requiresUserAction: true,
       });
     }
     const items: PlatformCourse[] = [];
@@ -378,7 +402,7 @@ export class DeclarativeAdapter implements PlatformAdapter {
     if (/\$?\{courseId\}/.test(out)) {
       if (!cid) {
         throw new HubError(
-          'UPSTREAM',
+          'PARSE_EMPTY',
           `${this.displayName}：这个接口需要课程 ID，但配置里没给（在配置里加 "defaultCourseId"，或把占位符换成具体值）`,
           { platformId: this.id, requiresUserAction: true },
         );
@@ -393,6 +417,18 @@ export class DeclarativeAdapter implements PlatformAdapter {
     const cfg = this.#cfg;
     const items: PlatformTask[] = [];
     const notes: string[] = [];
+
+    // 签名接口：**原理上**跑不通（参数由页面 JS 现算、寿命几十秒）。
+    // 在这里挡住的好处是错误分类准确 —— 否则会表现为"接口返回 403/空列表"，
+    // 用户以为配置写错了，一路往错的方向修。
+    if (urlRequiresSignature(cfg.tasks.url ?? '')) {
+      throw new HubError(
+        'SIGNATURE_REQUIRED',
+        `${this.displayName}：这个接口要页面现算的签名参数，声明式配置拿不到（改用「点选页面」接入）`,
+        { platformId: this.id, requiresUserAction: true },
+      );
+    }
+
     /** 课程名 → 真课程 ID：来自引擎传进来的课程表，保证任务和课程表挂在同一门课上 */
     const nameToId = courseIndexOf(req.courses);
 
@@ -416,7 +452,7 @@ export class DeclarativeAdapter implements PlatformAdapter {
         // 这是「让 AI 自己修配置」能不能成立的前提 —— 诊断包必须自带证据。
         const peek = JSON.stringify(res.body ?? null).slice(0, 600);
         throw new HubError(
-          'UPSTREAM',
+          'PARSE_EMPTY',
           `${this.displayName}：作业列表取不到（listPath「${cfg.tasks.listPath ?? '$.data'}」没命中）。接口返回：${peek}`,
           { platformId: this.id, requiresUserAction: true },
         );
@@ -736,7 +772,7 @@ export class DomAdapter implements PlatformAdapter {
     if (/\$?\{courseId\}/.test(url)) {
       if (!cid) {
         throw new HubError(
-          'UPSTREAM',
+          'PARSE_EMPTY',
           `${this.displayName}：这个页面需要课程 ID，但配置里没给（加一个 defaultCourseId）`,
           { platformId: this.id, requiresUserAction: true },
         );
@@ -753,7 +789,7 @@ export class DomAdapter implements PlatformAdapter {
         timeoutMs: (cfg as unknown as { timeoutMs?: number }).timeoutMs ?? 20000,
       });
     } catch (e) {
-      throw new HubError('UPSTREAM', `${this.displayName}：${(e as Error).message}`, {
+      throw new HubError('SELECTOR_STALE', `${this.displayName}：${(e as Error).message}`, {
         platformId: this.id,
         requiresUserAction: true,
       });
@@ -761,7 +797,7 @@ export class DomAdapter implements PlatformAdapter {
 
     if (!Array.isArray(rows) || rows.length === 0) {
       throw new HubError(
-        'UPSTREAM',
+        'SELECTOR_STALE',
         `${this.displayName}：页面打开了，但一条作业都没抓到（选择器可能已失效）`,
         { platformId: this.id, requiresUserAction: true },
       );

@@ -160,13 +160,19 @@ export function buildEvidencePack(input: {
  *
  * 日期/数字类字符串**保留**：AI 需要知道时间字段长什么样才能填对 format。
  */
-function maskValues(v: unknown, depth = 0): unknown {
+function maskValues(
+  v: unknown,
+  depth = 0,
+  maxRows = 1,
+  /** 值 → 占位符的映射。开启后「同值同号、异值异号」，保住列的基数信息 */
+  ids?: Map<string, string>,
+): unknown {
   if (depth > 6) return '<deep>';
-  if (Array.isArray(v)) return v.slice(0, 1).map((x) => maskValues(x, depth + 1));
+  if (Array.isArray(v)) return v.slice(0, maxRows).map((x) => maskValues(x, depth + 1, maxRows, ids));
   if (v && typeof v === 'object') {
     const out: Record<string, unknown> = {};
     for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
-      out[k] = maskValues(val, depth + 1);
+      out[k] = maskValues(val, depth + 1, maxRows, ids);
     }
     return out;
   }
@@ -174,17 +180,35 @@ function maskValues(v: unknown, depth = 0): unknown {
     // 保留能说明格式的：日期/时间、纯数字、短枚举
     if (/^\d{4}[-/]\d{1,2}[-/]\d{1,2}([ T]\d{1,2}:\d{2}(:\d{2})?)?/.test(v)) return v;
     if (/^\d{1,6}$/.test(v)) return v;
-    return `<string len=${v.length}>`;
+    if (!ids) return `<string len=${v.length}>`;
+    // 保住基数：识别器靠"这一列的取值是否各不相同"来区分标题列/主键列，
+    // 全抹成同一个占位符会让所有列看起来都只有 1 种取值，标题列直接认不出来。
+    // 序号不含任何原值信息（只有长度和"第几个不同值"），所以不会泄漏内容。
+    const hit = ids.get(v);
+    if (hit) return hit;
+    const ph = `<s${ids.size + 1} len=${v.length}>`;
+    ids.set(v, ph);
+    return ph;
   }
   if (typeof v === 'number') return v;
   if (typeof v === 'boolean') return v;
   return v;
 }
 
-/** 给 bodyPreview 做结构脱敏；解析不了就原样（短文本没风险）。 */
-export function maskBody(body: string): string {
+/**
+ * 给 bodyPreview 做结构脱敏；解析不了就原样（短文本没风险）。
+ *
+ * `maxRows`：数组最多保留几行。默认 1（给 AI 的材料越短越好）；
+ * 样本包需要 3 行 —— 「这一列取值是否重复」是区分课程名与标题的唯一依据，
+ * 只留 1 行就永远算不出来。
+ */
+export function maskBody(body: string, maxRows = 1, keepCardinality = false): string {
   try {
-    return JSON.stringify(maskValues(JSON.parse(body)), null, 2);
+    return JSON.stringify(
+      maskValues(JSON.parse(body), 0, maxRows, keepCardinality ? new Map<string, string>() : undefined),
+      null,
+      2,
+    );
   } catch {
     return body;
   }

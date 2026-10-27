@@ -316,3 +316,116 @@ describe('课内录制：一门课就是一门课', () => {
     }
   });
 });
+
+describe('失败必须带可分类的错误码（而不是一句 UPSTREAM）', () => {
+  // 为什么这条重要：修复动作由 code 决定。全归 UPSTREAM 时，上层只能去猜 message，
+  // 猜错就把"签名接口"当成"配置写错"，用户会被引导去改一个改不对的地方。
+  it('签名接口 → SIGNATURE_REQUIRED', async () => {
+    const { dir, engine } = await setup({
+      ...CONFIG,
+      tasks: { url: '/api/tasks?key={uuid}&dateFormate={ts}', listPath: '$.data' },
+    });
+    try {
+      const r = await engine.previewCustomAdapter({
+        key: 'demo',
+        name: '演示平台',
+        origin: ORIGIN,
+        tasks: { url: '/api/tasks?key={uuid}&dateFormate={ts}', listPath: '$.data' },
+        fields: CONFIG.fields,
+      });
+      assert.equal(r.ok, false);
+      assert.equal(r.code, 'SIGNATURE_REQUIRED', `实际 code=${r.code}`);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('listPath 不命中 → PARSE_EMPTY', async () => {
+    const { dir, engine } = await setup(CONFIG);
+    try {
+      const r = await engine.previewCustomAdapter({
+        key: 'demo',
+        name: '演示平台',
+        origin: ORIGIN,
+        tasks: { url: '/api/tasks', listPath: '$.wrong.path' },
+        fields: CONFIG.fields,
+      });
+      assert.equal(r.ok, false);
+      assert.equal(r.code, 'PARSE_EMPTY', `实际 code=${r.code}`);
+      // 错误原文仍要带出来：它是用户复制给 AI 的材料里最有价值的一行
+      assert.ok(String(r.error).includes('$.wrong.path'));
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('首同步自检：同步成功 ≠ 数据对了', () => {
+  it('所有作业都没有截止时间 → 报 PARSE_EMPTY（否则提醒永远不响，用户却看到"同步成功"）', async () => {
+    const NO_DEADLINE = {
+      ...CONFIG,
+      fields: { id: { path: 'id' }, title: { path: 'title' }, status: { path: 'status' } },
+    };
+    const { dir, engine } = await setup(NO_DEADLINE);
+    try {
+      const rep = await engine.syncAll({});
+      const self = rep.accounts[0]!.selfCheck ?? [];
+      assert.ok(
+        self.some((x) => x.code === 'PARSE_EMPTY'),
+        `应报出"没有截止时间"，实际：${JSON.stringify(self)}`,
+      );
+      // 只上报，不阻断：作业仍然要进来
+      assert.equal(rep.accounts[0]!.status, 'ok');
+      assert.ok(rep.accounts[0]!.fetched > 0);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('课程数突然翻倍 → 报 COURSE_MISMATCH（这是"一门课被拆成多门"的信号）', async () => {
+    const { dir, engine, account, store } = await setup(CONFIG);
+    try {
+      await engine.syncAll({}); // 第一轮：2 门课，记住基线
+      // 造出"上一轮只有 1 门"的历史，然后本轮仍是 2 门 —— 不到阈值，不该报
+      await store.setCursor({
+        accountId: account.id,
+        kind: 'course-count',
+        cursor: '1',
+        updatedAt: new Date().toISOString(),
+      });
+      const rep2 = await engine.syncAll({});
+      assert.equal(
+        (rep2.accounts[0]!.selfCheck ?? []).some((x) => x.code === 'COURSE_MISMATCH'),
+        false,
+        '1→2 门是正常新增，不该报警',
+      );
+
+      // 真正的故障形态：1 门突然变 4 门
+      await store.setCursor({
+        accountId: account.id,
+        kind: 'course-count',
+        cursor: '1',
+        updatedAt: new Date().toISOString(),
+      });
+      await store.upsertCourses(
+        [3, 4, 5].map((n) => ({
+          id: makeCourseId('custom-demo', account.id, `c${n}`),
+          platformId: 'custom-demo',
+          accountId: account.id,
+          platformCourseId: `c${n}`,
+          name: `课程${n}`,
+          lastSeenAt: new Date().toISOString(),
+        })),
+      );
+      // 让本轮课程数是 4：把 fetchCourses 的结果也算进来 → 2 + 3 残留 = 5 门
+      const rep3 = await engine.syncAll({});
+      const self3 = rep3.accounts[0]!.selfCheck ?? [];
+      assert.ok(
+        self3.some((x) => x.code === 'COURSE_MISMATCH'),
+        `应报课程数异常，实际：${JSON.stringify(self3)}`,
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});

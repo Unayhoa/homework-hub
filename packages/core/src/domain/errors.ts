@@ -18,6 +18,19 @@ export type ErrorCode =
   | 'WRITE_BLOCKED' // 只读守卫拦截了一个可能改变服务端状态的请求
   | 'CAPTURE_MISS' // 回放文件里没有这条请求（需要用户重新录制）
   | 'NOT_SUPPORTED'
+  // ---- 自定义平台接入专用的四个（v0.2.9）----
+  //
+  // 为什么必须细分、而不是全塞进 UPSTREAM：修复动作完全相反。
+  //   PARSE_EMPTY      → 改配置里的路径（AI 能修）
+  //   SELECTOR_STALE   → 重选页面元素（AI 能修，但材料是 DOM 不是接口）
+  //   SIGNATURE_REQUIRED → 换一条路（DOM 模式），AI 修不了，发过去只会得到"合理的错答案"
+  //   PROBE_EMPTY      → 说明采集不够，让用户回页面再采一次
+  // 归错一个，用户拿到的按钮就是错的 —— 这是最难自查的一类失败。
+  | 'PARSE_EMPTY' // 接口能访问，但配置里的路径命中不了（配错或改版）
+  | 'SELECTOR_STALE' // DOM 选择器在页面上命不中
+  | 'SIGNATURE_REQUIRED' // 接口要页面现算的签名，声明式配置原理上做不到
+  | 'PROBE_EMPTY' // 采集到的响应里没有任何像作业列表的东西
+  | 'COURSE_MISMATCH' // 课程归属可疑（课程数异常增长等）
   | 'UNKNOWN';
 
 export class HubError extends Error {

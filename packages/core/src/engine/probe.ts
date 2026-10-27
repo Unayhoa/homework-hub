@@ -15,7 +15,7 @@
  * 本模块**不发请求、不碰 AI**：纯函数，输入是录制到的响应样本，输出是候选配置 + 依据。
  * 发请求验证（试抓）在调用方做，因为那需要会话。
  */
-import { getByPath } from './declarative-adapter.ts';
+import { getByPath, statusLooksUsable } from './declarative-adapter.ts';
 import type { AdapterConfig } from './declarative-adapter.ts';
 
 /** 一条录制到的响应。body 是 JSON 文本（非 JSON 的响应不该传进来）。 */
@@ -25,6 +25,14 @@ export interface ProbeSample {
   status?: number;
   mimeType?: string;
   body: string;
+  /**
+   * 这条请求出现时，用户已经做过几个动作（翻页/滚到底/换页）。
+   *
+   * 为什么它是有效信号：真正完整的那份列表，通常出现在用户「翻过页/滚到底」之后；
+   * 而首屏那个请求经常只是前 10 条。数字越大 = 越靠后 = 更可能是完整数据。
+   * 这个信息由录制器自动打标，不需要用户额外操作。
+   */
+  mark?: number;
 }
 
 /** 一份候选配置 + 它凭什么被选中（必须能解释，否则用户没法判断要不要信）。 */
@@ -194,6 +202,21 @@ function columnStats(rows: Array<Record<string, unknown>>, key: string) {
 }
 
 /**
+ * 这个地址是否依赖「页面现算」的签名参数。
+ *
+ * 为什么它是**错误分类**而不只是提示：这类接口声明式配置原理上跑不通（签名寿命几十秒），
+ * 继续试只会浪费用户时间。所以适配器会直接抛 SIGNATURE_REQUIRED，让修复层引导改走 DOM。
+ * 实现放在 core、由 adapter-import 转发，避免"两处各写一份正则"（那必然一个漏了一个）。
+ */
+export function urlRequiresSignature(url: string): boolean {
+  if (!url) return false;
+  // 显式占位符：{uuid} / ${sign} / {dateFormate}
+  if (/\$?\{[^}]*(uuid|sign|token|nonce|timestamp|dateformate)[^}]*\}/i.test(url)) return true;
+  // query 里出现签名类参数名（即使有值，那个值也是短命的）
+  return /[?&](key|uuid|sign|signature|token|nonce|timestamp|dateformate|secretstr)=/i.test(url);
+}
+
+/**
  * URL 本身是不是明说「这是作业接口」。
  *
  * **只按路径分段判断**，不在整条 URL 上做裸正则 —— 踩过：域名 example.edu
@@ -244,6 +267,9 @@ function scoreTaskList(rows: Array<Record<string, unknown>>, url: string, path: 
 
   // 状态：取值少、名字像状态
   const statusCol = cols.find((c) => STATUS_KEY.test(c.key) && c.filled > 0 && c.uniq <= 12);
+  // 这个状态列**能不能看出"交没交"** —— 决定了任务要不要走"平台沉默"那条路。
+  // 猜错的代价是单向的：当成能用 → 平台优先压住手动标记，用户作业做完永远标不掉。
+  const statusUsable = statusCol ? statusLooksUsable(rows.map((r) => r[statusCol.key])) : false;
 
   // 决定性判据：**只有 id + name 两张列的表不是作业列表，是课程列表**。
   // 作业必然带"什么时候交"或"交没交"，两者都没有的 {id, name} 表，
@@ -252,7 +278,13 @@ function scoreTaskList(rows: Array<Record<string, unknown>>, url: string, path: 
   // 属于"作业但没法提醒"，仍然要认出来（否则用户看到的是"什么都没探到"）。
   const looksLikeTasks = Boolean(deadlineCol) || Boolean(statusCol) || urlHintsTasks(url);
   if (!looksLikeTasks) return undefined;
-  if (statusCol) evidence.push(`状态字段 \`${statusCol.key}\`（${statusCol.uniq} 种取值）`);
+  if (statusCol) {
+    evidence.push(
+      statusUsable
+        ? `状态字段 \`${statusCol.key}\`（${statusCol.uniq} 种取值，能看出交没交）`
+        : `状态字段 \`${statusCol.key}\` 的取值看不出交没交（例如「${String(statusCol.sample).slice(0, 12)}」）→ 完成与否交给你自己标`,
+    );
+  }
 
   // ID：唯一值、名字像 ID。
   // 兜底（没有 ID 命名的列）时**必须排除标题列** —— 标题通常也唯一，
@@ -305,7 +337,9 @@ function scoreTaskList(rows: Array<Record<string, unknown>>, url: string, path: 
     title: { path: titleCol.key },
     ...(idCol ? { id: { path: idCol.key } } : {}),
     ...(deadlineCol && timeFormat ? { deadline: { path: deadlineCol.key, format: timeFormat } } : {}),
-    ...(statusCol ? { status: { path: statusCol.key } } : {}),
+    ...(statusCol
+      ? { status: { path: statusCol.key, ...(statusUsable ? {} : { usableForCompletion: false }) } }
+      : {}),
     ...(courseNameCol
       ? { course: { path: courseNameCol.key, ...(courseIdCol ? { idPath: courseIdCol.key } : {}) } }
       : {}),
@@ -320,8 +354,7 @@ function scoreTaskList(rows: Array<Record<string, unknown>>, url: string, path: 
   if (rows.length >= 3) confidence += 0.05;
 
   // 签名参数：配置能描述请求，但描述不了"页面现算的签名" —— 这条必须提前说清
-  if (/\$?\{[^}]*(uuid|sign|token|nonce|timestamp|dateformate)[^}]*\}/i.test(url) ||
-      /[?&](key|uuid|sign|signature|token|nonce|timestamp|dateformate|secretstr)=/i.test(url)) {
+  if (urlRequiresSignature(url)) {
     warnings.push('这个接口带动态签名参数（页面现算），API 模式跑不通，要走 DOM 模式');
     confidence = Math.min(confidence, 0.3);
   }
@@ -411,6 +444,13 @@ export function analyzeSamples(samples: ProbeSample[], ctx: ProbeContext = {}, l
       const t = scoreTaskList(rows, s.url, a.path, [], []);
       if (t) {
         if (anchorId) t.evidence.push(`录制页在某一门课内（课程 ID ${anchorId}），这些作业都归到这门课`);
+        // 用户翻过页/滚到底之后才出现的接口，更可能是完整列表 —— 小幅加权，
+        // 只用于同分候选之间排序（不改变"像不像作业列表"的判据）。
+        const late = Number(s.mark ?? 0) > 0;
+        if (late) {
+          t.confidence = Math.min(0.95, Math.round((t.confidence + 0.05) * 100) / 100);
+          t.evidence.push('这个接口出现在你翻页/滚动之后，更可能是完整列表');
+        }
         tasks.push(t);
         hit = true;
       } else if (!anchorId) {

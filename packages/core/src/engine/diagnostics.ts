@@ -33,8 +33,10 @@ export type FailureKind =
   | 'signature'
   /** DOM 点选后抓不到 */
   | 'dom-selector'
-  /** 已启用平台的同步失败 */
-  | 'sync-failed'
+  /** 网络/限流：等一会儿再来，AI 帮不上 */
+  | 'network'
+  /** 课程归属可疑（课程数异常增长 / 与课程表对不上） */
+  | 'course-mismatch'
   | 'unknown';
 
 export interface FixAction {
@@ -65,15 +67,53 @@ export interface FixPack {
   aiCanFix: boolean;
 }
 
-/** 从错误原文里归类。宁可归到 unknown（走保守路径），也不要瞎猜成"AI 能修"。 */
+/**
+ * 错误码 → 修复策略。
+ *
+ * 为什么不再从 `error.message` 里匹配关键词：文案是给人看的，随手改一个字
+ * 就会让分类静默漂移，而漂移时**没有任何提示** —— 用户只会拿到一个错的按钮
+ * （比如会话失效却出现"复制给 AI"）。分类必须挂在结构化的 code 上。
+ */
+export function kindOfCode(code: string | undefined): FailureKind {
+  switch (code) {
+    case 'AUTH_REQUIRED':
+    case 'AUTH_FAILED':
+    case 'CAPTCHA_REQUIRED':
+      return 'auth';
+    case 'SIGNATURE_REQUIRED':
+    case 'SIGNER_UNAVAILABLE':
+    case 'NOT_SUPPORTED':
+      return 'signature';
+    case 'NETWORK':
+    case 'RATE_LIMITED':
+      return 'network';
+    case 'SELECTOR_STALE':
+      return 'dom-selector';
+    case 'PARSE_EMPTY':
+    case 'SCHEMA_DRIFT':
+      return 'trial-empty';
+    case 'UPSTREAM':
+      // 上游异常（地址错 / 5xx / 响应不是预期结构）：按"配置可能写错"处理，
+      // 因为这是唯一我们能修的方向。真正的网络问题会在 NETWORK 里。
+      return 'trial-failed';
+    case 'PROBE_EMPTY':
+      return 'probe-empty';
+    case 'COURSE_MISMATCH':
+      return 'course-mismatch';
+    default:
+      return 'unknown';
+  }
+}
+
+/**
+ * 兼容入口：接受 HubError 或裸字符串。
+ *
+ * 只有带 `code` 的错误才能被准确归类；裸字符串一律 `unknown`（走保守路径，
+ * 由 unknown 分支给全量诊断包）。**不要**再在这里对 message 做关键词匹配。
+ */
 export function classifyFailure(error: unknown): FailureKind {
-  const m = String((error as Error)?.message ?? error ?? '');
-  if (!m) return 'unknown';
-  if (/(AUTH_REQUIRED|AUTH_FAILED|登录|未登录|会话.*(失效|过期)|请先登录)/i.test(m)) return 'auth';
-  if (/(sign|signature|uuid|nonce|dateformate|timestamp|签名)/i.test(m)) return 'signature';
-  if (/(抓到 0 条|选择器|没抓到|readyWhen|rows)/i.test(m)) return 'dom-selector';
-  if (/(一条也没解析|解析出 0|没命中|listPath)/i.test(m)) return 'trial-empty';
-  if (/(取不到|请求失败|网络|timeout|超时|404|403|500)/i.test(m)) return 'trial-failed';
+  const code = (error as { code?: unknown } | null)?.code;
+  if (typeof code === 'string') return kindOfCode(code);
   return 'unknown';
 }
 
@@ -165,6 +205,17 @@ ${RULES}
 
 输出修好的完整配置 JSON，结构不变。`;
 
+/** 区分「课程目录」与「课程内容」：这是识别器最容易出错、也最伤人的一处。 */
+export const PROMPT_CLASSIFY_COURSE = `你在判断两个数组里哪个是"课程列表"、哪个是"课程里的资料列表"。只输出 JSON。
+
+${RULES}
+4. 判断依据只能是结构：课程列表的条目通常带教师/学期/课程号，条目数少；
+   课程内容的条目常带文件名、时长、大小、章节序号。
+5. 如果材料不足以判断，输出 {"need_more":["还需要看到什么"],"confidence":0.2}。
+
+输出格式：
+{ "kind": "course-list" | "course-content" | "task-list", "reason": "一句话", "confidence": 0.0 }`;
+
 /** DOM 选择器失效：只让它改选择器。 */
 export const PROMPT_FIX_DOM = `你在修正一份"页面点选"配置里错掉的选择器。只输出 JSON。
 
@@ -194,7 +245,14 @@ export function maskSecrets(text: string): string {
 // ──────────────────────────────────────────────────────── 组装
 
 export interface FixInput {
-  kind: FailureKind;
+  /**
+   * 失败的**错误码** —— 分类的唯一依据。
+   *
+   * 刻意不接受 `kind`：一旦两处都能决定"这是什么故障"，就必然出现
+   * "同一份错误在 A 处是 auth、在 B 处是 unknown"的漂移，而漂移的代价是
+   * 用户拿到一个错的按钮（会话失效却让他复制给 AI）。
+   */
+  code: string;
   /** 错误原文（必须有：它就是用户复制出去的最有价值的一行） */
   error?: string;
   /** 当前配置（已有时带上，AI 才能"只改错处"） */
@@ -224,7 +282,8 @@ export function buildFixPack(input: FixInput): FixPack {
 }
 
 function buildFixPackInner(input: FixInput): FixPack {
-  const { kind, error, config, samples } = input;
+  const kind = kindOfCode(input.code);
+  const { error, config, samples } = input;
   const name = input.platformName ?? '这个平台';
   const oneLine = (error ?? '').trim().split('\n')[0]?.slice(0, 300) ?? '';
 
@@ -338,35 +397,50 @@ function buildFixPackInner(input: FixInput): FixPack {
       };
     }
 
-    case 'sync-failed': {
-      const pack = [
-        '# 同步失败，需要定位',
-        '',
-        PROMPT_FIX_PATHS,
-        '',
-        '===== 以下是材料 =====',
-        '',
-        `- 平台：${name}`,
-        `- 错误：${oneLine || '(没有记录)'}`,
-        '',
-        '## 当前配置',
-        '',
-        '```json',
-        JSON.stringify(config ?? {}, null, 2),
-        '```',
-        ...(samples?.length ? ['', '## 录制到的响应（值已脱敏）', '', summarizeSamples(samples, 3)] : []),
-      ].join('\n');
+
+    case 'network':
+      // 网络与限流不需要任何解释，也不需要 AI。等一会儿、再点一次就是全部内容。
+      return {
+        kind: 'network',
+        headline: `${name} 那边没连上（网络问题或请求太密被限流）。`,
+        nextStep: '等半分钟再点一次同步；连续失败就先别反复点，平台可能会暂时限制请求。',
+        actions: [{ label: '重试一次', kind: 'tap', id: 'retry' }],
+        aiCanFix: false,
+      };
+
+    case 'course-mismatch':
+      // 课程归属对不上时，「再采一次」大概率比让 AI 猜更快 —— 因为课程目录在**上一层页面**，
+      // 而用户当时录的是课内页面。这条提示的重点是把他引导回课程列表页。
       return {
         kind,
-        headline: `${name} 同步失败了。`,
-        nextStep: '先把这段复制给 AI 看它怎么说；如果是登录问题，AI 帮不上，直接重新登录更快。',
+        headline: `${name} 的课程有点对不上（可能把课程里的资料当成了课程）。`,
+        nextStep: '回到这个平台的「课程列表」页（不要点进某一门课），再采集一次；只接当前这门课也可以。',
         actions: [
-          { label: '重试一次', kind: 'tap', id: 'retry' },
-          { label: '复制给 AI', kind: 'copy', payload: pack },
+          { label: '重新采集', kind: 'tap', id: 'recollect' },
+          {
+            label: '复制给 AI',
+            kind: 'copy',
+            payload: [
+              '# 判断这些数组是课程目录还是课程内容',
+              '',
+              PROMPT_CLASSIFY_COURSE,
+              '',
+              '===== 以下是材料 =====',
+              '',
+              `- 平台：${name}`,
+              `- 录制页：${input.origin ?? '(未知)'}`,
+              error ? `- 现象：${error.slice(0, 800)}` : '',
+              '',
+              '## 当前配置',
+              '```json',
+              JSON.stringify(config ?? {}, null, 2),
+              '```',
+              ...(samples?.length ? ['', '## 采集到的响应（值已脱敏）', summarizeSamples(samples, 3)] : []),
+            ].join('\n'),
+          },
         ],
         aiCanFix: true,
       };
-    }
 
     default:
       return {

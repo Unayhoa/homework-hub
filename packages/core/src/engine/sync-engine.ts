@@ -151,6 +151,14 @@ export interface AccountSyncReport {
   sessionOrigin: SessionOrigin;
   /** 会话来源可读说明，用于 UI 直接展示给用户 */
   sessionOriginNote: string;
+  /**
+   * 本轮的自检结论（不阻断同步，只如实上报）。
+   *
+   * 为什么需要它：试抓只证明"那一刻能读"，不证明整条链路稳定。
+   * 「同步成功但一条作业都没有」「课程数突然翻倍」这类情况以前是完全静默的 ——
+   * 用户看到的是"同步成功"，而实际什么都没发生，这是最难自查的一种失败。
+   */
+  selfCheck?: Array<{ code: string; note: string }>;
   durationMs: number;
 }
 
@@ -677,7 +685,7 @@ export class SyncEngine {
         (authLike ? this.#authMessage(err.message, session, adapter) : err.message) +
         (typeof note === 'string' ? ` 〔${note}〕` : '');
       const status: PlatformAccount['lastSyncStatus'] = authLike ? 'auth-required' : 'failed';
-      await this.#markAccount(account, status, msg);
+      await this.#markAccount(account, status, msg, err.code);
       return finish(status, {}, msg);
     }
 
@@ -833,7 +841,7 @@ export class SyncEngine {
     if (courseError !== undefined && courses.length === 0 && adapter.capabilities.tasks) {
       const rootCause = toHubError(courseError, account.platformId);
       const msg = `课程列表拉取失败（作业依赖它）：${rootCause.message}`;
-      await this.#markAccount(account, 'failed', msg);
+      await this.#markAccount(account, 'failed', msg, rootCause.code);
       return finish('failed', { courses: 0 }, msg);
     }
 
@@ -927,12 +935,12 @@ export class SyncEngine {
           // 接回来了，但本轮已经中断 —— 不谎报成功，也不做删除判定
           // （complete 仍是 false），下一次同步自然补全。
           const msg = '会话曾中断，已自动恢复；本轮数据可能不完整，下次同步会补全';
-          await this.#markAccount(account, 'partial', msg);
+          await this.#markAccount(account, 'partial', msg, 'AUTH_REQUIRED');
           return finish('partial', { courses: courses.length, fetched: collected.length }, msg);
         }
         const note = recovery.note;
         const msg = this.#authMessage(err.message, session, adapter) + (note ? ` 〔${note}〕` : '');
-        await this.#markAccount(account, 'auth-required', msg);
+        await this.#markAccount(account, 'auth-required', msg, err.code);
         return finish('auth-required', { courses: courses.length, fetched: collected.length }, msg);
       }
 
@@ -947,7 +955,7 @@ export class SyncEngine {
         const msg = courseError !== undefined && courses.length === 0
           ? `课程列表拉取失败（作业依赖它）：${rootCause.message}`
           : err.message;
-        await this.#markAccount(account, 'failed', msg);
+        await this.#markAccount(account, 'failed', msg, rootCause.code);
         return finish('failed', { courses: courses.length }, msg);
       }
 
@@ -983,7 +991,7 @@ export class SyncEngine {
     // 静默返回空会让用户以为作业做完了，这是本类应用最严重的故障模式。
     if (!pageError && collected.length === 0 && (declaredTotal ?? 0) > 0) {
       const err = schemaDrift(account.platformId, `上游声明 ${declaredTotal} 条任务，实际解析出 0 条`);
-      await this.#markAccount(account, 'failed', err.message);
+      await this.#markAccount(account, 'failed', err.message, err.code);
       return finish('failed', { courses: courses.length }, err.message);
     }
 
@@ -1089,6 +1097,31 @@ export class SyncEngine {
 
     const status: SyncLogEntry['status'] = pageError ? 'partial' : 'ok';
     const notes: string[] = [];
+
+    // ---- L3 自检：同步"成功"不等于"数据对了" ----
+    //
+    // 试抓只证明那一刻能读。真正难查的故障是「同步成功、但什么也没发生」：
+    // 所有作业都没有截止时间（提醒永远不响）、课程数突然翻倍（一门课被拆成多门）。
+    // 这两种以前都是完全静默的 —— 用户看到绿色状态，而系统在空转。
+    //
+    // 只上报、不阻断：拦截会让他连现有的数据也拿不到。
+    const selfCheck: Array<{ code: string; note: string }> = [];
+    if (collected.length > 0 && collected.every((t) => t.deadline === undefined || t.deadline === null || t.deadline === '')) {
+      selfCheck.push({
+        code: 'PARSE_EMPTY',
+        note: '这些作业都没有截止时间 —— 提醒不会生效（配置里的时间字段可能没对上）',
+      });
+    }
+    if (!opts.dryRun) {
+      const spike = await this.#courseCountSpike(account, courses.length);
+      if (spike) {
+        selfCheck.push({
+          code: 'COURSE_MISMATCH',
+          note: `课程数从 ${spike.prev} 变成 ${spike.now} 门，可能把课程里的内容当成了课程`,
+        });
+      }
+    }
+    for (const it of selfCheck) notes.push(it.note);
     if (sessionRecovered) {
       // 自动接回是「好事」，但它必须是**可见的**：否则用户只能靠"这次没报错"去推断，
       // 而一个从不留下证据的机制，既没法验证也没法信任。
@@ -1131,6 +1164,7 @@ export class SyncEngine {
         removed: plan.removed,
         reminders,
         events: plan.events,
+        ...(selfCheck.length > 0 ? { selfCheck } : {}),
       },
       message,
     );
@@ -1398,13 +1432,67 @@ export class SyncEngine {
     account: PlatformAccount,
     status: PlatformAccount['lastSyncStatus'],
     message?: string,
+    /** 失败时的错误码。传了才落结构化失败记录 —— 它决定修复动作走哪条分支。 */
+    code?: string,
   ): Promise<void> {
+    const at = this.#clock.now().toISOString();
     await this.#store.upsertAccount({
       ...account,
-      lastSyncAt: this.#clock.now().toISOString(),
+      lastSyncAt: at,
       lastSyncStatus: status,
       lastSyncMessage: message,
     });
+    // 结构化失败记录：修复层直接读它，不再从"最近一条 failed 日志的文案"反推。
+    // 反推的问题不是不准，而是**文案一改就静默失效**，且失效后没人发现。
+    if (code && (status === 'failed' || status === 'auth-required')) {
+      await this.#store.setCursor({
+        accountId: account.id,
+        kind: 'last-failure',
+        cursor: JSON.stringify({ code, message: message ?? '', at }),
+        updatedAt: at,
+      });
+    }
+  }
+
+  /**
+   * 课程数是否"异常增长"（可能是把课程内容认成了课程）。
+   *
+   * 阈值 2 倍且 > 3 门：新增一门课是正常事，报出来只会让用户觉得系统在瞎叫。
+   * 真正的故障形态是"1 门突然变 4 门"，那一定会命中。
+   */
+  async #courseCountSpike(
+    account: PlatformAccount,
+    nowCount: number,
+  ): Promise<{ prev: number; now: number } | undefined> {
+    if (nowCount === 0) return undefined;
+    const c = await this.#store.getCursor(account.id, 'course-count');
+    let prev: number | undefined;
+    if (c?.cursor) {
+      const n = Number(c.cursor);
+      if (Number.isFinite(n)) prev = n;
+    }
+    await this.#store.setCursor({
+      accountId: account.id,
+      kind: 'course-count',
+      cursor: String(nowCount),
+      updatedAt: this.#clock.now().toISOString(),
+    });
+    if (prev === undefined || prev === 0) return undefined;
+    if (nowCount > 3 && nowCount >= prev * 2) return { prev, now: nowCount };
+    return undefined;
+  }
+
+  /** 读最近一次失败的结构化记录（供 /api/adapter/fix 用）。 */
+  async lastFailure(accountId: string): Promise<{ code: string; message: string; at: string } | undefined> {
+    const c = await this.#store.getCursor(accountId, 'last-failure');
+    if (!c?.cursor) return undefined;
+    try {
+      const v = JSON.parse(c.cursor) as { code?: unknown; message?: unknown; at?: unknown };
+      if (typeof v.code !== 'string') return undefined;
+      return { code: v.code, message: String(v.message ?? ''), at: String(v.at ?? '') };
+    } catch {
+      return undefined;
+    }
   }
 
   async #recordLog(report: AccountSyncReport): Promise<void> {
@@ -1822,7 +1910,7 @@ export class SyncEngine {
    */
   async previewCustomAdapter(
     cfg: AdapterConfig,
-  ): Promise<{ ok: boolean; tasks: PlatformTask[]; notes: string[]; error?: string }> {
+  ): Promise<{ ok: boolean; tasks: PlatformTask[]; notes: string[]; error?: string; code?: string }> {
     const adapter = new DeclarativeAdapter(cfg);
     const ctx = this.#contextFor(adapter.id, '__preview');
     try {
@@ -1830,9 +1918,17 @@ export class SyncEngine {
       const page = await adapter.fetchTasks(ctx, session, {});
       return { ok: page.items.length > 0, tasks: page.items, notes: page.notes ?? [] };
     } catch (e) {
-      // 错误原文要原样带出去：它就是用户复制给 AI 的那段材料里最有价值的一行。
-      // 不要在这里改写成"试抓失败" —— 那会把"listPath 没命中"和"会话过期"揉成一句话。
-      return { ok: false, tasks: [], notes: [], error: (e as Error).message ?? String(e) };
+      // 错误原文与 code 都要原样带出去：
+      //   · 原文是用户复制给 AI 的材料里最有价值的一行（不要改写成"试抓失败"）；
+      //   · code 是**分类的唯一依据** —— 丢了它，上层只能去猜 message，
+      //     猜错就会把"会话失效"当成"配置写错"，给用户一个错的按钮。
+      return {
+        ok: false,
+        tasks: [],
+        notes: [],
+        error: (e as Error).message ?? String(e),
+        code: (e as { code?: string }).code ?? 'UNKNOWN',
+      };
     }
   }
 

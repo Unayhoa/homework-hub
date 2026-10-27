@@ -12,29 +12,48 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildFixPack, classifyFailure, structureOf, summarizeSamples } from '../src/engine/diagnostics.ts';
+import { buildFixPack, classifyFailure, kindOfCode, structureOf, summarizeSamples } from '../src/engine/diagnostics.ts';
+import { HubError } from '../src/index.ts';
 import { analyzeSamples } from '../src/engine/probe.ts';
 
 const ORIGIN = 'https://zhihuishu.example.edu';
 
-describe('故障归类：宁可 unknown，也不要瞎猜成"AI 能修"', () => {
-  it('认得四类常见错误', () => {
-    assert.equal(classifyFailure('AUTH_REQUIRED: 会话已过期'), 'auth');
-    assert.equal(classifyFailure('请先登录后再访问'), 'auth');
-    assert.equal(classifyFailure('接口需要 key={uuid} 参数'), 'signature');
-    assert.equal(classifyFailure('作业列表取不到（listPath「$.data」没命中）'), 'trial-empty');
-    assert.equal(classifyFailure('页面打开了，但一条作业都没抓到（选择器可能已失效）'), 'dom-selector');
+describe('故障归类：只看错误码，不看文案', () => {
+  it('code → 修复策略', () => {
+    assert.equal(kindOfCode('AUTH_REQUIRED'), 'auth');
+    assert.equal(kindOfCode('CAPTCHA_REQUIRED'), 'auth');
+    assert.equal(kindOfCode('SIGNATURE_REQUIRED'), 'signature');
+    assert.equal(kindOfCode('NETWORK'), 'network');
+    assert.equal(kindOfCode('RATE_LIMITED'), 'network');
+    assert.equal(kindOfCode('PARSE_EMPTY'), 'trial-empty');
+    assert.equal(kindOfCode('UPSTREAM'), 'trial-failed');
+    assert.equal(kindOfCode('SELECTOR_STALE'), 'dom-selector');
+    assert.equal(kindOfCode('PROBE_EMPTY'), 'probe-empty');
+    assert.equal(kindOfCode('COURSE_MISMATCH'), 'course-mismatch');
   });
 
-  it('认不出就 unknown', () => {
-    assert.equal(classifyFailure('something odd happened'), 'unknown');
+  it('认不出就 unknown（走保守路径，不要瞎猜成"AI 能修"）', () => {
+    assert.equal(kindOfCode(undefined), 'unknown');
+    assert.equal(kindOfCode('WHATEVER'), 'unknown');
     assert.equal(classifyFailure(undefined), 'unknown');
+  });
+
+  it('改文案不会改变分类 —— 这一步就是要防"文案一改分类静默漂移"', () => {
+    const a = new HubError('AUTH_REQUIRED', '会话已过期，请重新登录');
+    const b = new HubError('AUTH_REQUIRED', '登录态失效');
+    const c = new HubError('AUTH_REQUIRED', 'whatever the wording becomes');
+    for (const e of [a, b, c]) assert.equal(classifyFailure(e), 'auth');
+  });
+
+  it('只有 message 没有 code 的错误一律 unknown，绝不当成"AI 能修"', () => {
+    const e = new Error('作业列表取不到（listPath「$.data」没命中）');
+    assert.equal(classifyFailure(e), 'unknown');
   });
 });
 
 describe('修复包：AI 修不了的，不给 AI 包', () => {
   it('会话失效 → 只给"去重新登录"，没有复制按钮', () => {
-    const p = buildFixPack({ kind: 'auth', error: 'AUTH_REQUIRED', origin: ORIGIN, platformName: '智慧树' });
+    const p = buildFixPack({ code: 'AUTH_REQUIRED', error: 'AUTH_REQUIRED', origin: ORIGIN, platformName: '智慧树' });
     assert.equal(p.aiCanFix, false);
     assert.ok(!p.actions.some((a) => a.kind === 'copy'), '不要给用户一个"发给 AI"的按钮去解决会话问题');
     assert.equal(p.actions[0]!.kind, 'open');
@@ -43,16 +62,16 @@ describe('修复包：AI 修不了的，不给 AI 包', () => {
   });
 
   it('签名参数 → 引导改走 DOM，不给 AI 包', () => {
-    const p = buildFixPack({ kind: 'signature', origin: ORIGIN, platformName: '智慧树' });
+    const p = buildFixPack({ code: 'SIGNATURE_REQUIRED', origin: ORIGIN, platformName: '智慧树' });
     assert.equal(p.aiCanFix, false);
     assert.ok(!p.actions.some((a) => a.kind === 'copy'));
     assert.ok(p.nextStep.includes('点选'), `应引导改走页面点选，实际：${p.nextStep}`);
   });
 
   it('最多两个动作 —— 多了用户就不选了', () => {
-    for (const kind of ['probe-empty', 'trial-empty', 'trial-failed', 'dom-selector', 'sync-failed', 'unknown'] as const) {
-      const p = buildFixPack({ kind, error: 'x', platformName: 'P', origin: ORIGIN });
-      assert.ok(p.actions.length <= 2, `${kind} 给了 ${p.actions.length} 个动作`);
+    for (const code of ['PROBE_EMPTY', 'PARSE_EMPTY', 'UPSTREAM', 'SELECTOR_STALE', 'COURSE_MISMATCH', 'UNKNOWN'] as const) {
+      const p = buildFixPack({ code, error: 'x', platformName: 'P', origin: ORIGIN });
+      assert.ok(p.actions.length <= 2, `${code} 给了 ${p.actions.length} 个动作`);
     }
   });
 });
@@ -86,7 +105,7 @@ describe('修复包：材料必须脱敏且自包含', () => {
   });
 
   it('「没认出接口」的包的素材里不含作业正文，且要求只输出 JSON', () => {
-    const p = buildFixPack({ kind: 'probe-empty', samples: SAMPLES, platformName: '智慧树', origin: ORIGIN });
+    const p = buildFixPack({ code: 'PROBE_EMPTY', samples: SAMPLES, platformName: '智慧树', origin: ORIGIN });
     const payload = p.actions.find((a) => a.kind === 'copy')?.payload ?? '';
     assert.ok(payload.includes('只输出 JSON'));
     assert.ok(!payload.includes('同余方程'), '素材泄漏了作业内容');
@@ -95,7 +114,7 @@ describe('修复包：材料必须脱敏且自包含', () => {
 
   it('修路径的包里带着当前配置（AI 才能只改错处）', () => {
     const cfg = { key: 'x', name: '智慧树', origin: ORIGIN, tasks: { url: 'u', listPath: '$.wrong' }, fields: {} };
-    const p = buildFixPack({ kind: 'trial-empty', error: 'listPath「$.wrong」没命中', config: cfg, samples: SAMPLES, platformName: '智慧树' });
+    const p = buildFixPack({ code: 'PARSE_EMPTY', error: 'listPath「$.wrong」没命中', config: cfg, samples: SAMPLES, platformName: '智慧树' });
     const payload = p.actions.find((a) => a.kind === 'copy')?.payload ?? '';
     assert.ok(payload.includes('$.wrong'), '必须带原配置，否则 AI 会从头重写、把对的部分也改掉');
     assert.ok(payload.includes('只改错的地方'), '提示词必须明确"只改错处"');
@@ -107,7 +126,7 @@ describe('修复包：材料必须脱敏且自包含', () => {
     const leaky = [
       { url: `${ORIGIN}/api/task?token=SECRET123&sign=abc&page=1`, body: '{"data":[{"title":"x","endTime":"2025-12-07 23:25"}]}' },
     ];
-    const p = buildFixPack({ kind: 'probe-empty', samples: leaky, platformName: 'P', origin: ORIGIN });
+    const p = buildFixPack({ code: 'PROBE_EMPTY', samples: leaky, platformName: 'P', origin: ORIGIN });
     const payload = p.actions.find((a) => a.kind === 'copy')?.payload ?? '';
     assert.ok(!payload.includes('SECRET123'), 'token 泄漏到了给 AI 的材料里');
     assert.ok(!payload.includes('sign=abc'), 'sign 泄漏到了给 AI 的材料里');
@@ -116,7 +135,7 @@ describe('修复包：材料必须脱敏且自包含', () => {
 
   it('配置里带 token 的地址同样脱敏', () => {
     const cfg = { tasks: { url: `${ORIGIN}/x?token=SECRET999`, listPath: '$.a' } };
-    const p = buildFixPack({ kind: 'trial-empty', error: 'e', config: cfg, platformName: 'P' });
+    const p = buildFixPack({ code: 'PARSE_EMPTY', error: 'e', config: cfg, platformName: 'P' });
     const payload = p.actions.find((a) => a.kind === 'copy')?.payload ?? '';
     assert.ok(!payload.includes('SECRET999'));
   });
@@ -128,7 +147,7 @@ describe('探查失败时的闭环：分析 → 修复包', () => {
       { url: `${ORIGIN}/api/user`, body: JSON.stringify({ data: { userId: 1, nick: '张三' } }) },
     ]);
     assert.equal(r.tasks.length, 0);
-    const p = buildFixPack({ kind: 'probe-empty', samples: [{ url: `${ORIGIN}/api/user`, body: '{"data":{"userId":1}}' }], platformName: 'P', origin: ORIGIN });
+    const p = buildFixPack({ code: 'PROBE_EMPTY', samples: [{ url: `${ORIGIN}/api/user`, body: '{"data":{"userId":1}}' }], platformName: 'P', origin: ORIGIN });
     assert.equal(p.aiCanFix, true);
     assert.ok(p.actions.some((a) => a.kind === 'copy'));
   });

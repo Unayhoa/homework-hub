@@ -36,8 +36,11 @@ import {
   buildConfig,
   buildFixPack,
   classifyFailure,
+  buildSamplePack,
+  packStorageKey,
+  appendPackHistory,
 } from '#core';
-import type { ProbeSample, FailureKind } from '#core';
+import type { ProbeSample, FailureKind, SamplePack } from '#core';
 
 import { parseImport, toManualInput } from './adapter-import.ts';
 import type {
@@ -211,6 +214,15 @@ export interface ApiDeps {
     read(): Required<NotifyPrefs>;
     write(raw: unknown): Required<NotifyPrefs>;
   };
+  /**
+   * 把样本包额外存一份到文件（只桌面端实现；Android 没有可写的项目目录）。
+   *
+   * 存在的理由：手机端把样本存在 store 里，用户只能靠「复制」把它带出来；
+   * 而开发侧需要的是仓库里 `samples/<host>/<ts>.json` 这样的文件 —— 能被
+   * `probe-samples.test.ts` 直接读进来当回归判据。两边都要有，但两边形态不同。
+   * 不注入就不写文件，功能照常（样本仍在 store 里）。
+   */
+  saveSample?: (pack: SamplePack) => Promise<{ path: string }>;
 }
 
 export interface ApiRequest {
@@ -565,7 +577,7 @@ export function createApiHandler(deps: ApiDeps): ApiHandler {
                 error: err,
                 trial: { count: trial.tasks.length, preview: trial.tasks.slice(0, 3).map((t) => ({ title: t.title, courseName: t.courseName })) },
                 fix: buildFixPack({
-                  kind: classifyFailure(err),
+                  code: trial.code ?? 'UNKNOWN',
                   error: err,
                   config: cfg,
                   platformName: c.name,
@@ -609,7 +621,7 @@ export function createApiHandler(deps: ApiDeps): ApiHandler {
               ok: false,
               candidates: [],
               fix: buildFixPack({
-                kind: 'probe-empty',
+                code: 'PROBE_EMPTY',
                 platformName: String(body.name ?? '这个平台'),
                 origin: String(body.origin ?? ''),
               }),
@@ -661,6 +673,8 @@ export function createApiHandler(deps: ApiDeps): ApiHandler {
                 status: t.status ?? 'unknown',
               })),
               error: trial.error ?? null,
+              // code 是唯一的分类依据，必须随候选一起回传（前端不解析它，只用于后端修复包）
+              code: trial.code ?? null,
               notes: trial.notes,
             },
           });
@@ -670,7 +684,7 @@ export function createApiHandler(deps: ApiDeps): ApiHandler {
         // 有能用的就直接算成功；都不行时给一份修复包（用户只需复制一次）
         const fix = candidates.length === 0
           ? buildFixPack({
-              kind: 'probe-empty',
+              code: 'PROBE_EMPTY',
               platformName: name,
               origin,
               samples,
@@ -678,7 +692,7 @@ export function createApiHandler(deps: ApiDeps): ApiHandler {
             })
           : passed.length === 0
             ? buildFixPack({
-                kind: classifyFailure(candidates[0]!.trial.error ?? '一条也没解析出来'),
+                code: candidates[0]!.trial.code ?? 'UNKNOWN',
                 error: candidates[0]!.trial.error ?? '接口能访问，但没读出作业',
                 config: candidates[0]!.config as unknown as Record<string, unknown>,
                 samples,
@@ -686,6 +700,51 @@ export function createApiHandler(deps: ApiDeps): ApiHandler {
                 origin,
               })
             : undefined;
+
+        // ---- 落一份脱敏样本包 ----
+        //
+        // 为什么每次采集都落：真机上那一次的响应形状，是识别器唯一能变聪明的依据。
+        // 只靠手写 fixture，改识别器就是在盲改（本项目已经因为「结构相同、语义不同」
+        // 把一门课拆成四门过一次）。
+        //
+        // 存两份：store（手机端也能取回、复制导出）+ 可选的文件（桌面端进仓库当回归样本）。
+        // 存失败绝不影响主流程 —— 样本是给开发用的，不是给用户用的。
+        let sample: { host: string; path?: string; capturedAt: string } | undefined;
+        try {
+          const pack = buildSamplePack({
+            samples,
+            context: { pageUrl: String(body.pageUrl ?? ''), pageTitle: String(body.pageTitle ?? '') },
+            now: deps.clock.now(),
+            ...(passed.length > 0
+              ? {
+                  result: {
+                    taskCount: passed[0]!.trial.count,
+                    courseCount: analysis.singleCourse ? 1 : analysis.courses.length,
+                    ...(analysis.singleCourse?.name ? { courseName: analysis.singleCourse.name } : {}),
+                    taskUrl: passed[0]!.url,
+                  },
+                }
+              : {}),
+          });
+          const key = packStorageKey(pack.platformHint);
+          const prev = await deps.store.getCursor('__system', key);
+          await deps.store.setCursor({
+            accountId: '__system',
+            kind: key,
+            cursor: JSON.stringify(appendPackHistory(prev?.cursor, pack)),
+            updatedAt: deps.clock.now().toISOString(),
+          });
+          const file = deps.saveSample
+            ? await deps.saveSample(pack).catch(() => undefined)
+            : undefined;
+          sample = {
+            host: pack.platformHint,
+            capturedAt: pack.capturedAt,
+            ...(file?.path ? { path: file.path } : {}),
+          };
+        } catch (e) {
+          deps.logger.warn('样本包保存失败（不影响接入）', { error: String(e) });
+        }
 
         return {
           status: 200,
@@ -696,7 +755,55 @@ export function createApiHandler(deps: ApiDeps): ApiHandler {
             candidates,
             // 看得懂的技术细节也留着：真出问题时它是唯一能定位的东西
             rejected: analysis.rejected.slice(0, 5),
+            ...(sample ? { sample } : {}),
             ...(fix ? { fix } : {}),
+          },
+        };
+      }
+
+      // 导出最近一次采集的样本包（账号页「导出诊断样本」/ 采集结果卡片）。
+      //
+      // 为什么不给前端直接读 store：样本包的键是按域名算的，前端不派生任何键
+      // （铁律：key/课程 id 只有 core 一处真源）。这里按 platformId 反查配置里的 origin 得到 host。
+      if (method === 'GET' && path === '/api/adapter/sample') {
+        const platformId = String(search.get('platformId') ?? '');
+        const hostParam = String(search.get('host') ?? '');
+        let host = hostParam;
+        if (!host && platformId) {
+          const cfg = (await deps.engine.findCustomAdapter(platformId)) as { origin?: string } | undefined;
+          if (cfg?.origin) {
+            try {
+              host = new URL(cfg.origin).host;
+            } catch {
+              host = '';
+            }
+          }
+        }
+        if (!host) {
+          return { status: 200, body: { ok: false, error: '找不到这个平台的样本（需要先采集一次）' } };
+        }
+        const cur = await deps.store.getCursor('__system', packStorageKey(host));
+        if (!cur?.cursor) {
+          return { status: 200, body: { ok: false, error: '这个平台还没有采集过样本' } };
+        }
+        let latest: SamplePack | undefined;
+        try {
+          const list = JSON.parse(cur.cursor) as SamplePack[];
+          latest = Array.isArray(list) ? list[list.length - 1] : undefined;
+        } catch {
+          latest = undefined;
+        }
+        if (!latest) {
+          return { status: 200, body: { ok: false, error: '样本已损坏，请重新采集' } };
+        }
+        return {
+          status: 200,
+          body: {
+            ok: true,
+            host,
+            capturedAt: latest.capturedAt,
+            requestCount: latest.requests.length,
+            text: JSON.stringify(latest, null, 2),
           },
         };
       }
@@ -718,9 +825,21 @@ export function createApiHandler(deps: ApiDeps): ApiHandler {
             error = log.find((x) => x.status === 'failed')?.message ?? '';
           }
         }
-        const kind = body.kind ? (String(body.kind) as FailureKind) : classifyFailure(error);
+        // code 的来源顺序：调用方明确给的 > 引擎落下的结构化失败记录 > UNKNOWN（全量诊断包）。
+        // **不再**从错误文案反推 —— 那是上一版的做法，文案一改分类就静默漂移。
+        let code = String(body.code ?? '');
+        if (!code && platformId) {
+          const acc = (await deps.engine.listAccounts()).find((a) => a.platformId === platformId);
+          if (acc) {
+            const rec = await deps.engine.lastFailure(acc.id);
+            if (rec) {
+              code = rec.code;
+              if (!error) error = rec.message;
+            }
+          }
+        }
         const pack = buildFixPack({
-          kind,
+          code: code || 'UNKNOWN',
           error,
           config: cfg as Record<string, unknown> | undefined,
           samples: Array.isArray(body.samples) ? (body.samples as ProbeSample[]) : undefined,

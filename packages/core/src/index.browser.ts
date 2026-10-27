@@ -129,11 +129,13 @@ export { mergeTasks, materializeTask, diffTask, DEFAULT_MERGE_OPTIONS } from './
 export { ADAPTER_PROMPT, ADAPTER_PITFALLS, buildEvidencePack, drillPack } from './engine/adapter-authoring.ts';
 export { DeclarativeAdapter, DomAdapter, validateConfig, normalizeAdapterConfig, setDomExtractor, hasDomExtractor, getByPath, mapStatus } from './engine/declarative-adapter.ts';
 export { resolveCapabilities, courseKeyOf, courseIndexOf } from './engine/declarative-adapter.ts';
-export { analyzeSamples, buildConfig, configIsUsable, detectTimeFormat, guessDefaultCourseId, looksLikeCourseName, courseNameFromTitle } from './engine/probe.ts';
+export { analyzeSamples, buildConfig, configIsUsable, detectTimeFormat, guessDefaultCourseId, looksLikeCourseName, courseNameFromTitle, urlRequiresSignature } from './engine/probe.ts';
 export type { ProbeSample, ProbeResult, ProbeContext, SingleCourseHint, TaskCandidate, CourseCandidate } from './engine/probe.ts';
 export { buildFixPack, classifyFailure, summarizeSamples, structureOf, maskSecrets } from './engine/diagnostics.ts';
 export { PROMPT_PICK_ENDPOINT, PROMPT_FIX_PATHS, PROMPT_FIX_DOM } from './engine/diagnostics.ts';
 export type { FailureKind, FixPack, FixAction } from './engine/diagnostics.ts';
+export { buildSamplePack, samplesFromPack, packStorageKey, appendPackHistory } from './engine/sample-pack.ts';
+export type { SamplePack } from './engine/sample-pack.ts';
 export type { AdapterConfig } from './engine/declarative-adapter.ts';
 export type { MergePlan, MergeOptions, TaskEvent } from './engine/merge.ts';
 

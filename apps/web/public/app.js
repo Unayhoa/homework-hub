@@ -603,6 +603,11 @@ function renderAccounts(state) {
       // 本机会话 cookie 名单**已移除**（2026-10-13）：它是为「iSmart 到底断在哪一环」
       // 做的定位工具，而结论早就拿到了（cookie 一直在本机，掉线是服务端闲置作废 +
       // 夜里无网）。诊断工具用完就该撤，留着只是给正常使用添噪音。
+      // 自定义平台多一个「样本」出口：把这次采集的接口样本复制出来。
+      // 用户不需要懂它是什么 —— 只在排查时按开发者说的点一下即可。
+      const sampleBtn = String(a.platformId).startsWith('custom-')
+        ? `<button class="mini" data-sample="${escapeHtml(a.platformId)}" title="复制这次采集的接口样本（已脱敏：不含作业内容、不含 token）">样本</button>`
+        : '';
       return `
         <div class="account">
           <div>
@@ -610,7 +615,9 @@ function renderAccounts(state) {
             <div class="meta">${escapeHtml(a.platformId)} · ${last}</div>
             ${msg}
           </div>
-          <button class="mini" data-remove="${escapeHtml(a.id)}">移除</button>
+          <div style="display:flex;gap:6px;align-items:center">${sampleBtn}
+            <button class="mini" data-remove="${escapeHtml(a.id)}">移除</button>
+          </div>
         </div>`;
     })
     .join('');
@@ -1437,6 +1444,17 @@ async function saveSettings(patch) {
 
 /** 最近一次采集的原始材料 + 探查上下文（重试/切模式时要复用） */
 let lastCapture = null;
+/**
+ * 同一次「添加平台」里累积的样本。
+ *
+ * 为什么允许累积：懒加载/翻页的平台一屏只有一个请求，只采一次必然不全。
+ * 与其改 Android 的生命周期（要真机验证新流程），不如让用户「再翻一页再采一次」——
+ * 他本来就愿意多点一次，而我们要做的只是**不要让他重新登录**（cookie 还在，重开页面即可）。
+ * 换平台（origin 变了）就清空，避免两次接入混在一起。
+ */
+let captureSession = { origin: '', pageUrl: '', pageTitle: '', samples: [], actionCount: 0 };
+/** 最近一次采集落下的样本包 host（成功后可以「导出样本」回传给开发者） */
+let lastSampleHost = '';
 
 function originOf(url) {
   try {
@@ -1462,6 +1480,12 @@ function renderProbe(html) {
   box.innerHTML = html;
   box.classList.remove('hidden');
 }
+
+// 卡片是动态渲染的，按钮用委托绑定一次即可（逐个绑定容易漏，且重渲染后失效）。
+$('probeResult').addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-export-sample]');
+  if (btn) exportSample({ host: btn.dataset.exportSample });
+});
 
 $('probeStart').addEventListener('click', () => {
   let url = ($('probeUrl')?.value || '').trim();
@@ -1507,11 +1531,39 @@ window.HH.captured = async function (kind, json) {
  */
 async function analyzeCapture(dump) {
   const reqs = Array.isArray(dump?.requests) ? dump.requests : [];
-  const samples = reqs
+  const incoming = reqs
     .filter((r) => r && typeof r.body === 'string' && /^[[{]/.test(r.body.trim()))
-    .map((r) => ({ url: r.url, method: r.method, status: r.status, mimeType: r.mimeType, body: r.body }));
-  const origin = originOf(dump?.href || samples[0]?.url || '');
+    .map((r) => ({
+      url: r.url,
+      method: r.method,
+      status: r.status,
+      mimeType: r.mimeType,
+      body: r.body,
+      // 录制器自动记的「用户动作序号」（翻页/滚到底之后才出现的请求，序号更大）
+      mark: Number(r.mark ?? 0) + captureSession.actionCount,
+    }));
+  const origin = originOf(dump?.href || incoming[0]?.url || '');
   const name = platformNameFrom(origin, ($('probeName')?.value || '').trim());
+
+  // 换平台就重开一份；同一个平台则**追加**（这就是"再翻一页再采一次"能补数据的原因）
+  if (captureSession.origin && captureSession.origin !== origin) {
+    captureSession = { origin: '', pageUrl: '', pageTitle: '', samples: [], actionCount: 0 };
+  }
+  const marks = Array.isArray(dump?.markers) ? dump.markers.length : 0;
+  captureSession.origin = origin;
+  captureSession.pageUrl = String(dump?.href || captureSession.pageUrl || '');
+  captureSession.pageTitle = String(dump?.title || captureSession.pageTitle || '');
+  captureSession.actionCount += marks;
+
+  // 去重：同一个接口 + 同样的响应只留一份；同接口不同响应（第二页）要保留
+  const seen = new Set(captureSession.samples.map((s) => `${s.url}|${s.body.length}|${s.body.slice(0, 120)}`));
+  for (const s of incoming) {
+    const key = `${s.url}|${s.body.length}|${s.body.slice(0, 120)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    captureSession.samples.push(s);
+  }
+  const samples = captureSession.samples;
   lastCapture = { samples, origin, name };
 
   if (samples.length === 0) {
@@ -1528,8 +1580,15 @@ async function analyzeCapture(dump) {
       method: 'POST',
       // 页面标题/地址必须一起给：地址里的 courseId 决定"人当时在某一门课里"，
       // 而课内页面上的列表是课程**内容**，不是课程目录（真机踩过）。
-      body: JSON.stringify({ samples, origin, name, pageUrl: dump?.href || '', pageTitle: dump?.title || '' }),
+      body: JSON.stringify({
+        samples,
+        origin,
+        name,
+        pageUrl: captureSession.pageUrl,
+        pageTitle: captureSession.pageTitle,
+      }),
     });
+    lastSampleHost = r.sample?.host || '';
     renderProbeResult(r);
   } catch (e) {
     renderProbe(`<div class="card muted">识别失败：${escapeHtml(e.message)}</div>`);
@@ -1554,6 +1613,7 @@ function renderProbeResult(r) {
         }
         ${warns ? `<div class="hint" style="margin-top:6px">${warns}</div>` : ''}
         <button class="primary" id="probeEnable" style="margin-top:10px">启用这个平台</button>
+        ${sampleExportBtn()}
       </div>`,
     );
     $('probeEnable').addEventListener('click', () => enableConfig(ok.config, r.name || lastCapture?.name || ''));
@@ -1584,11 +1644,50 @@ function renderFix(fix) {
       <div style="font-weight:600">${escapeHtml(fix.headline)}</div>
       <div class="hint" style="margin-top:6px">${escapeHtml(fix.nextStep)}</div>
       <div style="margin-top:4px">${btns}</div>
+      ${sampleExportBtn()}
     </div>`,
   );
   $('probeResult')
     .querySelectorAll('[data-fix-act]')
     .forEach((btn) => btn.addEventListener('click', () => runFixAction(fix.actions[Number(btn.dataset.fixAct)])));
+}
+
+/**
+ * 「导出样本」按钮：只有这次采集真的落了样本才显示。
+ *
+ * 文案刻意不含"诊断/样本包/接口"这类词 —— 用户看到的是"复制一份东西给开发者"，
+ * 而他确实只需要做这一件事。
+ */
+function sampleExportBtn() {
+  if (!lastSampleHost) return '';
+  return `<button class="mini" data-export-sample="${escapeHtml(lastSampleHost)}" style="margin-top:8px">复制排查样本</button>`;
+}
+
+/**
+ * 导出最近一次采集的接口样本。
+ *
+ * 材料已脱敏（不含作业内容、不含 token、不含身份字段），所以复制出去是安全的；
+ * 而它对排查的价值极高：它是**真机的真实响应形状**，比任何口头描述都准。
+ */
+async function exportSample(query) {
+  const qs = new URLSearchParams(query).toString();
+  try {
+    const r = await api(`/api/adapter/sample?${qs}`);
+    if (!r.ok) {
+      toast(r.error || '没有可导出的样本', 6000);
+      return;
+    }
+    const when = String(r.capturedAt || '').slice(0, 16).replace('T', ' ');
+    const ok = await copyText(r.text);
+    toast(
+      ok
+        ? `样本已复制（${r.requestCount} 个接口 · ${when}）。发给开发者即可，里面没有作业内容`
+        : '自动复制失败，请再点一次',
+      8000,
+    );
+  } catch (e) {
+    toast(`导出失败：${e.message}`, 5000);
+  }
 }
 
 async function copyText(text) {
@@ -1678,12 +1777,34 @@ async function enableConfig(config, name, knownCount) {
     );
     // 立刻同步一次：让"启用成功"变成"待办里真的出现了作业"，
     // 而不是让用户自己去点同步按钮验证（那一步没人做）。
-    try {
-      await doSync();
-    } catch {
-      /* 同步失败会走自己的提示路径 */
-    }
+    const rep = await doSync();
     await refresh();
+
+    // ---- 首同步自检（L3）----
+    //
+    // 「启用成功」和「真的能一直同步」是两件事：试抓只证明那一刻能读。
+    // 这一步专门兜住"同步成功但什么也没发生"（全部无截止时间 / 课程数翻倍），
+    // 以及首同步直接失败 —— 两种都必须当场说清楚，不能只留一条状态条。
+    const mine = (rep?.accounts ?? []).find((a) => a.platformId === r.platformId);
+    const firstIssue = mine?.selfCheck?.[0];
+    if (mine && (mine.status !== 'ok' || firstIssue)) {
+      try {
+        const fx = await api('/api/adapter/fix', {
+          method: 'POST',
+          body: JSON.stringify({
+            platformId: r.platformId,
+            ...(firstIssue ? { code: firstIssue.code } : {}),
+            ...(mine.message ? { error: mine.message } : {}),
+          }),
+        });
+        renderFix(fx);
+        toast('已启用，但第一次同步有问题 —— 看下面的说明', 8000);
+        return;
+      } catch {
+        /* 拿不到修复包就保持状态条的结果，不再叠加噪音 */
+      }
+    }
+
     $('probeResult')?.classList.add('hidden');
     $('pasteBox')?.classList.add('hidden');
     if ($('probeUrl')) $('probeUrl').value = '';
@@ -1911,7 +2032,7 @@ function activeTab() {
  * 用户只能靠「这次有没有被挡住」来猜是谁在同步。
  */
 async function doSync() {
-  if (syncing) return;
+  if (syncing) return undefined;
   syncing = true;
   syncBarStartedAt = Date.now();
   showSyncBar('正在同步…');
@@ -1947,8 +2068,12 @@ async function doSync() {
         toast(`${notice.dataset.count ?? ''} 条作业信息有更新（截止时间/标题等）—— 待办页顶部可展开`, 9000);
       }
     }
+    // 返回报告：调用方（例如「刚启用一个平台」）要据此判断首同步是否真的成功。
+    // 只看状态条是判断不了的 —— 用户看不到，代码也读不到。
+    return r;
   } catch (e) {
     showSyncBar(`同步失败：${e.message}`, 'error', 9000);
+    return undefined;
   } finally {
     clearInterval(tick);
     syncing = false;
@@ -2330,6 +2455,12 @@ $('accountList').addEventListener('click', async (e) => {
     }
     showSyncBar(`正在打开${pname}登录页…`, 'running', 3000);
     openPlatformLogin(pid, relogin.dataset.loginUrl);
+    return;
+  }
+
+  const sampleBtn = e.target.closest('button[data-sample]');
+  if (sampleBtn) {
+    await exportSample({ platformId: sampleBtn.dataset.sample });
     return;
   }
 

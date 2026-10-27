@@ -21,6 +21,45 @@
     requests: [],
     markers: [],
   };
+
+  /**
+   * 自动打标：翻页 / 滚到底 / 换了页面。
+   *
+   * 为什么要自动打：识别层需要知道「哪些请求是用户翻过页、滚过列表之后才出现的」——
+   * 那才是完整数据。让用户为了这个多点一个按钮，等于把成本推给他，
+   * 而他根本不知道"翻页"和"接口"之间有什么关系。
+   *
+   * 标记只记「发生过」，不记录任何页面内容。
+   */
+  function autoMark(name) {
+    var m = rec.markers[rec.markers.length - 1];
+    if (m && m.name === name && Date.now() - m.at < 1500) return; // 去抖：同一动作不刷屏
+    rec.markers.push({ name: name, at: Date.now(), url: location.href });
+  }
+
+  // 滚动到底 → 可能触发了懒加载
+  var scrollTimer = 0;
+  window.addEventListener('scroll', function () {
+    if (scrollTimer) return;
+    scrollTimer = setTimeout(function () {
+      scrollTimer = 0;
+      try {
+        var doc = document.documentElement;
+        var nearBottom = window.innerHeight + window.scrollY >= doc.scrollHeight - 200;
+        if (nearBottom) autoMark('scroll:bottom');
+      } catch (e) {}
+    }, 300);
+  }, { passive: true });
+
+  // 点「下一页 / 加载更多」→ 记一笔（买不到就不记，绝不能影响页面本身）
+  document.addEventListener('click', function (e) {
+    try {
+      var el = e.target && e.target.closest ? e.target.closest('a,button,[role="button"]') : null;
+      if (!el) return;
+      var txt = String(el.innerText || el.getAttribute('aria-label') || '').slice(0, 20);
+      if (/下一页|下页|next|加载更多|更多|load\s*more/i.test(txt)) autoMark('page:next');
+    } catch (e2) {}
+  }, true);
   window.__hhRecorder = rec;
 
   function abs(u) {
@@ -52,6 +91,8 @@
             push({
               url: abs(url), method: String(method).toUpperCase(), status: res.status,
               mimeType: ct, body: String(text).slice(0, MAX_BODY), t: Date.now(),
+              // 这条请求是在「已经发生过几个用户动作」之后出现的 —— 数字越大越靠后
+              mark: rec.markers.length,
             });
           }).catch(function () {});
         } catch (e) {}
@@ -84,6 +125,7 @@
           push({
             url: abs(u), method: String(m).toUpperCase(), status: xhr.status,
             mimeType: ct, body: String(text).slice(0, MAX_BODY), t: Date.now(),
+            mark: rec.markers.length,
           });
         } catch (e) {}
       });

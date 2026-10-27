@@ -144,19 +144,13 @@ export function normalizeDeadline(v: unknown): string | undefined {
 /**
  * 判断一个接口地址是否依赖「页面现算」的签名参数。
  *
- * 这类参数（key / uuid / sign / token / nonce / timestamp / dateFormate）由前端 JS 生成，
- * 寿命往往只有几十秒。声明式配置**拿不到**它们 —— 这不是配置写错了，是原理上不可行。
- *
- * 真机案例：智慧树 ?key={uuid}&dateFormate=${dateFormate}。
- * 之前让用户点启用、同步失败、再回来诊断，绕了一大圈；在导入这一步就该拦住。
+ * 实现已收到 core 的 `urlRequiresSignature`（探针、适配器、导入三处共用一份正则）。
+ * 这里只做转发，不保留第二份判断 —— 两份正则必然一份漏一个平台。
  */
-export function looksLikeNeedsSignature(url: string): boolean {
-  if (!url) return false;
-  // 显式占位符：{uuid} / ${sign} / {dateFormate}
-  if (/\$?\{[^}]*(uuid|sign|token|nonce|timestamp|dateformate)[^}]*\}/i.test(url)) return true;
-  // query 里出现签名类参数名（即使有值，那个值也是短命的）
-  return /[?&](key|uuid|sign|signature|token|nonce|timestamp|dateformate|secretstr)=/i.test(url);
-}
+import { urlRequiresSignature } from '#core';
+
+/** 兼容旧名字。本地也要能用（只 re-export 不会把它带进本模块作用域）。 */
+export const looksLikeNeedsSignature = urlRequiresSignature;
 
 /** 平台报的状态 → 这个应用里算不算"已经不用做了"。 */
 export function looksDone(status: unknown): boolean {
