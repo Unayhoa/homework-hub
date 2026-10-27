@@ -1424,55 +1424,307 @@ async function saveSettings(patch) {
   }
 }
 
-// 添加平台（实验）：把提示词交给原生，原生负责注入记录器并导出证据包。
-// 提示词由后端提供（单一真源），不在这里硬编码 —— 两份必然漂移。
-$('startCapture').addEventListener('click', async () => {
-  if (!window.Android?.openCapture) {
-    toast('这个功能目前只在 Android 应用里可用', 5000);
+// ─────────────────────────────── 添加自定义平台（v0.2.7）
+//
+// 设计前提：用户不做技术工作。他能做的只有两件**不可替代**的事 ——
+//   ① 在平台页面里登录（只有他有账号）
+//   ② 点一下「我看到了作业」（只有他知道哪一页是作业列表）
+// 其余全部由后端完成：认接口、对字段、试抓验证、课程归属。
+//
+// 失败时的唯一通道是「复制给 AI」：材料由**后端**按失败类型生成（core/diagnostics），
+// 前端不拼、不改写。否则每处报错各写一份 → 质量随机、必然漂移，
+// 而这正是本轮要终结的东西。
+
+/** 最近一次采集的原始材料 + 探查上下文（重试/切模式时要复用） */
+let lastCapture = null;
+
+function originOf(url) {
+  try {
+    const u = new URL(url);
+    return `${u.protocol}//${u.host}`;
+  } catch {
+    return '';
+  }
+}
+
+/** 平台名：用户没填就用域名（比"未命名平台"好认）。 */
+function platformNameFrom(url, typed) {
+  if (typed) return typed;
+  try {
+    return new URL(url).host.replace(/^www\./, '');
+  } catch {
+    return '';
+  }
+}
+
+function renderProbe(html) {
+  const box = $('probeResult');
+  box.innerHTML = html;
+  box.classList.remove('hidden');
+}
+
+$('probeStart').addEventListener('click', () => {
+  let url = ($('probeUrl')?.value || '').trim();
+  if (!url) {
+    toast('先填平台网址');
     return;
   }
-  try {
-    const r = await api('/api/adapter/prompt');
-    window.Android.openCapture(r.prompt || '');
-  } catch (e) {
-    toast(`取提示词失败：${e.message}`, 5000);
+  if (!window.Android?.openCapture) {
+    toast('这个功能只在 Android 应用里可用', 5000);
+    return;
   }
+  if (!/^https?:\/\//i.test(url)) url = `https://${url}`;
+  const name = ($('probeName')?.value || '').trim();
+  // 把网址一起带下去预填 —— 让用户再手打一遍纯属浪费
+  window.Android.openCapture('probe', name, url);
 });
 
-// 把 AI 的回复粘回来 → 导入成作业。
-// 为什么这里不"校验格式后拒绝"：真实测试里手机端 AI 给的是**作业数据**而不是接入配置，
-// 直接拒绝会让用户卡死。两种都收：数据能导入就导入，配置先认下来并说明还不能用。
+/**
+ * 原生采集页的回传入口（MainActivity.onActivityResult → 这里）。
+ *
+ * 两种结果走两条路，但**终点相同**：一份被验证过的配置。
+ *   probe：一批响应 → 后端分析 + 试抓 → 候选
+ *   dom：  点选并当场试抓通过的配置 → 直接启用
+ */
+window.HH = window.HH || {};
+window.HH.captured = async function (kind, json) {
+  let payload;
+  try {
+    payload = JSON.parse(json);
+  } catch {
+    toast('采集结果读不出来，请重新采集', 5000);
+    return;
+  }
+  if (kind === 'dom') return adoptDomConfig(payload);
+  return analyzeCapture(payload);
+};
+
+/**
+ * 把采集到的响应交给后端分析。
+ *
+ * 只送 JSON 对象/数组：HTML、图片、埋点对识别没有帮助，还会把材料撑大
+ * （免费 AI 的上下文有限，而材料越干净它越可能给定格式）。
+ */
+async function analyzeCapture(dump) {
+  const reqs = Array.isArray(dump?.requests) ? dump.requests : [];
+  const samples = reqs
+    .filter((r) => r && typeof r.body === 'string' && /^[[{]/.test(r.body.trim()))
+    .map((r) => ({ url: r.url, method: r.method, status: r.status, mimeType: r.mimeType, body: r.body }));
+  const origin = originOf(dump?.href || samples[0]?.url || '');
+  const name = platformNameFrom(origin, ($('probeName')?.value || '').trim());
+  lastCapture = { samples, origin, name };
+
+  if (samples.length === 0) {
+    renderProbe(
+      `<div class="card"><div style="font-weight:600">这一页没有可用的数据接口</div>` +
+        `<div class="hint" style="margin-top:6px">作业列表可能还没打开。回到平台页，点进「作业列表」看到作业之后，再点一次那个按钮。</div></div>`,
+    );
+    return;
+  }
+
+  renderProbe(`<div class="card muted">已收到 ${samples.length} 个接口，正在识别…</div>`);
+  try {
+    const r = await api('/api/adapter/probe', {
+      method: 'POST',
+      body: JSON.stringify({ samples, origin, name }),
+    });
+    renderProbeResult(r);
+  } catch (e) {
+    renderProbe(`<div class="card muted">识别失败：${escapeHtml(e.message)}</div>`);
+  }
+}
+
+function renderProbeResult(r) {
+  const ok = (r.candidates ?? []).find((c) => c.trial && c.trial.ok);
+  if (r.ok && ok) {
+    const n = ok.trial.count ?? 0;
+    const first = ok.trial.preview?.[0];
+    const warns = (ok.warnings ?? []).map((w) => escapeHtml(w)).join('；');
+    renderProbe(
+      `<div class="card">
+        <div style="font-weight:600">能读出来了 · ${n} 条</div>
+        ${
+          first
+            ? `<div class="muted" style="margin-top:4px">第一条：${escapeHtml(first.title)}${
+                first.courseName ? `（${escapeHtml(first.courseName)}）` : ''
+              }</div>`
+            : ''
+        }
+        ${warns ? `<div class="hint" style="margin-top:6px">${warns}</div>` : ''}
+        <button class="primary" id="probeEnable" style="margin-top:10px">启用这个平台</button>
+      </div>`,
+    );
+    $('probeEnable').addEventListener('click', () => enableConfig(ok.config, r.name || lastCapture?.name || ''));
+    return;
+  }
+  renderFix(r.fix);
+}
+
+/**
+ * 渲染一份修复建议：一句话 + 下一步 + 最多两个按钮。
+ *
+ * 按钮的文字与语义**都由后端给**（core/diagnostics）。前端只负责把它们变成 DOM ——
+ * 一旦前端开始自己选文案，就又有两个地方在维护"遇到这个错误该说什么"。
+ */
+function renderFix(fix) {
+  if (!fix) {
+    renderProbe('<div class="card muted">没认出来，也没拿到建议。重新采集一次通常就好。</div>');
+    return;
+  }
+  const btns = (fix.actions ?? [])
+    .map(
+      (a, i) =>
+        `<button class="${i === 0 ? 'primary' : 'mini'}" data-fix-act="${i}" style="margin-top:8px">${escapeHtml(a.label)}</button>`,
+    )
+    .join(' ');
+  renderProbe(
+    `<div class="card">
+      <div style="font-weight:600">${escapeHtml(fix.headline)}</div>
+      <div class="hint" style="margin-top:6px">${escapeHtml(fix.nextStep)}</div>
+      <div style="margin-top:4px">${btns}</div>
+    </div>`,
+  );
+  $('probeResult')
+    .querySelectorAll('[data-fix-act]')
+    .forEach((btn) => btn.addEventListener('click', () => runFixAction(fix.actions[Number(btn.dataset.fixAct)])));
+}
+
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function runFixAction(a) {
+  if (!a) return;
+  if (a.kind === 'copy') {
+    const ok = await copyText(a.payload || '');
+    // 复制完立刻把粘贴框露出来：用户下一步**一定**是粘回来，
+    // 让他自己去别处找输入框，等于多一次迷路。
+    $('pasteBox')?.classList.remove('hidden');
+    if (ok) {
+      toast('已复制。粘给任意 AI，再把它的回答粘到下面的框里', 7000);
+    } else {
+      // 剪贴板被拒（非安全上下文）时退化成"显示出来让他手动选"，
+      // 绝不假装成功 —— 那会让用户拿着空剪贴板去粘。
+      $('importBox').value = a.payload || '';
+      toast('自动复制没成功，已把内容填进下面的框，长按全选复制', 8000);
+    }
+    return;
+  }
+  if (a.kind === 'open') {
+    let url = a.url || ($('probeUrl')?.value || '').trim();
+    if (!url) {
+      toast('先填平台网址');
+      return;
+    }
+    if (!/^https?:\/\//i.test(url)) url = `https://${url}`;
+    if (window.Android?.openBrowse) window.Android.openBrowse(url, '');
+    return;
+  }
+  // tap：动作语义由后端给，**不按按钮文字匹配**（改一个字就断，且断了没有任何提示）
+  const url = ($('probeUrl')?.value || '').trim();
+  const name = ($('probeName')?.value || '').trim();
+  if (a.id === 'use-dom' || a.id === 'repick') {
+    window.Android?.openCapture?.('dom', name, url);
+  } else if (a.id === 'retry') {
+    toast('正在重试…');
+    await doSync();
+    await refresh();
+  } else {
+    window.Android?.openCapture?.('probe', name, url);
+  }
+}
+
+/** 点选模式回传：配置已经当场试抓过（抓到 N 条才会回传），直接启用。 */
+async function adoptDomConfig(payload) {
+  const cfg = payload?.config;
+  if (!cfg) {
+    toast('点选结果不完整，请重新点选', 5000);
+    return;
+  }
+  await enableConfig(cfg, ($('probeName')?.value || '').trim(), payload?.count);
+}
+
+/**
+ * 启用一份配置。
+ *
+ * 后端会**先试抓再保存**（api.ts 的 /api/adapter/enable），所以这里不需要
+ * 自己再判断一遍配置对不对 —— 判两遍必然漂移，而且前端也判断不了。
+ * 失败时后端连带返回修复建议，直接渲染。
+ */
+async function enableConfig(config, name, knownCount) {
+  busy(true);
+  try {
+    const r = await api('/api/adapter/enable', {
+      method: 'POST',
+      body: JSON.stringify({ config, ...(name ? { name } : {}) }),
+    });
+    if (!r.ok) {
+      if (r.fix) renderFix(r.fix);
+      else toast(r.error || '启用失败', 6000);
+      return;
+    }
+    toast(
+      knownCount ? `已启用「${r.name}」· ${knownCount} 条作业，正在同步…` : `已启用「${r.name}」，正在同步…`,
+      5000,
+    );
+    // 立刻同步一次：让"启用成功"变成"待办里真的出现了作业"，
+    // 而不是让用户自己去点同步按钮验证（那一步没人做）。
+    try {
+      await doSync();
+    } catch {
+      /* 同步失败会走自己的提示路径 */
+    }
+    await refresh();
+    $('probeResult')?.classList.add('hidden');
+    $('pasteBox')?.classList.add('hidden');
+    if ($('probeUrl')) $('probeUrl').value = '';
+  } catch (e) {
+    toast(`启用失败：${e.message}`, 5000);
+  } finally {
+    busy(false);
+  }
+}
+
+/**
+ * AI 的回答粘回来 → 能启用就启用，能当作业导入就导入。
+ *
+ * 为什么两种都认：真机上免费模型经常给"提取好的作业列表"而不是配置，
+ * 直接拒绝会让用户卡死（那时他手里只有这一份东西）。
+ * 但两条路的终点不同，所以提示语必须说清"这是一次性快照"。
+ */
 $('doImport').addEventListener('click', async () => {
   const text = $('importBox').value.trim();
   if (!text) {
-    toast('先粘贴 AI 的回复');
+    toast('先把 AI 的回答粘进来');
     return;
   }
   busy(true);
   try {
-    const r = await api('/api/adapter/import', { method: 'POST', body: JSON.stringify({ text }) });
-    if (r.ok) {
-      const bits = [`已导入 ${r.created} 条作业`];
-      if (r.done) bits.push(`其中 ${r.done} 条标为已完成`);
-      if (r.skipped) bits.push(`跳过 ${r.skipped} 条重复`);
-      // 必须说清这是"快照"不是"接入" —— 否则用户会以为这个平台以后能自动更新，
-      // 过几天发现作业没变还以为坏了。
-      $('importResult').textContent =
-        `${bits.join('，')}。这是一次性快照：平台以后新增或改期，这里不会跟着变。`;
+    const parsed = await api('/api/adapter/import', { method: 'POST', body: JSON.stringify({ text }) });
+    if (parsed.ok) {
+      const bits = [`已导入 ${parsed.created} 条作业`];
+      if (parsed.done) bits.push(`其中 ${parsed.done} 条标为已完成`);
+      if (parsed.skipped) bits.push(`跳过 ${parsed.skipped} 条重复`);
+      // 必须说清这是"快照"不是"接入"，否则用户会以为以后能自动更新
+      $('importResult').textContent = `${bits.join('，')}。这是一次性快照：平台以后新增或改期，这里不会跟着变。`;
       $('importBox').value = '';
       await refresh();
-    } else {
-      $('importResult').textContent = r.error || '没能识别这段回复';
-      // 认出来是「接入配置」→ 给一个启用入口。
-      // 启用后它就是一个真正的平台（同步、提醒、变更历史都走内置平台同一条链路），
-      // 而不是只能看一次的导入数据。
-      if (r.canEnable) {
-        $('importResult').innerHTML =
-          `${escapeHtml(r.notes?.join('；') || '识别到接入配置')}<br>` +
-          '<button class="primary" id="enablePlatform" style="margin-top:8px">启用为平台（可自动同步）</button>';
-        $('enablePlatform').addEventListener('click', enablePlatform);
-      }
+      return;
     }
+    if (parsed.canEnable) {
+      // 交给 enableConfig：它会让后端先试抓，不通过就给出修复建议
+      $('importResult').textContent = '配置已识别，正在验证…';
+      const name = ($('probeName')?.value || '').trim();
+      busy(false);
+      await enableByText(text, name);
+      return;
+    }
+    $('importResult').textContent = parsed.error || '没能识别这段回复';
   } catch (e) {
     $('importResult').textContent = `导入失败：${e.message}`;
   } finally {
@@ -1480,32 +1732,28 @@ $('doImport').addEventListener('click', async () => {
   }
 });
 
-/**
- * 把「接入配置」启用成一个真正的平台。
- *
- * 启用之后的行为和超星 / iSmart 完全一致 —— 它只是把 adapter 从"写死的类"
- * 换成了"配置驱动的类"，上层同步、合并、提醒、变更历史一行都没改。
- */
-async function enablePlatform() {
-  const text = $('importBox').value.trim();
-  if (!text) {
-    toast('先把配置粘进来');
-    return;
-  }
+/** 文本形态的配置（AI 粘回来的）→ 走同一个启用闸门。 */
+async function enableByText(text, name) {
   busy(true);
   try {
-    const name = ($('customName')?.value || '').trim();
     const r = await api('/api/adapter/enable', {
       method: 'POST',
       body: JSON.stringify({ text, ...(name ? { name } : {}) }),
     });
-    if (r.ok) {
-      $('importResult').textContent = `已启用「${r.name}」—— 现在去账号页同步一次，它就会和内置平台一样工作。`;
-      $('importBox').value = '';
-      await refresh();
-    } else {
-      $('importResult').textContent = r.error || '启用失败';
+    if (!r.ok) {
+      $('importResult').textContent = r.error || '这份配置还不能用';
+      if (r.fix) renderFix(r.fix);
+      return;
     }
+    toast(`已启用「${r.name}」，正在同步…`, 5000);
+    $('importBox').value = '';
+    $('importResult').textContent = '';
+    try {
+      await doSync();
+    } catch {
+      /* 同步失败会走自己的提示路径 */
+    }
+    await refresh();
   } catch (e) {
     $('importResult').textContent = `启用失败：${e.message}`;
   } finally {
@@ -1559,29 +1807,40 @@ async function renderLog() {
     .join('');
 }
 
-// 诊断闭环：失败 → 打包证据 + 当前配置 → AI 只改错处 → 粘回来重新启用。
-// 这里只做"复制到剪贴板"—— 系统剪贴板是这个环境里唯一稳定跨 App 的通道。
+/**
+ * 同步失败后的"下一步"按钮。
+ *
+ * 材料与文案都由后端按失败类型给（`/api/adapter/fix` → core/diagnostics）：
+ *   · AI 能修的（路径/选择器/字段）→ 复制一包，粘给 AI，回答再粘回「添加平台」
+ *   · AI 修不了的（会话/签名/网络）→ **不给复制**，直接告诉他该做什么
+ * 这条边界很重要：把会话过期做成"发给 AI"，它只会编一个看起来合理的解释，
+ * 用户还以为是自己配置错了。
+ */
 $('logList').addEventListener('click', async (e) => {
   const btn = e.target.closest('button[data-diagnose]');
   if (!btn) return;
   busy(true);
   try {
-    const r = await api('/api/adapter/diagnose', {
+    const r = await api('/api/adapter/fix', {
       method: 'POST',
       body: JSON.stringify({ platformId: btn.dataset.diagnose }),
     });
-    if (!r.ok) {
-      toast(r.error || '生成诊断包失败', 5000);
+    if (btn) btn.textContent = r.aiCanFix ? '复制给 AI' : r.headline;
+    const copyAction = (r.actions ?? []).find((a) => a.kind === 'copy');
+    if (!copyAction) {
+      // AI 帮不上：把结论说出来，需要打开的页面顺手打开
+      toast(`${r.headline} ${r.nextStep}`, 8000);
+      const openAction = (r.actions ?? []).find((a) => a.kind === 'open');
+      if (openAction?.url && window.Android?.openBrowse) window.Android.openBrowse(openAction.url, '');
       return;
     }
-    const text = `${r.markdown}\n\n===== 以下是原始接入要求（仅作参考）=====\n\n${r.prompt}`;
-    try {
-      await navigator.clipboard.writeText(text);
-      toast('诊断包已复制。粘给 AI，让它改配置，再把结果粘回「添加平台」', 6000);
-    } catch {
-      // 剪贴板被拒（非安全上下文）时退化成"显示出来让用户手动选"
-      $('importBox').value = text;
-      toast('已填进「添加平台」的输入框，手动复制即可', 6000);
+    if (await copyText(copyAction.payload || '')) {
+      toast('已复制。粘给任意 AI，再把它的回答粘到「添加平台」里', 7000);
+      // 把用户带到能粘贴的地方 —— 否则他拿着一份剪贴板内容找不到入口
+      document.querySelector('[data-tab="accounts"]')?.click?.();
+    } else {
+      $('importBox').value = copyAction.payload || '';
+      toast('自动复制没成功，已填进「添加平台」的输入框', 7000);
     }
   } catch (err) {
     toast(`失败：${err.message}`, 5000);

@@ -106,9 +106,16 @@ public class HttpBridge {
         activity.domExtract(id, url, ruleJson);
     }
 
-    /** 打开「录制新平台」界面：注入记录器 → 用户操作 → 导出证据包给 AI。 */
+    /**
+     * 打开「采集新平台」界面：注入记录器 → 用户登录并看到作业列表 → 回传给应用内分析。
+     *
+     * @param mode "probe"（默认，自动认接口）或 "dom"（点选页面元素）
+     * @param name 平台名，只用于界面文案
+     * @param url  用户在应用里已经填过的网址 —— 传下去预填，省他再打一遍
+     */
     @android.webkit.JavascriptInterface
-    public void openCapture(final String prompt) {        activity.runOnUiThread(() -> activity.openCapturePage(prompt));
+    public void openCapture(final String mode, final String name, final String url) {
+        activity.runOnUiThread(() -> activity.openCapturePage(mode, name, url));
     }
 
     @android.webkit.JavascriptInterface

@@ -32,7 +32,12 @@ import {
   NOTIFY_PRESETS,
   SyncEngine,
   UnavailableSigner,
+  analyzeSamples,
+  buildConfig,
+  buildFixPack,
+  classifyFailure,
 } from '#core';
+import type { ProbeSample, FailureKind } from '#core';
 
 import { parseImport, toManualInput } from './adapter-import.ts';
 import type {
@@ -541,6 +546,35 @@ export function createApiHandler(deps: ApiDeps): ApiHandler {
           return { status: 200, body: { ok: false, error: `配置还缺：${missing.join('、')}` } };
         }
         const c = cfg as unknown as { key: string; name: string };
+        // **启用前必须试抓通过。**
+        //
+        // 为什么把门槛放在这里、而不是只放在探查流程里：AI 粘回来的配置也走这个端点，
+        // 而它同样可能是错的。放行一份跑不通的配置，用户拿到的是"平台加好了、
+        // 待办永远是空的"—— 那是最难自查的一种失败（什么错误都没发生）。
+        //
+        // DOM 模式例外：它在点选那一步已经当真试抓过一次（抓到 N 条才让你回传），
+        // 而且这里没有页面可抓，硬试只会得到一句"当前环境没有后台页面能力"。
+        if ((cfg as { mode?: string }).mode !== 'dom') {
+          const trial = await deps.engine.previewCustomAdapter(normalized);
+          if (!trial.ok) {
+            const err = trial.error ?? '接口能访问，但一条作业也没读出来';
+            return {
+              status: 200,
+              body: {
+                ok: false,
+                error: err,
+                trial: { count: trial.tasks.length, preview: trial.tasks.slice(0, 3).map((t) => ({ title: t.title, courseName: t.courseName })) },
+                fix: buildFixPack({
+                  kind: classifyFailure(err),
+                  error: err,
+                  config: cfg,
+                  platformName: c.name,
+                  origin: String((cfg as { origin?: string }).origin ?? ''),
+                }),
+              },
+            };
+          }
+        }
         await deps.engine.saveCustomAdapter(cfg as never);
         const platformId = `custom-${c.key}`;
         // 重新启用同一份配置（修正版）时，必须先把旧实例踢出注册表 ——
@@ -555,6 +589,139 @@ export function createApiHandler(deps: ApiDeps): ApiHandler {
           explicit: true,
         });
         return { status: 200, body: { ok: true, platformId, name: c.name } };
+      }
+
+      // ── 探查：把录制到的响应变成「可启用的配置」，并**当场试抓**
+      //
+      // 这是「添加平台」的主路径：用户登录取样 → 这里自动分析 → 试抓验证 → 返回候选。
+      // 用户不需要看懂任何字段名，只需要在候选里点一下（通常只有一个能过）。
+      //
+      // 为什么要按候选逐个试抓、而不是只试第一个：
+      // 分析器给的是**结构上的排序**，不是真理。试抓一次只是一个 GET，
+      // 而让用户"点启用 → 同步 → 发现是空的 → 回来重试"的成本高一个量级。
+      if (method === 'POST' && path === '/api/adapter/probe') {
+        const body = parseBody();
+        const samples = Array.isArray(body.samples) ? (body.samples as ProbeSample[]) : [];
+        if (samples.length === 0) {
+          return {
+            status: 200,
+            body: {
+              ok: false,
+              candidates: [],
+              fix: buildFixPack({
+                kind: 'probe-empty',
+                platformName: String(body.name ?? '这个平台'),
+                origin: String(body.origin ?? ''),
+              }),
+            },
+          };
+        }
+        const origin = String(body.origin ?? samples[0]?.url ?? '');
+        const name = String(body.name ?? '').trim() || hostOf(origin) || '未命名平台';
+        const analysis = analyzeSamples(samples);
+
+        // 课程候选：优先用同一个站点、且不是作业列表的那个接口
+        const courseCand = analysis.courses[0];
+
+        const candidates = [];
+        for (const c of analysis.tasks.slice(0, 3)) {
+          // 交给 normalizeAdapterConfig 生成最终形状：key/name/origin 的派生只有那一处，
+          // 这里若自己再算一遍，探针给的 key 和启用时落库的 key 就会不一样（同一平台两个身份）。
+          const cfg = normalizeAdapterConfig(
+            buildConfig(c, {
+              key: 'draft',
+              name,
+              origin,
+              ...(courseCand ? { courses: courseCand } : {}),
+            }),
+          );
+          // 试抓：走真适配器、真会话、同一套解析器。不写库、不需要账号已存在。
+          const trial = await deps.engine.previewCustomAdapter(cfg);
+          candidates.push({
+            config: cfg,
+            url: c.url,
+            rowCount: c.rowCount,
+            confidence: c.confidence,
+            evidence: c.evidence,
+            warnings: c.warnings,
+            trial: {
+              ok: trial.ok,
+              count: trial.tasks.length,
+              // 只回前 3 条给界面显示 —— 这里的作用是"证明读得出来"，不是数据预览
+              preview: trial.tasks.slice(0, 3).map((t) => ({
+                title: t.title,
+                courseName: t.courseName,
+                deadline: t.deadline ?? null,
+                status: t.status ?? 'unknown',
+              })),
+              error: trial.error ?? null,
+              notes: trial.notes,
+            },
+          });
+        }
+
+        const passed = candidates.filter((x) => x.trial.ok);
+        // 有能用的就直接算成功；都不行时给一份修复包（用户只需复制一次）
+        const fix = candidates.length === 0
+          ? buildFixPack({
+              kind: 'probe-empty',
+              platformName: name,
+              origin,
+              samples,
+              error: analysis.needsMore.join('；') || undefined,
+            })
+          : passed.length === 0
+            ? buildFixPack({
+                kind: classifyFailure(candidates[0]!.trial.error ?? '一条也没解析出来'),
+                error: candidates[0]!.trial.error ?? '接口能访问，但没读出作业',
+                config: candidates[0]!.config as unknown as Record<string, unknown>,
+                samples,
+                platformName: name,
+                origin,
+              })
+            : undefined;
+
+        return {
+          status: 200,
+          body: {
+            ok: passed.length > 0,
+            name,
+            origin,
+            candidates,
+            // 看得懂的技术细节也留着：真出问题时它是唯一能定位的东西
+            rejected: analysis.rejected.slice(0, 5),
+            ...(fix ? { fix } : {}),
+          },
+        };
+      }
+
+      // 任何失败点的"复制给 AI"都走这里：**由后端决定给什么**，
+      // 前端只负责显示一句话 + 两个按钮。分类与提示词都在 core 的 diagnostics 里，
+      // 前端若自己拼，就会变成 N 个地方各写一份（必然漂移，且质量随机）。
+      if (method === 'POST' && path === '/api/adapter/fix') {
+        const body = parseBody();
+        const platformId = String(body.platformId ?? '');
+        let cfg: unknown = body.config;
+        if (!cfg && platformId) cfg = await deps.engine.findCustomAdapter(platformId);
+        // 错误优先取调用方给的；没有就取最近一次失败的同步日志（用户不用手抄）
+        let error = String(body.error ?? '');
+        if (!error && platformId) {
+          const acc = (await deps.engine.listAccounts()).find((a) => a.platformId === platformId);
+          if (acc) {
+            const log = await deps.store.listSyncLog(acc.id, 5);
+            error = log.find((x) => x.status === 'failed')?.message ?? '';
+          }
+        }
+        const kind = body.kind ? (String(body.kind) as FailureKind) : classifyFailure(error);
+        const pack = buildFixPack({
+          kind,
+          error,
+          config: cfg as Record<string, unknown> | undefined,
+          samples: Array.isArray(body.samples) ? (body.samples as ProbeSample[]) : undefined,
+          platformName: String(body.name ?? platformId ?? '这个平台'),
+          origin: String(body.origin ?? ''),
+        });
+        return { status: 200, body: pack };
       }
 
       // 生成「诊断包」：把失败原因 + 请求 + 响应片段 + 当前配置打包，
@@ -940,3 +1107,20 @@ export function createTransportFactory(): ApiDeps['buildTransport'] {
     return new CdpHttpClient({ debugBase: `http://127.0.0.1:${port}`, targetUrlMatch: match });
   };
 }
+
+// ---------------------------------------------------------------- 探查用的小工具
+
+/**
+ * 从平台地址里取域名（给"平台名"兜底用）。
+ *
+ * 用户不填平台名时，用域名当名字比"未命名平台"好得多 —— 他至少认得出
+ * zhihuishu.com 是哪门课的平台，而"未命名平台"在账号页里跟另一个未命名平台无法区分。
+ */
+function hostOf(url: string): string {
+  try {
+    return new URL(url).host.replace(/^www\./, '');
+  } catch {
+    return '';
+  }
+}
+

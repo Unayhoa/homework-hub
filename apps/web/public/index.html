@@ -90,21 +90,34 @@
 
       <!-- 自定义平台：只在平台下拉里选了「＋ 添加自定义平台」时出现。
            放在这里而不是设置页，是因为它本质上是「加一个账号」的一种方式 ——
-           用户在这一页找平台，就该在这一页找到它。 -->
+           用户在这一页找平台，就该在这一页找到它。
+
+           v0.2.7 起这里只有**两步**：填网址 → 去登录并在作业列表页点一下。
+           识别、试抓、课程归属全在应用内完成；「粘贴 AI 的回答」只在识别失败时出现。 -->
       <div id="customBox" class="hidden">
-        <div class="hint">
-          ① 点「开始录制」→ 在打开的页面里登录 → 点进作业列表<br>
-          ② 点「点选作业行」，再点页面上任意一条作业的标题<br>
-          ③ 看到「✅ 抓到 N 条」后，配置已复制 → 返回这里粘贴 → 启用
+        <label>平台网址
+          <input id="probeUrl" type="text" placeholder="例如 https://xxx.edu.cn" autocomplete="off" autocapitalize="off">
+        </label>
+        <label>平台名称（可留空）
+          <input id="probeName" type="text" placeholder="留空就用域名，之后能改" autocomplete="off">
+        </label>
+        <button class="primary" id="probeStart" style="margin-top:8px">下一步 · 去登录这个平台</button>
+        <div class="hint" style="margin-top:6px">
+          在打开的页面里登录，点进「作业列表」，看到作业后按上面那个按钮。
+          应用会自动认出接口并当场验证，不需要你填任何配置。
         </div>
-        <button class="primary" id="startCapture" style="margin-top:8px">开始录制</button>
-        <div class="hint" style="margin-top:12px">或者把 AI 给的配置粘到这里：</div>
-        <!-- 平台名：配置里存的往往是域名（wenda），改成「智慧树」这类名字才好认 -->
-        <input id="customName" type="text" placeholder="平台名称，比如：智慧树" style="margin-top:6px">
-        <textarea id="importBox" rows="4" placeholder="粘贴配置（整段粘，不用挑）"
-          style="width:100%;box-sizing:border-box;margin-top:6px;font-size:12px;font-family:monospace"></textarea>
-        <button class="primary" id="doImport" style="margin-top:8px">导入</button>
-        <div class="hint" id="importResult"></div>
+
+        <!-- 采集结果：成功给一条「启用」，失败给一句话 + 最多两个按钮 -->
+        <div id="probeResult" class="hidden" style="margin-top:12px"></div>
+
+        <!-- 兜底通道：AI 的回答粘回这里。默认隐藏 —— 只有识别失败时才出现 -->
+        <div id="pasteBox" class="hidden" style="margin-top:12px">
+          <div class="hint">把 AI 的回答整段粘到这里（不用挑，带解释也行）：</div>
+          <textarea id="importBox" rows="4" placeholder="粘贴 AI 的回复"
+            style="width:100%;box-sizing:border-box;margin-top:6px;font-size:12px;font-family:monospace"></textarea>
+          <button class="primary" id="doImport" style="margin-top:8px">用这份配置</button>
+          <div class="hint" id="importResult"></div>
+        </div>
       </div>
       <div id="captchaRow" class="hidden">
         <label>图形验证码

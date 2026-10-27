@@ -1771,6 +1771,50 @@ export class SyncEngine {
   }
 
   /** 按 platformId 找一份自定义配置（诊断包要用原配置去让 AI 改）。 */
+  /**
+   * 试抓：用**真适配器**跑一次 fetchTasks，**不写库、不建账号**。
+   *
+   * 存在的理由（这是「探查器能不能信」的关键一环）：探查出来的配置只是**结构上的猜测**，
+   * 而它到底能不能解析出作业，只有真发一次请求才知道。让用户在启用之后才发现跑不通，
+   * 等于把猜的代价推给了他，而他手里没有任何判断依据。
+   *
+   * 为什么不开一条"预览专用的简化解析"：那会和运行期解析各写一份，必然漂移 ——
+   * 届时"试抓通过、同步却空"就成为最难查的一类故障。所以这里走的是**同一个**
+   * DeclarativeAdapter 实例与同一套 getByPath/字段映射。
+   *
+   * 注意：不发任何写请求，也不需要账号存在（session 由适配器自己给：cookie 在系统层）。
+   */
+  async previewCustomAdapter(
+    cfg: AdapterConfig,
+  ): Promise<{ ok: boolean; tasks: PlatformTask[]; notes: string[]; error?: string }> {
+    const adapter = new DeclarativeAdapter(cfg);
+    const ctx = this.#contextFor(adapter.id, '__preview');
+    try {
+      const session = await adapter.login(ctx, { username: '__preview' });
+      const page = await adapter.fetchTasks(ctx, session, {});
+      return { ok: page.items.length > 0, tasks: page.items, notes: page.notes ?? [] };
+    } catch (e) {
+      // 错误原文要原样带出去：它就是用户复制给 AI 的那段材料里最有价值的一行。
+      // 不要在这里改写成"试抓失败" —— 那会把"listPath 没命中"和"会话过期"揉成一句话。
+      return { ok: false, tasks: [], notes: [], error: (e as Error).message ?? String(e) };
+    }
+  }
+
+  /**
+   * 探活一次：这个平台现在到底能不能用（用于「启用前最后一问」和故障自查）。
+   * 与试抓分开：探活只回答"会话还在不在"，试抓回答"能不能读出作业"。
+   */
+  async probeCustomOrigin(cfg: AdapterConfig): Promise<{ ok: boolean; error?: string }> {
+    const adapter = new DeclarativeAdapter(cfg);
+    const ctx = this.#contextFor(adapter.id, '__preview');
+    try {
+      const session = await adapter.login(ctx, { username: '__preview' });
+      return { ok: await adapter.probeSession(ctx, session) };
+    } catch (e) {
+      return { ok: false, error: (e as Error).message ?? String(e) };
+    }
+  }
+
   async findCustomAdapter(platformId: string): Promise<unknown | undefined> {
     const c = await this.#store.getCursor('__system', 'custom-adapters');
     if (!c?.cursor) return undefined;

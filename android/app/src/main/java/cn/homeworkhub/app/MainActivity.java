@@ -48,6 +48,9 @@ public class MainActivity extends Activity {
 
     private static final String APP_ORIGIN = "https://appassets.androidplatform.net";
 
+    /** 采集平台配置的请求码（BrowseActivity 回传结果用）。 */
+    private static final int REQ_CAPTURE = 1001;
+
     /** 当前 WebView 里显示的是哪个平台（null = 应用自身的界面）。 */
     private String activePlatformId;
     /**
@@ -478,12 +481,38 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** 打开「录制新平台」窗口（设置页 → 添加平台）。 */
-    void openCapturePage(String prompt) {
+    /**
+     * 打开「采集新平台」窗口。
+     *
+     * 用 startActivityForResult 而不是 startActivity：采集结果必须**回到应用内**去分析。
+     * 以前这里是"导出证据包 → 分享给外部 AI"，数据出去了就断了 ——
+     * 用户得自己把 AI 的回答复制回来，而这件事本来可以完全在应用内做完（probe.ts）。
+     */
+    void openCapturePage(String mode, String name, String url) {
         android.content.Intent i = new android.content.Intent(this, BrowseActivity.class);
         i.putExtra(BrowseActivity.EXTRA_RECORD, true);
-        i.putExtra(BrowseActivity.EXTRA_PROMPT, prompt);
-        startActivity(i);
+        i.putExtra(BrowseActivity.EXTRA_MODE, mode == null || mode.isEmpty() ? "probe" : mode);
+        i.putExtra(BrowseActivity.EXTRA_NAME, name);
+        // 用户在应用里填的网址直接预填并打开 —— 让他再手打一遍纯属浪费
+        i.putExtra(BrowseActivity.EXTRA_URL, url);
+        startActivityForResult(i, REQ_CAPTURE);
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, android.content.Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != REQ_CAPTURE) return;
+        // 用户直接按返回 = 放弃，什么都没发生。不要弹任何提示（他刚才就是在取消）。
+        if (resultCode != RESULT_OK || data == null) return;
+        String kind = data.getStringExtra(BrowseActivity.EXTRA_RESULT_KIND);
+        String json = data.getStringExtra(BrowseActivity.EXTRA_RESULT_JSON);
+        if (json == null) return;
+        // 统一走 window.HH.captured —— 与 returnedFromLogin 同一套"原生异步两态"约定：
+        // 有结果就一条明确的回调，绝不把数据留在原生侧等网页来猜。
+        String js = "window.HH&&window.HH.captured&&window.HH.captured("
+                + org.json.JSONObject.quote(kind == null ? "probe" : kind) + ","
+                + org.json.JSONObject.quote(json) + ")";
+        webView.evaluateJavascript(js, null);
     }
 
     void openLoginPage(String url, String platformId) {
