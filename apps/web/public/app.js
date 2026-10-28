@@ -2391,44 +2391,68 @@ $('doneList').addEventListener('click', (e) => {
  * 条件收得很紧（同课程 + 截止时间相差 1 小时内 + 平台允许手动标），
  * 宁可少提示，也不要在他没做的时候问一句"都标了？"。
  */
-function sameDeadlineSiblings(taskId) {
+/**
+ * 已经拒绝过的批次（同课程 + 同一截止时刻）。
+ *
+ * 一条条标的时候，每标一条都问一次等于骚扰 —— 用户第一次已经看过清单并决定"不"，
+ * 就应该记住这个决定。只在内存里记：重启/刷新后重置，
+ * 因为过一段时间他可能确实又想把剩下的标掉。
+ */
+const declinedBatches = new Set();
+
+function batchKeyOf(courseId, deadlineMs) {
+  return `${courseId}|${deadlineMs}`;
+}
+
+/**
+ * 找出"和这条同一批"的作业：同课程 + 同截止时刻 + 平台允许手动标。
+ *
+ * 时间一律用 DTO 里 core 折算好的 `deadlineMs`。这一段踩过两次坑：
+ *   ① 用 `deadline`（误以为是字符串）→ 它是 `{ kind:'absolute', at }` 对象，
+ *      `new Date(对象)` 得 Invalid Date，`NaN <= 3600000` 恒为 false，
+ *      候选永远 0、询问永远不触发（v0.2.16 真机）；
+ *   ② 改用 `deadlineAt` → 它只在 relative 时有值，绝对时间下是 null，
+ *      于是我误判成"窗口太窄"、放宽条件，结果变成每次标记都问（v0.2.17）。
+ * 两次的共同点：坏值以 NaN / null 静默穿过判断，不报错，只能靠现场对照才发现。
+ *
+ * 返回里带 key：调用方要在 refresh **之前**拿到它（刷新后这条就不在待办里了）。
+ * 用户拒绝过一次之后，同一批不再问。
+ */
+function findBatch(taskId) {
   const all = Object.values(lastState?.grouped ?? {}).flat();
   const me = all.find((t) => t.id === taskId);
-  if (!me) return [];
+  if (!me) return { sibs: [], key: '' };
 
-  // 条件：同课程 + 平台允许手动标 + 还没标过。
-  //
-  // 一开始我还要求"截止时间相差 ≤1 小时"，真机上直接不触发（2026-10-28）：
-  // 雨课堂同一门课的三次作业截止时间并不完全相同，有的干脆没给截止时间 ——
-  // 判据卡在"时间"上，就把真正想帮的那批人挡在门外了。
-  //
-  // 现在不按时间筛，靠**列清单**让用户自己判断：他看得到"第二次、第三次"，
-  // 知道哪几条做完了。条件放宽的代价是可能问到没做的，所以文案里明说
-  // "其中有没做的就点取消"。
-  const sibs = all.filter(
-    (t) => t.id !== taskId && t.courseId === me.courseId && t.canManualComplete === true,
-  );
+  const mine = me.deadlineMs;
+  if (mine == null) return { sibs: [], key: '' }; // open / unknown：没有绝对时刻，判断不了一批
+  const key = batchKeyOf(me.courseId, mine);
+  if (declinedBatches.has(key)) return { sibs: [], key };
 
-  // 上界：同时截止的一般就 2~5 条。一门课几十条作业时不要问 ——
-  // 那不是"顺手标一下"，而是在问"这门课的作业你全做完了吗"，没人愿意在这种问题上点确定。
-  if (sibs.length === 0 || sibs.length > 5) return [];
-
-  // 按截止时间排，最近的排前面（没时间的排最后）
-  return sibs.sort((a, b) => {
-    const ta = a.deadline ? new Date(a.deadline).getTime() : Infinity;
-    const tb = b.deadline ? new Date(b.deadline).getTime() : Infinity;
-    return ta - tb;
+  // 截止时间相同（容差 60 秒防秒级抖动）是"老师一次布置的一组"最可靠的信号：
+  // 比"同课程"精确得多，不会把上周那条也拉进来。
+  const sibs = all.filter((t) => {
+    if (t.id === taskId || t.courseId !== me.courseId || t.canManualComplete !== true) return false;
+    return t.deadlineMs != null && Math.abs(t.deadlineMs - mine) <= 60_000;
   });
+
+  // 上界：一组同时截止的通常 2~5 条；更多说明判断错了，不要问
+  if (sibs.length === 0 || sibs.length > 5) return { sibs: [], key };
+  sibs.sort((a, b) => a.deadlineMs - b.deadlineMs);
+  return { sibs, key };
 }
 
 /** 追加询问：把清单列出来让他自己看，而不是只说"还有 2 条"。 */
-async function offerBatchComplete(batch) {
+async function offerBatchComplete(batch, batchKey) {
   const head = batch.slice(0, 3).map((t) => `· ${String(t.title).slice(0, 24)}`).join('\n');
   const more = batch.length > 3 ? `\n· 还有 ${batch.length - 3} 条` : '';
   const ok = confirm(
-    `这门课还有 ${batch.length} 条作业没标完成：\n${head}${more}\n\n一起标记完成？（只改本机记录；其中有没做的就点取消）`,
+    `这门课还有 ${batch.length} 条同时截止的作业：\n${head}${more}\n\n一起标记完成？（只改本机记录；其中有没做的就点取消）`,
   );
-  if (!ok) return;
+  if (!ok) {
+    // 记住"这一批我拒绝了"，同批剩下的不要再问
+    if (batchKey) declinedBatches.add(batchKey);
+    return;
+  }
   busy(true);
   let done = 0;
   try {
@@ -2453,7 +2477,8 @@ async function offerBatchComplete(batch) {
 
 async function markCompleted(taskId, completed) {
   // 候选必须在 refresh **之前**算：刷新后这条就从待办里消失了，也就找不到"同组"了
-  const batch = completed ? sameDeadlineSiblings(taskId) : [];
+  const found = completed ? findBatch(taskId) : { sibs: [], key: '' };
+  const batch = found.sibs;
   busy(true);
   try {
     const r = await api('/api/task/complete', {
@@ -2468,7 +2493,8 @@ async function markCompleted(taskId, completed) {
     await refresh();
     // 只在真的标上了、且确实有同组兄弟时才追问
     if (completed && batch.length > 0 && (!r || r.applied !== false)) {
-      await offerBatchComplete(batch);
+      // key 是在 refresh 之前算好的，这里直接用（refresh 后已经找不到这条了）
+      await offerBatchComplete(batch, found.key);
     }
   } catch (err) {
     toast(`${completed ? '标记' : '撤销'}失败：${err.message}`, 5000);

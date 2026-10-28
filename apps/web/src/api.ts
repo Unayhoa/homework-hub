@@ -37,6 +37,7 @@ import {
   buildFixPack,
   classifyFailure,
   buildSamplePack,
+  deadlineToMs,
   packStorageKey,
   appendPackHistory,
 } from '#core';
@@ -98,6 +99,11 @@ export interface TaskDto {
   deadline: unknown;
   deadlineAt: string | null;
   /**
+   * 截止时刻的毫秒时间戳，由 core 统一折算（absolute 取 at，relative 取 deadlineAt）。
+   * 界面**不要**再自己 new Date(deadline) —— 那是个对象，永远得到 NaN。
+   */
+  deadlineMs: number | null;
+  /**
    * 题目级进度（PTA 这类「一份作业 = N 道题」的平台才有）。
    * 没给就是 null —— 界面据此决定要不要画进度条，其他平台完全不受影响。
    */
@@ -137,6 +143,7 @@ export function taskDto(t: UnifiedTask): TaskDto {
     canSkip: canSkip(t),
     deadline: t.deadline,
     deadlineAt: t.deadlineAt ?? null,
+    deadlineMs: deadlineToMs(t.deadline, t.deadlineAt),
     progress: t.progress ?? null,
     subtasks: t.subtasks ?? null,
     pendingAc: hasPendingAc(t, new Date()),

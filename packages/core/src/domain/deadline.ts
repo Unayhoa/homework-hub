@@ -16,6 +16,31 @@
 
 export type DeadlineUnit = 'minute' | 'hour' | 'day';
 
+/**
+ * 把 Deadline 折算成毫秒时间戳；没有绝对时刻就返回 null。
+ *
+ * 为什么必须由 core 提供、而不是让界面自己 `new Date(x)`：
+ * `Deadline` 是个联合类型，绝对时间在 `at`（ISO 字符串）里，
+ * 相对时间只有 value/unit，得靠调用方事先折算好的 `fallbackAt`。
+ * 界面层直接 `new Date(task.deadline)` 会拿到 Invalid Date（因为那是对象）——
+ * 而 `NaN <= 3600000` 恒为 false，表现为"条件永远不成立"，静默且难查。
+ * 这个 bug 真实发生过（2026-10-28，批量标记询问永远不触发）。
+ */
+export function deadlineToMs(d: Deadline | undefined, fallbackAt?: string): number | null {
+  if (d && typeof d === 'object' && 'kind' in d) {
+    if (d.kind === 'absolute') {
+      const ms = new Date(d.at).getTime();
+      if (Number.isFinite(ms)) return ms;
+    }
+  }
+  // relative / open / unknown：没有自带绝对时刻，只能用调用方折算好的那个
+  if (fallbackAt) {
+    const ms = new Date(fallbackAt).getTime();
+    if (Number.isFinite(ms)) return ms;
+  }
+  return null;
+}
+
 export type Deadline =
   /** 明确的绝对时刻 */
   | { kind: 'absolute'; at: string; raw?: string }

@@ -130,6 +130,7 @@ export { ADAPTER_PROMPT, ADAPTER_PITFALLS, buildEvidencePack, drillPack } from '
 export { DeclarativeAdapter, DomAdapter, validateConfig, normalizeAdapterConfig, setDomExtractor, hasDomExtractor, getByPath, mapStatus } from './engine/declarative-adapter.ts';
 export { resolveCapabilities, courseKeyOf, courseIndexOf } from './engine/declarative-adapter.ts';
 export { analyzeSamples, buildConfig, configIsUsable, detectTimeFormat, guessDefaultCourseId, looksLikeCourseName, courseNameFromTitle, urlRequiresSignature } from './engine/probe.ts';
+export { deadlineToMs } from './domain/deadline.ts';
 export type { ProbeSample, ProbeResult, ProbeContext, SingleCourseHint, TaskCandidate, CourseCandidate } from './engine/probe.ts';
 export { buildFixPack, classifyFailure, summarizeSamples, structureOf, maskSecrets } from './engine/diagnostics.ts';
 export { PROMPT_PICK_ENDPOINT, PROMPT_FIX_PATHS, PROMPT_FIX_DOM } from './engine/diagnostics.ts';
