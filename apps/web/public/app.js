@@ -2179,8 +2179,11 @@ $('tabs').addEventListener('click', (e) => {
 });
 /**
  * 二次点按确认的删除。
- * 不用 confirm()：WebView 里它默认不弹（真机踩过——按钮点了没反应），
- * 而且两步点按在手机上比弹窗更顺手。第一次点变红显示「确认？」，4 秒内再点执行。
+ *
+ * 不用 confirm() 是**交互选择**，不是能力限制：主界面已经实现 onJsConfirm
+ * （MainActivity 用 AlertDialog 接的），所以 confirm 是能弹的 ——
+ * 早期那条"WebView 里它默认不弹"的注释已经过时（那时还没挂 WebChromeClient）。
+ * 这里选两步点按，是因为手机上它比弹窗更顺手：手指不用离开原位置。
  */
 function tapToDelete(btn, armedText, onConfirm) {
   if (btn.dataset.armed === '1') {
@@ -2391,17 +2394,31 @@ $('doneList').addEventListener('click', (e) => {
 function sameDeadlineSiblings(taskId) {
   const all = Object.values(lastState?.grouped ?? {}).flat();
   const me = all.find((t) => t.id === taskId);
-  if (!me || !me.deadline) return [];
-  const mine = new Date(me.deadline).getTime();
-  if (!Number.isFinite(mine)) return [];
-  return all.filter(
-    (t) =>
-      t.id !== taskId &&
-      t.courseId === me.courseId &&
-      t.canManualComplete === true &&
-      t.deadline &&
-      Math.abs(new Date(t.deadline).getTime() - mine) <= 60 * 60 * 1000,
+  if (!me) return [];
+
+  // 条件：同课程 + 平台允许手动标 + 还没标过。
+  //
+  // 一开始我还要求"截止时间相差 ≤1 小时"，真机上直接不触发（2026-10-28）：
+  // 雨课堂同一门课的三次作业截止时间并不完全相同，有的干脆没给截止时间 ——
+  // 判据卡在"时间"上，就把真正想帮的那批人挡在门外了。
+  //
+  // 现在不按时间筛，靠**列清单**让用户自己判断：他看得到"第二次、第三次"，
+  // 知道哪几条做完了。条件放宽的代价是可能问到没做的，所以文案里明说
+  // "其中有没做的就点取消"。
+  const sibs = all.filter(
+    (t) => t.id !== taskId && t.courseId === me.courseId && t.canManualComplete === true,
   );
+
+  // 上界：同时截止的一般就 2~5 条。一门课几十条作业时不要问 ——
+  // 那不是"顺手标一下"，而是在问"这门课的作业你全做完了吗"，没人愿意在这种问题上点确定。
+  if (sibs.length === 0 || sibs.length > 5) return [];
+
+  // 按截止时间排，最近的排前面（没时间的排最后）
+  return sibs.sort((a, b) => {
+    const ta = a.deadline ? new Date(a.deadline).getTime() : Infinity;
+    const tb = b.deadline ? new Date(b.deadline).getTime() : Infinity;
+    return ta - tb;
+  });
 }
 
 /** 追加询问：把清单列出来让他自己看，而不是只说"还有 2 条"。 */
@@ -2409,7 +2426,7 @@ async function offerBatchComplete(batch) {
   const head = batch.slice(0, 3).map((t) => `· ${String(t.title).slice(0, 24)}`).join('\n');
   const more = batch.length > 3 ? `\n· 还有 ${batch.length - 3} 条` : '';
   const ok = confirm(
-    `这门课还有 ${batch.length} 条同时截止的作业：\n${head}${more}\n\n一起标记完成？（只改本机记录）`,
+    `这门课还有 ${batch.length} 条作业没标完成：\n${head}${more}\n\n一起标记完成？（只改本机记录；其中有没做的就点取消）`,
   );
   if (!ok) return;
   busy(true);
