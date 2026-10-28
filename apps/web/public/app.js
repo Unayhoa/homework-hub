@@ -322,6 +322,17 @@ function openTaskExternally(url) {
   window.open(url, '_blank', 'noopener');
 }
 
+/**
+ * 默认折叠的分组。
+ *
+ * 只折叠「逾期」：它是最不需要**当下行动**的一组（已经过了截止），
+ * 但也不能删掉 —— 有些平台允许补交，而"我漏了什么"是期末查漏的唯一线索。
+ * 折叠 = 保信息 + 不占视觉，比"移到记录页"安全（移走会让人错过补交）。
+ */
+const COLLAPSED_BY_DEFAULT = new Set(['overdue']);
+/** 用户手动展开过的组（内存即可：刷新后回到默认，避免状态越滚越复杂） */
+let expandedGroups = new Set();
+
 function renderTodo(state) {
   lastState = state;
   const list = $('todoList');
@@ -341,7 +352,16 @@ function renderTodo(state) {
     const tasks = f ? all.filter((t) => t.courseId === f.id) : all;
     if (tasks.length === 0) continue;
     shown += tasks.length;
-    html += `<div class="group-title ${key}">${GROUP_TITLE[key]} · ${tasks.length}</div>`;
+    const collapsible = COLLAPSED_BY_DEFAULT.has(key);
+    const collapsed = collapsible && !expandedGroups.has(key);
+    html += collapsible
+      ? `<div class="group-title ${key} togglable" data-toggle-group="${key}">${GROUP_TITLE[key]} · ${tasks.length}<span class="group-toggle">${collapsed ? '点开' : '收起'}</span></div>`
+      : `<div class="group-title ${key}">${GROUP_TITLE[key]} · ${tasks.length}</div>`;
+    if (collapsed) {
+      // 只渲染组标题，不渲染卡片：逾期条目动辄十几条，渲染了只是白占内存。
+      // 循环外统一写一次 innerHTML，这里不要去碰它（否则会把后面的组覆盖掉）。
+      continue;
+    }
     for (const t of tasks) {
       const cd = fmtCountdown(t);
       const status = STATUS[t.status] ? ` · ${STATUS[t.status]}` : '';
@@ -2279,6 +2299,15 @@ $('taskMenu').addEventListener('click', (e) => {
 });
 
 $('todoList').addEventListener('click', async (e) => {
+  // 折叠组标题（目前只有「逾期」）：点一下展开/收起
+  const toggle = e.target.closest('[data-toggle-group]');
+  if (toggle) {
+    const g = toggle.dataset.toggleGroup;
+    if (expandedGroups.has(g)) expandedGroups.delete(g);
+    else expandedGroups.add(g);
+    if (lastState) renderTodo(lastState);
+    return;
+  }
   // 作业名 → 去平台看。放在最前面拦截：不然 WebView 会按 <a> 的默认行为处理，
   // 而那个行为在 WebView 里要么开新窗口、要么什么都不做。
   const openLink = e.target.closest('a[data-open-url]');
@@ -2349,7 +2378,65 @@ $('doneList').addEventListener('click', (e) => {
  * 平台明确说"未完成"时，按「平台优先」不会生效 —— 那时必须把原因说出来，
  * 而不是让按钮看起来没反应。
  */
+/**
+ * 「同时截止」的同课程作业。
+ *
+ * 只在**标记完成之后**才用它 —— 这是整个批量设计的关键：
+ * 用户刚确认过一条的上下文，此时提"还有 2 条一起标？"他判断得准；
+ * 而如果做成"多选模式"，他得先学一套新交互，还要在没上下文时决定标哪几条。
+ *
+ * 条件收得很紧（同课程 + 截止时间相差 1 小时内 + 平台允许手动标），
+ * 宁可少提示，也不要在他没做的时候问一句"都标了？"。
+ */
+function sameDeadlineSiblings(taskId) {
+  const all = Object.values(lastState?.grouped ?? {}).flat();
+  const me = all.find((t) => t.id === taskId);
+  if (!me || !me.deadline) return [];
+  const mine = new Date(me.deadline).getTime();
+  if (!Number.isFinite(mine)) return [];
+  return all.filter(
+    (t) =>
+      t.id !== taskId &&
+      t.courseId === me.courseId &&
+      t.canManualComplete === true &&
+      t.deadline &&
+      Math.abs(new Date(t.deadline).getTime() - mine) <= 60 * 60 * 1000,
+  );
+}
+
+/** 追加询问：把清单列出来让他自己看，而不是只说"还有 2 条"。 */
+async function offerBatchComplete(batch) {
+  const head = batch.slice(0, 3).map((t) => `· ${String(t.title).slice(0, 24)}`).join('\n');
+  const more = batch.length > 3 ? `\n· 还有 ${batch.length - 3} 条` : '';
+  const ok = confirm(
+    `这门课还有 ${batch.length} 条同时截止的作业：\n${head}${more}\n\n一起标记完成？（只改本机记录）`,
+  );
+  if (!ok) return;
+  busy(true);
+  let done = 0;
+  try {
+    for (const t of batch) {
+      try {
+        const r = await api('/api/task/complete', {
+          method: 'POST',
+          body: JSON.stringify({ taskId: t.id, completed: true }),
+        });
+        // applied === false 表示平台优先挡住了 —— 不算成功，也不打断其他的
+        if (!r || r.applied !== false) done += 1;
+      } catch {
+        /* 单条失败不影响其余，最后用成功条数说话 */
+      }
+    }
+    toast(done > 0 ? `已一起标记 ${done} 条（仅本机）` : '这几条都被平台状态挡住了，没能标记', 4200);
+    await refresh();
+  } finally {
+    busy(false);
+  }
+}
+
 async function markCompleted(taskId, completed) {
+  // 候选必须在 refresh **之前**算：刷新后这条就从待办里消失了，也就找不到"同组"了
+  const batch = completed ? sameDeadlineSiblings(taskId) : [];
   busy(true);
   try {
     const r = await api('/api/task/complete', {
@@ -2362,6 +2449,10 @@ async function markCompleted(taskId, completed) {
       toast(completed ? '已标记完成（仅本机）' : '已撤销标记');
     }
     await refresh();
+    // 只在真的标上了、且确实有同组兄弟时才追问
+    if (completed && batch.length > 0 && (!r || r.applied !== false)) {
+      await offerBatchComplete(batch);
+    }
   } catch (err) {
     toast(`${completed ? '标记' : '撤销'}失败：${err.message}`, 5000);
   } finally {
