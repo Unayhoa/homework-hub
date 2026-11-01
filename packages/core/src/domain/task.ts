@@ -175,6 +175,8 @@ export interface UnifiedTask {
    * 只有确实在推断的路径才显式标 'inferred'。
    */
   statusSource?: 'platform' | 'inferred';
+  /** 平台原话，只用于展示；不参与任何判定（见 PlatformTask.statusRaw） */
+  statusRaw?: string;
   /** 平台原始数据，排查问题用 */
   raw?: unknown;
 }
@@ -192,6 +194,16 @@ export interface PlatformTask {
    * 只有「平台确实没给状态、我们自己算了一个」的路径才标 'inferred'。
    */
   statusSource?: 'platform' | 'inferred';
+  /**
+   * 平台**原话**（「未开放作答」「进行中」「待批阅」…），只用于界面展示。
+   *
+   * 为什么要它（2026-11-01 用户反馈）：超星把"未开放作答"的作业也报成"未交"，
+   * 我们按语义归到 `pending`，界面于是显示「待完成」—— 用户以为现在就该做，
+   * 实际还没到开放时间。分类没错，缺的是"平台到底怎么说的"这一层。
+   *
+   * 它**不参与任何判定**（状态机只看 `status`），所以没有"两份判据"的风险。
+   */
+  statusRaw?: string;
   /** 任意形态，交给 normalizeDeadline 处理 */
   deadline?: unknown;
   publishedAt?: unknown;

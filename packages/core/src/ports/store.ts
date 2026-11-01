@@ -41,7 +41,18 @@ export interface SyncLogEntry {
   updated: number;
   removed: number;
   fetched: number;
+  /**
+   * 给**弹窗**的一句话：只说用户需要知道的事（哪条失败了、哪类数据没取到）。
+   */
   message?: string;
+  /**
+   * 给**日志**的补充：本轮做了什么取舍/跳过了什么。
+   *
+   * 为什么和 message 分开（2026-11-01 用户反馈）：同步完成时把所有账号的
+   * message 拼进一条弹窗，7 个账号时说「跳过 21 门已全部完成的课程」把
+   * 「哪个平台出问题」挤没了。这些是优化细节，该能查，但不该抢注意力。
+   */
+  detail?: string;
   /** 本轮发出的平台请求数 —— 判断「慢」是请求多还是单请求慢的唯一依据 */
   requests?: number;
   /** 重试次数（429/5xx/网络抖动） */

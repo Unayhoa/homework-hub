@@ -159,6 +159,13 @@ export interface AccountSyncReport {
    * 用户看到的是"同步成功"，而实际什么都没发生，这是最难自查的一种失败。
    */
   selfCheck?: Array<{ code: string; note: string }>;
+  /**
+   * 只进日志、不进弹窗的说明（跳过了多少课、省了多少请求…）。
+   *
+   * 弹窗是"哪个平台出问题了"的地方，不是操作流水账。
+   * 这些细节该能查（日志页），但不该抢占注意力。
+   */
+  detail?: string;
   durationMs: number;
 }
 
@@ -1096,7 +1103,10 @@ export class SyncEngine {
     }
 
     const status: SyncLogEntry['status'] = pageError ? 'partial' : 'ok';
+    /** 进弹窗的话：只放用户需要知道的事实 */
     const notes: string[] = [];
+    /** 只进日志的话：跳过/省请求这类操作细节 */
+    const details: string[] = [];
 
     // ---- L3 自检：同步"成功"不等于"数据对了" ----
     //
@@ -1128,9 +1138,12 @@ export class SyncEngine {
       notes.push('会话曾失效，已自动接回（无需你操作）');
     }
     if (pageError) notes.push(`部分完成：${describe(pageError)}`);
+    // 「跳过 N 门已全部完成的课程」**只进日志，不进弹窗**（2026-11-01 用户反馈）：
+    // 它是省请求的内部优化。真机上 7 个账号一起同步时，这些句子把弹窗撑成三行，
+    // 把「哪个平台出问题了」挤没了。信息不丢，但挪到日志页去。
     if (skippedCourseCount > 0) {
-      notes.push(
-        `跳过 ${skippedCourseCount} 门已全部完成的课程（${opts.completedCourseTtlMs ?? 6 * 60 * 60 * 1000 / 3600000} 小时内不重爬）`,
+      details.push(
+        `跳过 ${skippedCourseCount} 门已全部完成的课程（${(opts.completedCourseTtlMs ?? 6 * 60 * 60 * 1000) / 3_600_000} 小时内不重爬）`,
       );
     }
     if (mergedCount > 0) {
@@ -1165,6 +1178,7 @@ export class SyncEngine {
         reminders,
         events: plan.events,
         ...(selfCheck.length > 0 ? { selfCheck } : {}),
+        ...(details.length > 0 ? { detail: details.join('；') } : {}),
       },
       message,
     );
@@ -1508,6 +1522,7 @@ export class SyncEngine {
       removed: report.removed,
       fetched: report.fetched,
       message: report.message,
+      ...(report.detail ? { detail: report.detail } : {}),
       requests: report.http.requests,
       retries: report.http.retries,
       durationMs: report.durationMs,

@@ -89,6 +89,15 @@ export interface ChaoxingEndpointMap {
   userInfo: string;
 }
 
+/**
+ * 每轮最多为多少场考试去翻详情页拿时间。
+ *
+ * 为什么要有上限：考试列表页不给时间，只能逐场翻详情页。正常情况下一个学期的
+ * 待考考试不超过个位数；一旦某人的课程里堆了几十场历史考试，不设限就会把
+ * 一轮同步变成几十个额外请求（超星风控对请求量敏感）。
+ */
+const EXAM_DETAIL_LIMIT = 8;
+
 export const ChaoxingEndpoints: ChaoxingEndpointMap = {
   login: 'https://passport2.chaoxing.com/fanyalogin',
   courseData: 'https://mooc1-api.chaoxing.com/mycourse/backclazzdata?view=json&rss=1',
@@ -425,6 +434,11 @@ export class ChaoxingAdapter implements PlatformAdapter {
     let examZeroCourses = 0;
     /** 考试失败的首条原因，写进 notes 供用户/我定位 */
     let examFirstError = '';
+    /** 同一任务在页面里出现多次且信息冲突的次数（页面结构问题的信号） */
+    let dupConflicts = 0;
+    /** 为了拿考试时间而跟进的详情页请求数 / 其中成功拿到时间的条数 */
+    let examDetailFetches = 0;
+    let examDetailFilled = 0;
     const now = ctx.clock.now();
     /** 引擎判定为「静默」的课程（全部终态 + 长期无变化）—— 可跳过考试探测 */
     const quietCourseIds = new Set(req.quietCourseIds ?? []);
@@ -450,13 +464,16 @@ export class ChaoxingAdapter implements PlatformAdapter {
       let workItems: PlatformTask[] = [];
       try {
         const html = await this.#fetchTaskListHtml(http, course);
-        workItems = parseTaskListHtml(html, now).map((w) => ({
+        const parsed = dedupeById(parseTaskListHtml(html, now));
+        dupConflicts += parsed.conflicts;
+        workItems = parsed.items.map((w) => ({
           platformTaskId: w.platformTaskId,
           courseId: course.courseId,
           courseName: course.name,
           kind: 'homework' as const,
           title: w.title,
           status: w.status,
+          ...(w.statusText ? { statusRaw: w.statusText } : {}),
           deadline: w.deadline,
           // 精确到这份作业。真实形态来自 2026-10-23 抓包：
           // /mooc-ans/mooc2/work/dowork?courseId=&classId=&cpi=&workId=
@@ -514,18 +531,43 @@ export class ChaoxingAdapter implements PlatformAdapter {
           // 也就是说考试从来没被采到过一条。而失败只 push 进 errors、items 又不为空，
           // 于是既不报错也不提示：用户看到「同步成功」，考试却永远不出现。
           const examHtml = await this.#fetchTaskListHtml(http, course, 'exam');
-          const parsedExams = parseTaskListHtml(examHtml, now, 'exam');
-          const examItems: PlatformTask[] = parsedExams.map((w) => ({
-            platformTaskId: w.platformTaskId,
-            courseId: course.courseId,
-            courseName: course.name,
-            kind: 'exam' as const,
-            title: w.title,
-            status: w.status,
-            deadline: w.deadline,
-            ...(w.sourceUrl ? { sourceUrl: w.sourceUrl } : {}),
-            raw: { source: 'exam-task-list', title: w.title },
-          }));
+          const deduped = dedupeById(parseTaskListHtml(examHtml, now, 'exam'));
+          dupConflicts += deduped.conflicts;
+
+          // 考试列表页**只有「未开始」这样的状态，没有任何时间**（2026-11-01 真机截图）。
+          // 开始/截止时间在详情页里。不跟这一步，考试就永远落在「截止未知」——
+          // 而「截止未知」对考试几乎等于没用：不知道什么时候考，提醒也不会响。
+          //
+          // 请求节制：只跟「还没开始/进行中」且列表里确实没有时间的，
+          // 每轮上限 EXAM_DETAIL_LIMIT 次。已结束的考试不跟（时间窗早已关闭）。
+          const examItems: PlatformTask[] = [];
+          for (const w of deduped.items) {
+            let deadline = w.deadline;
+            if (!deadline && w.status === 'pending' && w.detailUrl && examDetailFetches < EXAM_DETAIL_LIMIT) {
+              examDetailFetches += 1;
+              try {
+                const led = await this.#examDetailDeadline(http, w.detailUrl);
+                if (led) {
+                  deadline = led;
+                  examDetailFilled += 1;
+                }
+              } catch {
+                // 详情页失败**不能**影响这条考试本身：宁可没有时间，
+                // 也不要因为一个附加信息丢掉整场考试。
+              }
+            }
+            examItems.push({
+              platformTaskId: w.platformTaskId,
+              courseId: course.courseId,
+              courseName: course.name,
+              kind: 'exam' as const,
+              title: w.title,
+              status: w.status,
+              ...(w.statusText ? { statusRaw: w.statusText } : {}),
+              ...(deadline ? { deadline } : {}),
+              raw: { source: 'exam-task-list', title: w.title },
+            });
+          }
           items.push(...examItems);
           if (examItems.length > 0) diag.push(`${course.name}/考试: ${examItems.length} 条`);
           else examZeroCourses += 1;
@@ -599,7 +641,19 @@ export class ChaoxingAdapter implements PlatformAdapter {
     // 可以一路静默到用户面前（表现为「同步成功、考试永远没有」）。
     // 上一次 getAllExam 404 就是这样藏了不知多久。
     const notes: string[] = [];
+    // 页面里同一任务出现多次且信息冲突 —— 这是"截止时间/状态来回跳"的根源。
+    // 必须说出来：用户看到的是"我没动过它，它自己一直在变"。
+    if (dupConflicts > 0) {
+      notes.push(
+        `页面上有 ${dupConflicts} 处同一个任务重复出现且信息不一致，已按最保守的一份入库（截止时间取较晚、状态取未完成）`,
+      );
+    }
     const examProbed = courses.length - skippedExamCourses;
+    // 翻了详情页却没拿到时间 —— 说明详情页的结构和我假设的不一样。
+    // 这类"看起来做了但没生效"的事必须能看见，否则考试会一直挂在「截止未知」。
+    if (examDetailFetches > 0 && examDetailFilled === 0) {
+      notes.push(`有 ${examDetailFetches} 场考试翻进了详情页，但没能读出时间（页面结构可能变了）`);
+    }
     if (examFailedCourses > 0) {
       notes.push(
         `考试信息没取到（${examFailedCourses}/${examProbed} 门课请求失败${examFirstError ? `：${examFirstError.slice(0, 60)}` : ''}）。作业不受影响。`,
@@ -649,6 +703,30 @@ export class ChaoxingAdapter implements PlatformAdapter {
       });
     }
     return text;
+  }
+
+  /**
+   * 打开一场考试的详情页，取它的截止时间。
+   *
+   * 为什么必须走这一步：考试列表页只给「未开始」这类状态，**一个时间都没有**
+   * （2026-11-01 真机截图）。而详情页里写着「开始时间 / 截止时间」。
+   * 不跟进去，考试就只能挂在「截止未知」——那对考试几乎等于没用。
+   *
+   * 页面里同时有开始和截止两个时间，取**最晚**的那个就是截止（和作业页同一条规则）。
+   *
+   * 失败一律返回 undefined，**绝不抛错**：时间是附加信息，不该因为拿不到它
+   * 就让整场考试消失（那比没有时间糟得多）。
+   */
+  async #examDetailDeadline(http: SessionHttpClient, detailUrl: string): Promise<string | undefined> {
+    const res = await http.request({
+      url: detailUrl,
+      method: 'GET',
+      headers: { Referer: 'https://mooc1-api.chaoxing.com/' },
+    });
+    const html = await res.text();
+    if (looksLikeAuthWall(html)) return undefined;
+    // 详情页可能很长，但 latestDateIn 只认「完整年月日」，页脚版权年份之类的不会误命中
+    return latestDateIn(html);
   }
 
   async #fetchPerCourse(
@@ -788,6 +866,8 @@ export interface ParsedWorkItem {
   platformTaskId?: string;
   title: string;
   status: TaskStatus;
+  /** 平台原话（命中的状态词），只用于展示 */
+  statusText?: string;
   /** ISO 时间或原始字符串，交给 deadline 归一化处理 */
   deadline?: string;
   /**
@@ -799,6 +879,16 @@ export interface ParsedWorkItem {
    * 之前只抓了 workId 自己拼 URL，所以每条链接都打不开。
    */
   sourceUrl?: string;
+  /**
+   * 列表页里那一条的 href，**只在同步这一轮立即跟随时使用**。
+   *
+   * 为什么不能存下来给用户点：里面的 `enc` 是短命参数（见 chaoxingWorkUrl 上方的结论）。
+   * 但**同步时立即请求**是另一回事 —— 那时 enc 还是新鲜的，所以可以用它去拿详情页里的时间。
+   *
+   * 具体用途：超星的考试列表只显示「未开始」，**没有任何时间**（2026-11-01 真机），
+   * 开始/截止时间只在详情页里。不跟这一步，考试就永远落在「截止未知」。
+   */
+  detailUrl?: string;
 }
 
 /**
@@ -874,18 +964,26 @@ function chaoxingWorkUrl(
  * 完成类词根，先判已交会让没考的试标成考完、直接从待办里消失。
  */
 const STATUS_WORDS: Array<[TaskStatus, string[]]> = [
-  ['pending', ['未开始', '未参加', '未交', '进行中', '待考试', '未完成', '待做']],
+  // 「未开放作答」是超星的说法：作业已布置但还没到能交的时间。
+  // 语义上仍是 pending（将来要做，不能从待办里消失），但界面要显示原话，
+  // 否则用户以为"现在就该做"（2026-11-01 真机反馈）。
+  ['pending', ['未开放', '未开始', '未参加', '未交', '进行中', '待考试', '未完成', '待做']],
   ['submitted', ['已参加', '已交卷', '已交', '已提交', '待批阅', '待批改']],
   ['graded', ['已批阅', '已完成']],
   ['expired', ['已过期', '已结束']],
 ];
 
-/** 从一行 HTML 里判状态：按上面的优先级表，与词的出现位置无关。 */
-function statusOfBlock(block: string): TaskStatus {
+/**
+ * 从一行 HTML 里判状态：按上面的优先级表，与词的出现位置无关。
+ *
+ * 同时把**命中的那个词**返回去 —— 它是平台的原话，界面要用它
+ * （「未开放」不能显示成「待完成」）。
+ */
+function statusOfBlock(block: string): { status: TaskStatus; text?: string } {
   for (const [status, words] of STATUS_WORDS) {
-    for (const w of words) if (block.includes(w)) return status;
+    for (const w of words) if (block.includes(w)) return { status, text: w };
   }
-  return 'unknown';
+  return { status: 'unknown' };
 }
 
 /**
@@ -918,6 +1016,74 @@ function latestDateIn(block: string): string | undefined {
   return best;
 }
 
+/** 同一个 id 出现多次时，按「保守」合并两条。 */
+function mergePreferred(a: ParsedWorkItem, b: ParsedWorkItem): ParsedWorkItem {
+  // 状态：**只要有一条说"还没交"，就按没交算**。
+  // 反过来（取"已交"）的代价是作业从待办里消失，而用户看不到它就没机会去交。
+  // 多留一条最多是烦人，少留一条是真的会漏。
+  const status: TaskStatus =
+    a.status === 'pending' || b.status === 'pending'
+      ? 'pending'
+      : a.status === 'unknown'
+        ? b.status
+        : b.status === 'unknown'
+          ? a.status
+          : a.status;
+
+  // 时间：取**较晚**的那个。取早的会把任务判成逾期（藏进折叠组），
+  // 而逾期组默认折叠 —— 用户看到的是"这条作业没了"。
+  const pickLater = (x?: string, y?: string): string | undefined => {
+    if (!x) return y;
+    if (!y) return x;
+    const tx = new Date(x.replace(' ', 'T')).getTime();
+    const ty = new Date(y.replace(' ', 'T')).getTime();
+    if (!Number.isFinite(tx)) return y;
+    if (!Number.isFinite(ty)) return x;
+    return ty > tx ? y : x;
+  };
+
+  return {
+    platformTaskId: a.platformTaskId ?? b.platformTaskId,
+    // 标题取更长的那个：带「（第3次）」这类后缀的往往才是完整标题
+    title: a.title.length >= b.title.length ? a.title : b.title,
+    status,
+    ...(pickLater(a.deadline, b.deadline) ? { deadline: pickLater(a.deadline, b.deadline)! } : {}),
+    ...(a.sourceUrl ?? b.sourceUrl ? { sourceUrl: a.sourceUrl ?? b.sourceUrl } : {}),
+  };
+}
+
+/**
+ * 同一条任务在页面上出现多次时合并成一条。
+ *
+ * 为什么需要（2026-11-01 真机）：用户看到同一份作业的截止时间和状态在两次同步之间
+ * 来回跳（`10/22 ↔ 11/5`、`已交 ↔ 待完成`），而他什么都没做。
+ * 页面里同一份作业可能被渲染多次（不同分区、异步补渲染的一份），
+ * 两次同步时"哪一份排在后面"不同 → 后写覆盖前写 → 值就抖起来了。
+ *
+ * 合并规则刻意选**保守侧**（见 mergePreferred）：宁可多留一条待办、宁可显示较晚的
+ * 截止时间，也不要让用户漏掉一份作业。`conflicts` 会被上报到同步消息里 ——
+ * 页面结构问题不该只有我猜得到。
+ */
+export function dedupeById(items: ParsedWorkItem[]): { items: ParsedWorkItem[]; conflicts: number } {
+  const byId = new Map<string, ParsedWorkItem>();
+  const noId: ParsedWorkItem[] = [];
+  let conflicts = 0;
+  for (const it of items) {
+    if (!it.platformTaskId) {
+      noId.push(it);
+      continue;
+    }
+    const prev = byId.get(it.platformTaskId);
+    if (!prev) {
+      byId.set(it.platformTaskId, it);
+      continue;
+    }
+    conflicts += 1;
+    byId.set(it.platformTaskId, mergePreferred(prev, it));
+  }
+  return { items: [...byId.values(), ...noId], conflicts };
+}
+
 export function parseTaskListHtml(html: string, now: Date, kind: 'homework' | 'exam' = 'homework'): ParsedWorkItem[] {
   const out: ParsedWorkItem[] = [];
   for (const m of matchAll(html, /<li\b[\s\S]*?<\/li>/gi)) {
@@ -931,7 +1097,7 @@ export function parseTaskListHtml(html: string, now: Date, kind: 'homework' | 'e
     const cleanTitle = stripTags(title).trim();
     if (!cleanTitle) continue;
 
-    const status = statusOfBlock(block);
+    const { status, text: statusText } = statusOfBlock(block);
 
     // 绝对时间优先（已布置截止时间的条目），否则用相对倒计时推算
     let deadline: string | undefined = latestDateIn(block);
@@ -961,12 +1127,25 @@ export function parseTaskListHtml(html: string, now: Date, kind: 'homework' | 'e
     const sourceUrl =
       hrefRaw && /^https?:\/\//i.test(hrefRaw) ? hrefRaw.replace(/&amp;/g, '&') : undefined;
 
+    // 详情页地址：只用于"同步这一轮立即跟随"，不落库（enc 是短命的）。
+    // 相对路径用超星主站补全 —— 考试详情页都在 mooc1.chaoxing.com 下。
+    let detailUrl: string | undefined;
+    if (hrefRaw && !/^\s*(javascript:|#|mailto:)/i.test(hrefRaw)) {
+      try {
+        detailUrl = new URL(hrefRaw.replace(/&amp;/g, '&'), 'https://mooc1.chaoxing.com').toString();
+      } catch {
+        detailUrl = undefined;
+      }
+    }
+
     out.push({
       platformTaskId: id ?? undefined,
       title: cleanTitle,
       status,
+      ...(statusText ? { statusText } : {}),
       deadline,
       ...(sourceUrl ? { sourceUrl } : {}),
+      ...(detailUrl ? { detailUrl } : {}),
     });
   }
   return out;

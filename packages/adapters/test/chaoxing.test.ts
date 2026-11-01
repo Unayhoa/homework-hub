@@ -8,7 +8,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { parseBackclazzData, parseTaskListHtml, ChaoxingAdapter } from '../chaoxing/src/index.ts';
+import { parseBackclazzData, parseTaskListHtml, dedupeById, ChaoxingAdapter } from '../chaoxing/src/index.ts';
 
 describe('chaoxing · parseBackclazzData（课程 JSON）', () => {
   const fixture = JSON.stringify({
@@ -243,5 +243,61 @@ describe('chaoxing · 考试列表（2026-11-01 之前的接口是死路径）',
       now,
     );
     assert.equal(both[0]!.status, 'pending', '有"未交"就是没做完，不能被前面的"已交"带走');
+  });
+});
+
+describe('chaoxing · 同一任务重复出现（假变更的根源）', () => {
+  const now = new Date('2026-11-01T10:30:00+08:00');
+
+  it('同 id 出现两次且信息冲突 → 合并成一条，取保守值', () => {
+    // 真机（2026-11-01）：同一份作业的截止时间在两次同步间来回跳
+    // （10/22 ↔ 11/5）、状态也跳（已交 ↔ 待完成），用户什么都没做。
+    // 原因是页面里同一任务被渲染了多次，后写覆盖前写，谁在后面看渲染顺序。
+    const html = `
+      <ul>
+        <li><div><span>已交</span><p>数据结构上机实验</p></div>
+            <span>2026-10-22 23:50</span>
+            <a href="/work?workId=700001">看</a></li>
+        <li><div><span>未交</span><p>数据结构上机实验</p></div>
+            <span>2026-11-05 15:15</span>
+            <a href="/work?workId=700001">看</a></li>
+      </ul>`;
+    const { items, conflicts } = dedupeById(parseTaskListHtml(html, now));
+    assert.equal(items.length, 1, '同一个 id 只能有一条');
+    assert.equal(conflicts, 1, '冲突次数要能被上报（不然用户只能看到"它自己在变"）');
+    assert.equal(items[0]!.deadline, '2026-11-05 15:15', '截止时间取较晚 —— 取早的会被判逾期藏进折叠组');
+    assert.equal(items[0]!.status, 'pending', '状态取保守（未交）—— 误判成已交会让作业从待办消失');
+  });
+
+  it('同 id 但信息一致 → 不算冲突', () => {
+    const html = `
+      <ul>
+        <li><div><span>未交</span><p>作业</p></div><span>2026-11-05 15:15</span><a href="/w?workId=800001">看</a></li>
+        <li><div><span>未交</span><p>作业</p></div><span>2026-11-05 15:15</span><a href="/w?workId=800001">看</a></li>
+      </ul>`;
+    const { items, conflicts } = dedupeById(parseTaskListHtml(html, now));
+    assert.equal(items.length, 1);
+    assert.equal(conflicts, 1, '重复出现本身就是异常信号（哪怕值一样）');
+  });
+});
+
+describe('chaoxing · 平台原话要保留（「未开放」不是「待完成」）', () => {
+  it('未开放作答 → pending，且原话带出去', () => {
+    // 用户真机反馈：这几份实验在超星上是「未开放作答」，却显示成「待完成」，
+    // 于是以为现在就该做。分类没错（它确实是待办），缺的是"平台怎么说的"。
+    const [item] = parseTaskListHtml(
+      '<ul><li><div><span>未开放作答</span><p>实验09 动态数据组织</p></div><span>2026-11-08 23:59</span></li></ul>',
+      new Date('2026-11-01T10:30:00+08:00'),
+    );
+    assert.equal(item!.status, 'pending', '仍是待办，不能从待办里消失');
+    assert.equal(item!.statusText, '未开放', '原话要带出去给界面显示');
+  });
+
+  it('「未交」这种和默认文案同义的也算命中，但界面不会用它顶替', () => {
+    const [item] = parseTaskListHtml(
+      '<ul><li><div><span>未交</span><p>作业</p></div></li></ul>',
+      new Date('2026-11-01T10:30:00+08:00'),
+    );
+    assert.equal(item!.statusText, '未交');
   });
 });

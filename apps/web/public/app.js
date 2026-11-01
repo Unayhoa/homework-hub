@@ -13,6 +13,22 @@ const STATUS = {
   skipped: '不用交',
   unknown: '',
 };
+/**
+ * 卡片上的状态文案。
+ *
+ * 只有一小类平台原话会**顶替**默认文案：`未开放` / `未开始` / `进行中` / `待考试`。
+ * 它们和「待完成」的差别不在"做没做"，而在**现在能不能做** ——
+ * 超星把还没开放作答的作业也报成「未交」，一律显示"待完成"会让人以为现在就该动手。
+ *
+ * 「未交」「已交」这类跟默认文案同义的，不重复显示原文 —— 否则每张卡的文案
+ * 都会变成平台方言，读起来更累。
+ */
+const STATUS_RAW_DISPLAY = /^(未开放|未开始|进行中|待考试)/;
+function statusLabel(t) {
+  if (t.status === 'pending' && t.statusRaw && STATUS_RAW_DISPLAY.test(t.statusRaw)) return t.statusRaw;
+  return STATUS[t.status] ?? t.status;
+}
+
 const GROUP_TITLE = {
   overdue: '已逾期',
   today: '24 小时内',
@@ -151,8 +167,23 @@ function platformShort(id) {
  *
  * 手动添加的任务，用户自己填了平台名（"雨课堂"、"老师口头布置"…），优先显示它 ——
  * 来源恒为 'manual'，直接显示会变成"手动"，那等于把用户填的信息丢了。
+ *
+ * 「手动 + 某平台」这个组合，是在回答一个别的信息：**这条手动任务是不是被归到了
+ * 某个平台的课程下**（添加时选了"与已有课程统一"）。
+ *
+ * 为什么需要它（2026-11-01 用户反馈）：他把可见课程名和课程 id 分开存，
+ * 统一时把手动任务的 courseId 设成平台课程的 id。设计是对的，但**界面上没有痕迹**，
+ * 于是他自己也无法判断当时到底选没选统一 —— 只能靠"按课程筛选时看不看得见"去猜。
+ *
+ * 判据直接取 courseId 前缀：课程 id 的形状是 `<platformId>:<账号hash>:<课程id>`，
+ * 手动任务若归到平台课程下，前缀就是那个平台。不需要后端再多传一个字段
+ * （多一份派生就多一处会漂移的真源）。
  */
 function taskPlatform(t) {
+  if (t.platformId === 'manual') {
+    const owner = String(t.courseId ?? '').split(':')[0];
+    if (owner && owner !== 'manual') return `手动 · ${platformShort(owner)}`;
+  }
   return t.platformLabel || platformShort(t.platformId);
 }
 
@@ -364,7 +395,8 @@ function renderTodo(state) {
     }
     for (const t of tasks) {
       const cd = fmtCountdown(t);
-      const status = STATUS[t.status] ? ` · ${STATUS[t.status]}` : '';
+      const st = statusLabel(t);
+      const status = STATUS[t.status] ? ` · ${st}` : '';
       // 手动标记被「平台优先」压住时，必须说明白 ——
       // 否则用户会以为自己上次没点成功（点了没反应 = 静默失败）。
       const manualHint = t.manualCompleted
@@ -499,7 +531,7 @@ function renderDone(state) {
   const rows = done
     .map((t) => {
       const due = fmtDueDate(t);
-      const status = STATUS[t.status] ?? t.status;
+      const status = statusLabel(t);
       // 本地标的「已完成」必须标出来 —— 不能让用户以为平台也是这么显示的。
       // 而「不用交」是**另一种东西**：不是我做完了，是这条与我无关 —— 文案绝不混用。
       const origin =
@@ -1959,6 +1991,7 @@ async function renderLog() {
         <div>${escapeHtml(e.platformId)} · 拉取 ${e.fetched} · 新增 ${e.created} · 更新 ${e.updated} · 删除 ${e.removed}</div>
         ${stats ? `<div class="muted">${stats}</div>` : ''}
         ${e.message ? `<div class="muted">${escapeHtml(e.message)}</div>` : ''}
+        ${e.detail ? `<div class="muted" style="opacity:.75">${escapeHtml(e.detail)}</div>` : ''}
         ${
           status === 'failed' && String(e.platformId).startsWith('custom-')
             ? `<button class="mini" data-diagnose="${escapeHtml(e.platformId)}" style="margin-top:6px">让 AI 修配置</button>`

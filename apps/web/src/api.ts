@@ -73,6 +73,8 @@ export interface TaskDto {
    * 界面只认它，避免前端自己再写一遍"平台优先"规则。
    */
   status: string;
+  /** 平台原话，只用于展示（null = 平台没给状态词） */
+  statusRaw: string | null;
   /** 'platform' | 'manual' —— 界面上给手动标记的条目加「手动」标注，别让本地数据伪装成平台数据 */
   completionOrigin: string | null;
   /** 用户是否标记过完成（哪怕此刻被平台优先规则压住） */
@@ -135,6 +137,9 @@ export function taskDto(t: UnifiedTask): TaskDto {
     courseId: t.courseId,
     accountId: t.accountId,
     status: effectiveStatus(t),
+    // 平台原话（「未开放」「未开始」…）。只用于展示：用户需要知道
+    // "平台说还没开放"和"平台说该做了"，这两件事催的紧迫度不一样。
+    statusRaw: t.statusRaw ?? null,
     completionOrigin: completionOrigin(t),
     manualCompleted: Boolean(t.userCompletedAt),
     canManualComplete: canMarkCompleted(t),

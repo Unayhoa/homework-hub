@@ -333,7 +333,10 @@ describe('已完成课程跳过重爬（TTL）', () => {
       const report = await engine.syncAll({});
       assert.equal(report.accounts[0]!.status, 'ok');
       assert.equal(control.fetchCalls, 0, '全部完成且刚爬过，不应再拉任务');
-      assert.match(report.accounts[0]!.message ?? '', /跳过 1 门/);
+      // 「跳过 N 门」只进日志（detail），不进弹窗（message）——
+      // 弹窗要留给"哪个平台出问题了"，不是操作流水账（2026-11-01 用户反馈）。
+      assert.equal(report.accounts[0]!.message ?? '', '', '弹窗不该被优化细节占满');
+      assert.match(report.accounts[0]!.detail ?? '', /跳过 1 门/);
       // 原任务必须原样还在 —— 跳过绝不能演变成误删
       const tasks = await store.listTasks({ accountIds: [account.id] });
       assert.equal(tasks.length, 1);
