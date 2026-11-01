@@ -772,8 +772,15 @@ function renderPlatformOptions() {
   }
   // 平台下拉多一个入口：自定义平台本质是「加一个账号」的一种方式，
   // 所以它应该出现在这一页，而不是设置页。
+  //
+  // **用户版隐藏它**（构建时注入 `window.__HH_USER_BUILD__`）。
+  // 理由：这个功能的成功率取决于「页面结构 + 会话 + 跨域」三件用户无法控制的事，
+  // 现在还不到能对外承诺的程度。给它一个入口，等于承诺"什么平台都能加"，
+  // 而实际失败时用户只会认为应用坏了。
+  // 自用版保留 —— 继续在真机上攒样本，等成功率能说清楚了再对外开。
   $('platformSelect').innerHTML =
-    options + '<option value="__add_custom">＋ 添加自定义平台…</option>';
+    options +
+    (window.__HH_USER_BUILD__ ? '' : '<option value="__add_custom">＋ 添加自定义平台…</option>');
 
   // 手机端没有「CDP 附着」这个概念（依赖本机浏览器调试端口）
   if (IS_ANDROID) {
@@ -1991,7 +1998,11 @@ async function renderLog() {
         <div>${escapeHtml(e.platformId)} · 拉取 ${e.fetched} · 新增 ${e.created} · 更新 ${e.updated} · 删除 ${e.removed}</div>
         ${stats ? `<div class="muted">${stats}</div>` : ''}
         ${e.message ? `<div class="muted">${escapeHtml(e.message)}</div>` : ''}
-        ${e.detail ? `<div class="muted" style="opacity:.75">${escapeHtml(e.detail)}</div>` : ''}
+        ${
+          e.detail
+            ? `<details class="log-detail"><summary>排查信息</summary><div class="muted">${escapeHtml(e.detail)}</div></details>`
+            : ''
+        }
         ${
           status === 'failed' && String(e.platformId).startsWith('custom-')
             ? `<button class="mini" data-diagnose="${escapeHtml(e.platformId)}" style="margin-top:6px">让 AI 修配置</button>`

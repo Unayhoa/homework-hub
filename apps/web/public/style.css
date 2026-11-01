@@ -736,3 +736,26 @@ details summary { cursor: pointer; font-size: 14px; font-weight: 600; }
 }
 .cm-item input { width: auto; margin: 0; flex: none; }
 .cm-plat { font-size: 10.5px; color: var(--text-3); }
+
+/* 同步日志里的「排查信息」：默认收起。
+   内容是结构诊断（<li> 个数、变体名、HTML 骨架），对排查有用、对用户是噪音。
+   用原生 <details> 而不是自定义折叠：零 JS、零状态，点开就能看。 */
+.log-detail {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--text-3);
+}
+.log-detail > summary {
+  cursor: pointer;
+  opacity: .75;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+.log-detail > div {
+  margin-top: 4px;
+  padding: 6px 8px;
+  background: var(--panel-2);
+  border-radius: 6px;
+  word-break: break-all;
+  line-height: 1.5;
+}

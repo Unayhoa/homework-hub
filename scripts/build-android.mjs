@@ -41,6 +41,15 @@ const PUBLIC_DIR = join(ROOT, 'apps/web/public');
  */
 const VERIFY_ONLY = process.argv.includes('--verify-only');
 
+/**
+ * `--user-build`：产出**面向用户**的包。
+ *
+ * 唯一区别是隐藏「＋ 添加自定义平台」入口（见 app.js 里那段注释）。
+ * 一套代码两个包，差异只有这一个开关 —— 而不是分叉出两份 UI：
+ * 分叉之后两边会各自漂移，最后没有一份是可信的（本项目在"两份清单"上栽过多次）。
+ */
+const USER_BUILD = process.argv.includes('--user-build');
+
 /** `#` 前缀说明符 → 输出目录里的真实路径（相对仓库根）。 */
 const SPECIFIER_MAP = {
   '#core': 'packages/core/src/index.browser.js',
@@ -213,10 +222,12 @@ for (const f of sharedFiles) {
 
 // 手机端专用 index.html：与桌面共用同一份 UI，只换引导脚本
 const desktopHtml = await readFile(join(PUBLIC_DIR, 'index.html'), 'utf8');
+const bootFlag = USER_BUILD ? '<script>window.__HH_USER_BUILD__=true;</script>\n' : '';
 const androidHtml = desktopHtml
   .replace(
     /<script src="\/app\.js"><\/script>/,
-    '<!-- 手机端：先加载引擎（含原生 HTTP 桥与 fetch 拦截），再由它引导 app.js -->\n' +
+    bootFlag +
+      '<!-- 手机端：先加载引擎（含原生 HTTP 桥与 fetch 拦截），再由它引导 app.js -->\n' +
       '<script type="module" src="/hh/apps/android/www/main.js"></script>',
   )
   .replace('<title>课业中枢 · HomeworkHub</title>', '<title>课业中枢</title>');
@@ -229,7 +240,7 @@ await writeFile(join(OUT, 'index.html'), androidHtml, 'utf8');
 
 const total = await dirSize(OUT);
 log(`  前端资源：${relative(ROOT, OUT)}（${(total / 1024).toFixed(0)} KB）`);
-log(`  index.html 已指向 /hh/apps/android/www/main.js`);
+log(`  index.html 已指向 /hh/apps/android/www/main.js${USER_BUILD ? '（用户版：已隐藏自定义平台）' : ''}`);
 log('\n完成。接下来在 Android Studio 里打开 android/ 目录，或命令行：');
 log('  cd android && gradle assembleDebug');
 
