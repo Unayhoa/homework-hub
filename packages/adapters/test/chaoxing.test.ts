@@ -14,6 +14,7 @@ import {
   dedupeById,
   tagSkeleton,
   examPageDiagnosis,
+  parseExamListHtml,
   ChaoxingAdapter,
 } from '../chaoxing/src/index.ts';
 
@@ -389,5 +390,71 @@ describe('chaoxing · 考试页诊断（要能在日志里一眼看懂）', () =
     assert.ok(d.includes('带 href 的 0 个'));
     assert.ok(!d.includes('viewport'), '不能再把 head 里的 meta 倒出来 —— 那等于什么都没看到');
     assert.ok(d.includes('期中考试') === false, '文字仍要被替换掉');
+  });
+});
+
+describe('chaoxing · 考试列表（HAR 实证的真实结构）', () => {
+  const now = new Date('2026-11-01T16:00:00+08:00');
+
+  // 这段是从用户提供的 HAR（mooc2-ans.chaoxing.com.har）里原样摘出来的，
+  // 只去掉了内联样式。结构、类名、onclick 参数顺序都是真实的。
+  const REAL = `
+  <ul id="examList">
+    <li>
+      <div style="float: left;" tabindex="0" role="option"
+           onclick="goTest('204587864',11006129,0,'2026-11-02 11:40:00.0',196703545,false,'8cb49e73db04027f6f3b5653680b84a9', '0');">
+        <div class="tag icon-exam icon-exam"></div>
+        <div class="right-content">
+          <p class="overHidden2 fl">期中考试</p>
+          <div class="clear"></div>
+          <p class="status fl">未开始</p>
+        </div>
+      </div>
+      <div class="clear"></div>
+    </li>
+    <li>
+      <div tabindex="0" role="option"
+           onclick="goTest('204587864',11006001,0,'2026-10-20 10:00:00.0',196700001,false,'aaaa','0');">
+        <div class="right-content">
+          <p class="overHidden2 fl">第一次测验</p>
+          <p class="status fl">已参加</p>
+        </div>
+      </div>
+    </li>
+  </ul>`;
+
+  const items = parseExamListHtml(REAL, now);
+
+  it('标题 / examId / 时间 / 状态全都能取到', () => {
+    assert.equal(items.length, 2);
+    assert.equal(items[0]!.title, '期中考试');
+    assert.equal(items[0]!.platformTaskId, '11006129', 'examId 在 goTest 的第二个参数');
+    assert.equal(items[0]!.deadline, '2026-11-02 11:40', '时间在 goTest 的第四个参数');
+    assert.equal(items[0]!.status, 'pending');
+    assert.equal(items[0]!.statusText, '未开始');
+  });
+
+  it('已参加的考试是终态（不该继续挂在待办里催）', () => {
+    assert.equal(items[1]!.status, 'submitted');
+    assert.equal(items[1]!.deadline, '2026-10-20 10:00');
+  });
+
+  it('页面上根本不显示时间 —— 所以按文本找日期永远是空的', () => {
+    // 这是之前一直拿不到时间的真正原因：只有"未开始"，没有"11-02 11:40"这段文字。
+    const visibleText = REAL.replace(/onclick="[^"]*"/g, '');
+    assert.ok(!/(\d{4})-(\d{2})-(\d{2})/.test(visibleText), '去掉 onclick 后页面上没有任何日期');
+    assert.equal(items[0]!.deadline, '2026-11-02 11:40', '但解析器仍然拿到了');
+  });
+
+  it('空壳页面（只有隐藏 input、没有 <li>）必须解析出 0 条', () => {
+    // 上一版就是打到了这种页面：HTTP 200，但 `<li> 0 个`，数据由 JS 再拉。
+    const shell = `<html><body>
+      <input type="hidden" id="courseId" value="215129863"/>
+      <input type="hidden" id="classId" value="155527044"/>
+      <input type="hidden" id="pageNum" value="0"/>
+      <input type="hidden" id="vx" value="0"/>
+    </body></html>`;
+    assert.equal(parseExamListHtml(shell, now).length, 0);
+    assert.ok(examPageDiagnosis(shell).includes('<li> 0 个'));
   });
 });

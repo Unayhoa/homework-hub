@@ -75,29 +75,27 @@ export interface ChaoxingEndpointMap {
   /** 作业列表（旧版 JSON 备用）。部分环境返回 JSON，作为回退尝试。 */
   workList: string;
   /**
-   * 考试列表：和作业**同构的 HTML 页面**（不是 JSON 接口）。
+   * 考试列表页（服务端渲染的 HTML 列表）。
    *
-   * 原来是 `mooc1.chaoxing.com/mooc-ans/exam/test/getAllExam`，注释挂着 TODO(verify)，
-   * 结果 2026-11-01 实测是 **404 死路径** —— 考试从来没被采到过，而且失败被当成
-   * 「单课程错误」吞掉了（见 fetchTasks 里的考试分支）。
+   * 来源是用户提供的 HAR（2026-11-01），不是猜的：
+   * `GET mooc1.chaoxing.com/exam-ans/mooc2/exam/exam-list?courseid=&clazzid=&cpi=&ut=s&t=&stuenc=`
+   * → 200 / text/html / 32KB，里面每条是一个 `<li>`：
+   *   `<p class="overHidden2 fl">期中考试</p>`  ← 标题
+   *   `<p class="status fl">未开始</p>`          ← 状态
+   *   `onclick="goTest('courseId',examId,0,'2026-11-02 11:40:00.0',…)"` ← **时间在这里**
    *
-   * 现在这个地址与 `work/task-list` 完全对称（同一个 host、同样的查询参数、同样返回
-   * `<li>` 列表页），所以可以用**同一个解析器**。实测未登录返回 302 到登录页
-   * （= 路径真实存在），死路径会是 404。
+   * 走过两次弯路，记下来免得再踩：
+   *   1. `mooc-ans/exam/test/getAllExam` —— 404 死路径（继承自早期社区代码，从没验证）
+   *   2. `mooc-ans/exam/phone/task-list` —— 路径存在但返回的是**空壳页面**：
+   *      只有隐藏 input（courseId/classId/cpi/pageNum/vx），列表由 JS 再拉，
+   *      服务端 HTML 里 `<li>` 数为 0。
+   *
+   * 注意参数名是全小写 `courseid`/`clazzid`（作业接口用的是驼峰 `courseId`/`classId`）。
    */
   examTaskList: string;
   /** 会话探测：读取当前登录用户信息，最轻量的接口。 */
   userInfo: string;
 }
-
-/**
- * 每轮最多为多少场考试去翻详情页拿时间。
- *
- * 为什么要有上限：考试列表页不给时间，只能逐场翻详情页。正常情况下一个学期的
- * 待考考试不超过个位数；一旦某人的课程里堆了几十场历史考试，不设限就会把
- * 一轮同步变成几十个额外请求（超星风控对请求量敏感）。
- */
-const EXAM_DETAIL_LIMIT = 8;
 
 export const ChaoxingEndpoints: ChaoxingEndpointMap = {
   login: 'https://passport2.chaoxing.com/fanyalogin',
@@ -105,7 +103,7 @@ export const ChaoxingEndpoints: ChaoxingEndpointMap = {
   courseList: 'https://mooc1-2.chaoxing.com/visit/interaction',
   workTaskList: 'https://mooc1-api.chaoxing.com/work/task-list',
   workList: 'https://mooc1.chaoxing.com/mooc-ans/work/getAllWork',
-  examTaskList: 'https://mooc1-api.chaoxing.com/mooc-ans/exam/phone/task-list',
+  examTaskList: 'https://mooc1.chaoxing.com/exam-ans/mooc2/exam/exam-list',
   userInfo: 'https://passport2.chaoxing.com/api/logged',
 };
 
@@ -119,6 +117,14 @@ interface CourseRef {
   classId: string;
   /** 课程主页参数，作业列表接口（work/task-list）需要它 */
   cpi?: string;
+  /**
+   * 课程页 URL 上的 `enc`。
+   *
+   * 考试列表页（`exam-ans/mooc2/exam/exam-list`）把它当 `stuenc` 传 —— 2026-11-01
+   * 从 HAR 实证：课程页地址里的 `enc=3c5087045e9388…` 与考试列表的 `stuenc` 是同一个值。
+   * 拿不到时退化为不传（见 #fetchExamListHtml 的多变体尝试）。
+   */
+  enc?: string;
   name: string;
   teacher?: string;
 }
@@ -327,7 +333,7 @@ export class ChaoxingAdapter implements PlatformAdapter {
         teacher: r.teacher,
         // classId / cpi 不放进 PlatformCourse（不是课程标识），
         // 但作业接口需要它们 —— 塞进 raw 里随课程一起缓存，避免请求翻倍。
-        raw: { classId: r.classId, cpi: r.cpi },
+        raw: { classId: r.classId, cpi: r.cpi, enc: r.enc },
       })),
       hasMore: false,
       declaredTotal: refs.length,
@@ -407,11 +413,12 @@ export class ChaoxingAdapter implements PlatformAdapter {
     // 课程列表通常已由 engine 缓存并传入，避免重复请求。
     const courses =
       req.courses?.map((c) => {
-        const raw = (c.raw ?? {}) as { classId?: string; cpi?: string };
+        const raw = (c.raw ?? {}) as { classId?: string; cpi?: string; enc?: string };
         return {
           courseId: c.platformCourseId,
           classId: String(raw.classId ?? ''),
           cpi: raw.cpi !== undefined ? String(raw.cpi) : undefined,
+          enc: raw.enc !== undefined ? String(raw.enc) : undefined,
           name: c.name,
         };
       }) ?? [];
@@ -437,11 +444,10 @@ export class ChaoxingAdapter implements PlatformAdapter {
     let examFirstError = '';
     /** 同一任务在页面里出现多次且信息冲突的次数（页面结构问题的信号） */
     let dupConflicts = 0;
-    /** 为了拿考试时间而跟进的详情页请求数 / 其中成功拿到时间的条数 */
-    let examDetailFetches = 0;
-    let examDetailFilled = 0;
-    /** 既没有详情链接、也没有 examId 的考试数 —— 这类注定拿不到时间 */
+    /** 拿不到 examId 的考试条数（定位不到这场考试） */
     let examNoLink = 0;
+    /** 哪个 URL 变体才真正返回了列表（plain / stuenc / empty）—— 写进诊断 */
+    let examVariant = '';
     /** 第一份考试页 HTML，用于在拿不到时间时把"标签骨架"带进日志 */
     let firstExamHtml = '';
     const now = ctx.clock.now();
@@ -530,46 +536,18 @@ export class ChaoxingAdapter implements PlatformAdapter {
       // 注意：作业请求照常发 —— 静默只影响「为发现新内容而做的探测」。
       if (!quietCourseIds.has(course.courseId)) {
         try {
-          // 考试走**和作业同构的 HTML 列表页**（不是 JSON 接口）。
-          //
-          // 原来这里打的是 mooc1/exam/test/getAllExam —— 2026-11-01 实测 404，
-          // 也就是说考试从来没被采到过一条。而失败只 push 进 errors、items 又不为空，
-          // 于是既不报错也不提示：用户看到「同步成功」，考试却永远不出现。
-          const examHtml = await this.#fetchTaskListHtml(http, course, 'exam');
+          // 考试走自己的列表页（`exam-ans/mooc2/exam/exam-list`），
+          // 结构与作业**不**同构：标题/状态在 `<p>` 里，**时间在 onclick 的 goTest(...) 参数里**。
+          // 所以这里用专用解析器，不再复用作业那个。
+          const { html: examHtml, variant } = await this.#fetchExamListHtml(http, course);
           if (!firstExamHtml) firstExamHtml = examHtml;
-          const deduped = dedupeById(parseTaskListHtml(examHtml, now, 'exam'));
+          if (variant !== 'plain') examVariant = variant; // 记下"哪个变体才通"，写进诊断
+          const deduped = dedupeById(parseExamListHtml(examHtml, now));
           dupConflicts += deduped.conflicts;
 
-          // 考试列表页**只有「未开始」这样的状态，没有任何时间**（2026-11-01 真机截图）。
-          // 开始/截止时间在详情页里。不跟这一步，考试就永远落在「截止未知」——
-          // 而「截止未知」对考试几乎等于没用：不知道什么时候考，提醒也不会响。
-          //
-          // 请求节制：只跟「还没开始/进行中」且列表里确实没有时间的，
-          // 每轮上限 EXAM_DETAIL_LIMIT 次。已结束的考试不跟（时间窗早已关闭）。
           const examItems: PlatformTask[] = [];
           for (const w of deduped.items) {
-            let deadline = w.deadline;
-            if (!deadline && w.status === 'pending') {
-              // 优先用列表页里的 href；**没有就用 examId 拼** —— 列表项不一定有 <a>
-              // （真机那次就是没有，于是什么都没发生，用户只看到"依然截止未知"）。
-              const detailUrl =
-                w.detailUrl ?? (w.platformTaskId ? this.#examDetailUrl(course, w.platformTaskId) : undefined);
-              if (!detailUrl) {
-                examNoLink += 1; // 既没链接也没 id —— 这条考试拿不到时间，要能被看见
-              } else if (examDetailFetches < EXAM_DETAIL_LIMIT) {
-                examDetailFetches += 1;
-                try {
-                  const led = await this.#examDetailDeadline(http, detailUrl);
-                  if (led) {
-                    deadline = led;
-                    examDetailFilled += 1;
-                  }
-                } catch {
-                  // 详情页失败**不能**影响这条考试本身：宁可没有时间，
-                  // 也不要因为一个附加信息丢掉整场考试。
-                }
-              }
-            }
+            if (!w.platformTaskId) examNoLink += 1; // 没有 examId → 这条考试再也定位不到
             examItems.push({
               platformTaskId: w.platformTaskId,
               courseId: course.courseId,
@@ -578,8 +556,8 @@ export class ChaoxingAdapter implements PlatformAdapter {
               title: w.title,
               status: w.status,
               ...(w.statusText ? { statusRaw: w.statusText } : {}),
-              ...(deadline ? { deadline } : {}),
-              raw: { source: 'exam-task-list', title: w.title },
+              ...(w.deadline ? { deadline: w.deadline } : {}),
+              raw: { source: 'exam-list', title: w.title },
             });
           }
           items.push(...examItems);
@@ -667,17 +645,18 @@ export class ChaoxingAdapter implements PlatformAdapter {
     const examProbed = courses.length - skippedExamCourses;
     // 翻了详情页却没拿到时间 —— 说明详情页的结构和我假设的不一样。
     // 这类"看起来做了但没生效"的事必须能看见，否则考试会一直挂在「截止未知」。
-    if (examDetailFetches > 0 && examDetailFilled === 0) {
-      notes.push(`有 ${examDetailFetches} 场考试翻进了详情页，但没能读出时间（页面结构可能变了）`);
-    }
     if (examNoLink > 0) {
-      notes.push(`有 ${examNoLink} 场考试在列表里既没有详情链接也没有 examId，拿不到时间`);
+      notes.push(`有 ${examNoLink} 场考试在列表里没有 examId，定位不到（可能是页面改版）`);
     }
     // 拿不到时间时，把考试页的**标签骨架**放进日志（details）：
     // 文字已被替换成 …，能看出 <li> 里有没有 href / examId，又不带出任何内容。
     // 这是"我改了两版都没修对"之后唯一正确的动作 —— 不再猜结构，先要真凭据。
-    if (firstExamHtml && (examNoLink > 0 || (examDetailFetches > 0 && examDetailFilled === 0))) {
-      adapterDetails.push(`考试页诊断：${examPageDiagnosis(firstExamHtml)}`);
+    // 诊断只在"有异常"时写：没 examId、或者第一个变体没拿到列表。
+    // 正常情况下不打扰日志 —— 每轮都塞一段 HTML 统计会把有用信息淹掉。
+    if (firstExamHtml && (examNoLink > 0 || (examVariant && examVariant !== 'plain'))) {
+      adapterDetails.push(
+        `考试页诊断（变体 ${examVariant || 'plain'}）：${examPageDiagnosis(firstExamHtml)}`,
+      );
     }
     if (examFailedCourses > 0) {
       notes.push(
@@ -732,42 +711,58 @@ export class ChaoxingAdapter implements PlatformAdapter {
   }
 
   /**
-   * 用 examId 拼考试详情页地址。
+   * 拉考试列表（`exam-ans/mooc2/exam/exam-list`）。
    *
-   * 为什么可以拼：这条路径经匿名请求验证过是**真实存在**的（302 跳登录页，
-   * 死路径会是 404），和 chaoxingWorkUrl 面对的情况不同 ——
-   * 作业的 enc 由服务端按会话签发，考试详情页只靠 courseId/classId/examId 就能进。
-   * 如果实际还需要额外参数，请求会失败，代价只是"这次没拿到时间"，没有副作用。
+   * 两个变体按顺序试，**取第一个真正返回了 `<li>` 的**：
+   *   1. `plain`  —— 不带 stuenc。超星多数页面接口只靠 cookie 鉴权。
+   *   2. `stuenc` —— 带课程页的 enc（HAR 实证：课程页 `enc=` 与考试列表 `stuenc=` 同值）。
+   *
+   * 为什么要有变体：我拿不到登录态去验"stuenc 到底是不是必需"。
+   * 与其赌一个，不如两个都试、并**把哪个通了的结论写进诊断** ——
+   * 这样一次安装就能定论，不用用户再替我试一版。
+   *
+   * 判定标准是"出现 `<li>`"，不是 HTTP 200：空壳页面会返回 200，
+   * 但里面只有隐藏 input，一个列表项都没有（这正是上一版的失败形态）。
    */
-  #examDetailUrl(course: { courseId: string; classId: string; cpi?: string }, examId: string): string {
-    const p = new URLSearchParams({ courseId: course.courseId, classId: course.classId });
-    if (course.cpi) p.set('cpi', course.cpi);
-    p.set('examId', examId);
-    return `https://mooc1.chaoxing.com/mooc-ans/exam/test/reVersionTestStartNew?${p.toString()}`;
-  }
+  async #fetchExamListHtml(
+    http: SessionHttpClient,
+    course: { courseId: string; classId: string; cpi?: string; enc?: string },
+  ): Promise<{ html: string; variant: 'plain' | 'stuenc' | 'empty' }> {
+    const build = (withEnc: boolean) => {
+      const p = new URLSearchParams({
+        // 注意：考试接口用全小写 courseid/clazzid，作业接口用的是驼峰
+        courseid: course.courseId,
+        clazzid: course.classId,
+        ut: 's',
+        // 防缓存时间戳。页面自己也带，缺了可能拿到过期页面
+        t: String(Date.now()),
+      });
+      if (course.cpi) p.set('cpi', course.cpi);
+      if (withEnc && course.enc) p.set('stuenc', course.enc);
+      return `${this.#ep.examTaskList}?${p.toString()}`;
+    };
 
-  /**
-   * 打开一场考试的详情页，取它的截止时间。
-   *
-   * 为什么必须走这一步：考试列表页只给「未开始」这类状态，**一个时间都没有**
-   * （2026-11-01 真机截图）。而详情页里写着「开始时间 / 截止时间」。
-   * 不跟进去，考试就只能挂在「截止未知」——那对考试几乎等于没用。
-   *
-   * 页面里同时有开始和截止两个时间，取**最晚**的那个就是截止（和作业页同一条规则）。
-   *
-   * 失败一律返回 undefined，**绝不抛错**：时间是附加信息，不该因为拿不到它
-   * 就让整场考试消失（那比没有时间糟得多）。
-   */
-  async #examDetailDeadline(http: SessionHttpClient, detailUrl: string): Promise<string | undefined> {
-    const res = await http.request({
-      url: detailUrl,
-      method: 'GET',
-      headers: { Referer: 'https://mooc1-api.chaoxing.com/' },
-    });
-    const html = await res.text();
-    if (looksLikeAuthWall(html)) return undefined;
-    // 详情页可能很长，但 latestDateIn 只认「完整年月日」，页脚版权年份之类的不会误命中
-    return latestDateIn(html);
+    const order: Array<{ name: 'plain' | 'stuenc'; withEnc: boolean }> = [{ name: 'plain', withEnc: false }];
+    if (course.enc) order.push({ name: 'stuenc', withEnc: true });
+
+    let last = '';
+    for (const v of order) {
+      const res = await http.request({
+        url: build(v.withEnc),
+        method: 'GET',
+        headers: { Referer: 'https://mooc1.chaoxing.com/' },
+      });
+      const text = await res.text();
+      if (looksLikeAuthWall(text)) {
+        throw new HubError('AUTH_REQUIRED', '考试列表返回登录页，会话已失效', {
+          platformId: this.id,
+          requiresUserAction: true,
+        });
+      }
+      last = text;
+      if (/<li\b/i.test(text)) return { html: text, variant: v.name };
+    }
+    return { html: last, variant: 'empty' };
   }
 
   async #fetchPerCourse(
@@ -895,6 +890,10 @@ export function parseBackclazzData(text: string): CourseRef[] {
       platformCourseId: courseId,
       classId: classId ?? '',
       cpi: typeof ch.cpi === 'string' || typeof ch.cpi === 'number' ? String(ch.cpi) : undefined,
+      // 课程卡片链接里带 enc 时顺走 —— 考试列表要它（stuenc）
+      ...(firstGroup(squareUrl, /[?&]enc=([0-9a-zA-Z]+)/i)
+        ? { enc: firstGroup(squareUrl, /[?&]enc=([0-9a-zA-Z]+)/i)! }
+        : {}),
       name,
       teacher: typeof info.teacherName === 'string' ? info.teacherName : undefined,
     });
@@ -920,16 +919,6 @@ export interface ParsedWorkItem {
    * 之前只抓了 workId 自己拼 URL，所以每条链接都打不开。
    */
   sourceUrl?: string;
-  /**
-   * 列表页里那一条的 href，**只在同步这一轮立即跟随时使用**。
-   *
-   * 为什么不能存下来给用户点：里面的 `enc` 是短命参数（见 chaoxingWorkUrl 上方的结论）。
-   * 但**同步时立即请求**是另一回事 —— 那时 enc 还是新鲜的，所以可以用它去拿详情页里的时间。
-   *
-   * 具体用途：超星的考试列表只显示「未开始」，**没有任何时间**（2026-11-01 真机），
-   * 开始/截止时间只在详情页里。不跟这一步，考试就永远落在「截止未知」。
-   */
-  detailUrl?: string;
 }
 
 /**
@@ -1227,17 +1216,6 @@ export function parseTaskListHtml(html: string, now: Date, kind: 'homework' | 'e
     const sourceUrl =
       hrefRaw && /^https?:\/\//i.test(hrefRaw) ? hrefRaw.replace(/&amp;/g, '&') : undefined;
 
-    // 详情页地址：只用于"同步这一轮立即跟随"，不落库（enc 是短命的）。
-    // 相对路径用超星主站补全 —— 考试详情页都在 mooc1.chaoxing.com 下。
-    let detailUrl: string | undefined;
-    if (hrefRaw && !/^\s*(javascript:|#|mailto:)/i.test(hrefRaw)) {
-      try {
-        detailUrl = new URL(hrefRaw.replace(/&amp;/g, '&'), 'https://mooc1.chaoxing.com').toString();
-      } catch {
-        detailUrl = undefined;
-      }
-    }
-
     out.push({
       platformTaskId: id ?? undefined,
       title: cleanTitle,
@@ -1245,7 +1223,66 @@ export function parseTaskListHtml(html: string, now: Date, kind: 'homework' | 'e
       ...(statusText ? { statusText } : {}),
       deadline,
       ...(sourceUrl ? { sourceUrl } : {}),
-      ...(detailUrl ? { detailUrl } : {}),
+    });
+  }
+  return out;
+}
+
+/**
+ * 解析考试列表页（`exam-ans/mooc2/exam/exam-list`）。
+ *
+ * 真实结构（2026-11-01 用户 HAR 实证，不是猜的）：
+ * ```html
+ * <li>
+ *   <div onclick="goTest('204587864',11006129,0,'2026-11-02 11:40:00.0',196703545,false,'8cb49e73…','0');">
+ *     <div class="tag icon-exam icon-exam"></div>
+ *     <div class="right-content">
+ *       <p class="overHidden2 fl">期中考试</p>
+ *       <p class="status fl">未开始</p>
+ *     </div>
+ *   </div>
+ * </li>
+ * ```
+ *
+ * 三个关键点，少一个就会退化成"有标题没时间"：
+ *   1. **时间在 `goTest(...)` 的第四个参数里**（`'2026-11-02 11:40:00.0'`）。
+ *      页面上不显示这个时间（只显示"未开始"），所以按文本找日期永远是空的 ——
+ *      这就是之前一直落在「截止未知」的原因。
+ *   2. examId 在第二个参数。没有它就没有身份，只能靠标题指纹。
+ *   3. 状态要取 `<p class="status">` 那一段，不能用整块扫：
+ *      `icon-exam` 之类的类名里也含有 exam 字样，扫整块容易被它带偏。
+ */
+export function parseExamListHtml(html: string, now: Date): ParsedWorkItem[] {
+  const out: ParsedWorkItem[] = [];
+  for (const m of matchAll(html, /<li\b[\s\S]*?<\/li>/gi)) {
+    const block = m[0];
+
+    const title =
+      firstGroup(block, /<p[^>]*class=["'][^"']*overHidden2[^"']*["'][^>]*>([^<]{1,150})</i) ??
+      firstGroup(block, /<p[^>]*class=["'][^"']*[^"']*["'][^>]*>([^<]{1,150})</i);
+    if (!title) continue;
+    const cleanTitle = stripTags(title).trim();
+    if (!cleanTitle) continue;
+
+    const statusWord = firstGroup(block, /<p[^>]*class=["'][^"']*\bstatus\b[^"']*["'][^>]*>([^<]{1,40})</i);
+    const { status, text: statusText } = statusOfBlock(statusWord ?? block);
+
+    // onclick="goTest('courseId',examId,?, '截止时间', ...)"
+    let examId: string | undefined;
+    let deadline: string | undefined;
+    const call = firstGroup(block, /goTest\(([^)]*)\)/i);
+    if (call) {
+      const args = call.split(',').map((a) => a.trim().replace(/^['"]/, '').replace(/['"]$/, ''));
+      if (/^\d{3,}$/.test(args[1] ?? '')) examId = args[1];
+      if (args[3]) deadline = latestDateIn(args[3]) ?? undefined;
+    }
+
+    out.push({
+      platformTaskId: examId,
+      title: cleanTitle,
+      status,
+      ...(statusText ? { statusText } : {}),
+      ...(deadline ? { deadline } : {}),
     });
   }
   return out;
