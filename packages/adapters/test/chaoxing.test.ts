@@ -138,3 +138,69 @@ describe('chaoxing · 适配器装配', () => {
     );
   });
 });
+
+describe('chaoxing · 考试列表（2026-11-01 之前的接口是死路径）', () => {
+  const now = new Date('2026-11-01T10:00:00+08:00');
+
+  // 超星的考试页和作业页同构（都是 <li> 列表），只是状态词和 id 参数不同。
+  const html = `
+  <div class="exam-wrap">
+    <ul>
+      <li>
+        <div><span>未开始</span><p>期中考试</p></div>
+        <a href="https://mooc1.chaoxing.com/mooc-ans/exam/test/reVersionTestStartNew?courseId=1&amp;classId=2&amp;examId=900001">进入</a>
+        <span class="fr">2026-11-08 14:00</span>
+      </li>
+      <li>
+        <div><span>未参加</span><p>补考（没参加）</p></div>
+        <a href="/mooc-ans/exam/test/reVersionTestStartNew?examId=900002">进入</a>
+      </li>
+      <li>
+        <div><span>已参加</span><p>第一次测验</p></div>
+        <span class="fr">2026-10-20 10:00</span>
+      </li>
+      <li>
+        <div><span>已结束</span><p>上学期的考试</p></div>
+      </li>
+    </ul>
+  </div>`;
+
+  const items = parseTaskListHtml(html, now, 'exam');
+
+  it('能按 examId 认出考试条目（不是 workId）', () => {
+    assert.equal(items.length, 4);
+    assert.equal(items[0]!.platformTaskId, '900001', '考试用的是 examId');
+    assert.equal(items[0]!.title, '期中考试');
+  });
+
+  it('状态词按考试那套映射：未开始 → pending（不能因为认不出就丢掉）', () => {
+    assert.equal(items[0]!.status, 'pending', '未开始必须是待办');
+    assert.equal(items[2]!.status, 'submitted', '已参加 = 已交');
+    assert.equal(items[3]!.status, 'expired', '已结束 = 过期');
+  });
+
+  it('「未参加」绝不能被判成「已参加」', () => {
+    // 两者只差一个字，而判错的后果是：没考的试从待办里消失，用户以为考完了。
+    assert.equal(items[1]!.status, 'pending', '未参加是没考，必须留在待办');
+  });
+
+  it('直达链接原样搬（含 &amp; 解码），相对路径不猜 host', () => {
+    assert.equal(
+      items[0]!.sourceUrl,
+      'https://mooc1.chaoxing.com/mooc-ans/exam/test/reVersionTestStartNew?courseId=1&classId=2&examId=900001',
+      '&amp; 要还原成 &，否则链接带 %26 打不开',
+    );
+    assert.equal(items[1]!.sourceUrl, undefined, '相对路径不猜 host —— 猜错就是一个打不开的页面');
+  });
+
+  it('截止时间从绝对时间取（考试时间窗固定，没有「剩余X小时」）', () => {
+    assert.equal(items[0]!.deadline, '2026-11-08 14:00');
+  });
+
+  it('作业页与考试页共用解析器，但用 kind 切换 id / 状态词规则', () => {
+    // 同一段 HTML 按作业解析：workId 规则不命中 examId，状态词也认不出 → unknown
+    const asWork = parseTaskListHtml(html, now, 'homework');
+    assert.equal(asWork[0]!.platformTaskId, undefined, '作业规则不该从 examId 取值');
+    assert.equal(asWork[0]!.status, 'unknown');
+  });
+});

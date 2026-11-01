@@ -73,8 +73,18 @@ export interface ChaoxingEndpointMap {
   workTaskList: string;
   /** 作业列表（旧版 JSON 备用）。部分环境返回 JSON，作为回退尝试。 */
   workList: string;
-  /** 考试列表。TODO(verify) */
-  examList: string;
+  /**
+   * 考试列表：和作业**同构的 HTML 页面**（不是 JSON 接口）。
+   *
+   * 原来是 `mooc1.chaoxing.com/mooc-ans/exam/test/getAllExam`，注释挂着 TODO(verify)，
+   * 结果 2026-11-01 实测是 **404 死路径** —— 考试从来没被采到过，而且失败被当成
+   * 「单课程错误」吞掉了（见 fetchTasks 里的考试分支）。
+   *
+   * 现在这个地址与 `work/task-list` 完全对称（同一个 host、同样的查询参数、同样返回
+   * `<li>` 列表页），所以可以用**同一个解析器**。实测未登录返回 302 到登录页
+   * （= 路径真实存在），死路径会是 404。
+   */
+  examTaskList: string;
   /** 会话探测：读取当前登录用户信息，最轻量的接口。 */
   userInfo: string;
 }
@@ -85,7 +95,7 @@ export const ChaoxingEndpoints: ChaoxingEndpointMap = {
   courseList: 'https://mooc1-2.chaoxing.com/visit/interaction',
   workTaskList: 'https://mooc1-api.chaoxing.com/work/task-list',
   workList: 'https://mooc1.chaoxing.com/mooc-ans/work/getAllWork',
-  examList: 'https://mooc1.chaoxing.com/mooc-ans/exam/test/getAllExam',
+  examTaskList: 'https://mooc1-api.chaoxing.com/mooc-ans/exam/phone/task-list',
   userInfo: 'https://passport2.chaoxing.com/api/logged',
 };
 
@@ -410,6 +420,11 @@ export class ChaoxingAdapter implements PlatformAdapter {
     let workEmptyCourses = 0;
     /** 因静默而跳过考试探测的课程数（写进诊断，方便核对省了多少请求） */
     let skippedExamCourses = 0;
+    /** 考试页请求失败 / 请求成功但一条都没解析出来的课程数（都要能被看见） */
+    let examFailedCourses = 0;
+    let examZeroCourses = 0;
+    /** 考试失败的首条原因，写进 notes 供用户/我定位 */
+    let examFirstError = '';
     const now = ctx.clock.now();
     /** 引擎判定为「静默」的课程（全部终态 + 长期无变化）—— 可跳过考试探测 */
     const quietCourseIds = new Set(req.quietCourseIds ?? []);
@@ -445,10 +460,9 @@ export class ChaoxingAdapter implements PlatformAdapter {
           deadline: w.deadline,
           // 精确到这份作业。真实形态来自 2026-10-23 抓包：
           // /mooc-ans/mooc2/work/dowork?courseId=&classId=&cpi=&workId=
-          // 以前这里没有 sourceUrl，靠引擎在物化时兜底调 buildTaskUrl ——
-          // 但 buildTaskUrl 拿不到 classId/cpi（它们只在课程对象上），
-          // 所以那条路永远拼不出可用链接。在适配器里做，因为**只有这里拿得到全部参数**。
-          sourceUrl: chaoxingWorkUrl(course, w.platformTaskId),
+          // 但那条路径**每次都可能带一个服务端签发的 enc**，自己拼是打不开的。
+          // 所以优先用列表页里原样给出的 href（w.sourceUrl），拼装只作兜底。
+          ...(w.sourceUrl ? { sourceUrl: w.sourceUrl } : { sourceUrl: chaoxingWorkUrl(course, w.platformTaskId) }),
           raw: { source: 'task-list', title: w.title },
         }));
       } catch (e) {
@@ -491,12 +505,35 @@ export class ChaoxingAdapter implements PlatformAdapter {
       // 注意：作业请求照常发 —— 静默只影响「为发现新内容而做的探测」。
       if (!quietCourseIds.has(course.courseId)) {
         try {
-          const examItems = await this.#fetchPerCourse(http, this.#ep.examList, course, 'exam');
+          // 考试走**和作业同构的 HTML 列表页**（不是 JSON 接口）。
+          //
+          // 原来这里打的是 mooc1/exam/test/getAllExam —— 2026-11-01 实测 404，
+          // 也就是说考试从来没被采到过一条。而失败只 push 进 errors、items 又不为空，
+          // 于是既不报错也不提示：用户看到「同步成功」，考试却永远不出现。
+          const examHtml = await this.#fetchTaskListHtml(http, course, 'exam');
+          const parsedExams = parseTaskListHtml(examHtml, now, 'exam');
+          const examItems: PlatformTask[] = parsedExams.map((w) => ({
+            platformTaskId: w.platformTaskId,
+            courseId: course.courseId,
+            courseName: course.name,
+            kind: 'exam' as const,
+            title: w.title,
+            status: w.status,
+            deadline: w.deadline,
+            ...(w.sourceUrl ? { sourceUrl: w.sourceUrl } : {}),
+            raw: { source: 'exam-task-list', title: w.title },
+          }));
           items.push(...examItems);
           if (examItems.length > 0) diag.push(`${course.name}/考试: ${examItems.length} 条`);
+          else examZeroCourses += 1;
         } catch (e) {
           const msg = `${course.name}/考试: ${(e as Error).message}`;
           errors.push(msg);
+          // 也要进 diag：这一条以前只进 errors，而 errors 只有在「全部课程都为空」时
+          // 才会被报出来 —— 于是真实的接口问题（比如上一次的 404）全程静默。
+          diag.push(msg);
+          examFailedCourses += 1;
+          if (!examFirstError) examFirstError = (e as Error).message ?? String(e);
         }
       } else {
         skippedExamCourses += 1;
@@ -553,9 +590,27 @@ export class ChaoxingAdapter implements PlatformAdapter {
       });
     }
 
+    // ---- 把「少采了一类数据」说出来 ----
+    //
+    // 这是本文件最容易出问题的地方：作业采到了，items 就非空，于是考试整类失败
+    // 可以一路静默到用户面前（表现为「同步成功、考试永远没有」）。
+    // 上一次 getAllExam 404 就是这样藏了不知多久。
+    const notes: string[] = [];
+    const examProbed = courses.length - skippedExamCourses;
+    if (examFailedCourses > 0) {
+      notes.push(
+        `考试信息没取到（${examFailedCourses}/${examProbed} 门课请求失败${examFirstError ? `：${examFirstError.slice(0, 60)}` : ''}）。作业不受影响。`,
+      );
+    } else if (examProbed > 0 && examZeroCourses === examProbed) {
+      // 页面打得开、但一条 `<li>` 都没解析出来 —— 很可能是页面结构变了。
+      // 只在**所有**探测过的课程都为空时说：一部分课没考试是正常事。
+      notes.push('考试列表页能打开，但一条都没解析出来（可能是页面结构变了）。作业不受影响。');
+    }
+
     return {
       items,
       hasMore: false,
+      ...(notes.length > 0 ? { notes } : {}),
       // 不给 declaredTotal：超星不返回总数。
       // 留空则 engine 不会误判 schema drift（我们已经在自己这层校验过了）。
     };
@@ -569,20 +624,23 @@ export class ChaoxingAdapter implements PlatformAdapter {
   async #fetchTaskListHtml(
     http: SessionHttpClient,
     course: { courseId: string; classId: string; cpi?: string; name: string },
+    /** 作业与考试是**同构的两个页面**，只有地址不同 —— 解析器可以共用 */
+    kind: 'homework' | 'exam' = 'homework',
   ): Promise<string> {
     const params = new URLSearchParams({
       courseId: course.courseId,
       classId: course.classId,
     });
     if (course.cpi) params.set('cpi', course.cpi);
+    const base = kind === 'exam' ? this.#ep.examTaskList : this.#ep.workTaskList;
     const res = await http.request({
-      url: `${this.#ep.workTaskList}?${params.toString()}`,
+      url: `${base}?${params.toString()}`,
       method: 'GET',
-      headers: { Referer: 'https://mooc1-api.chaoxing.com/' },
+      headers: { Referer: kind === 'exam' ? 'https://mooc1-api.chaoxing.com/' : 'https://mooc1-api.chaoxing.com/' },
     });
     const text = await res.text();
     if (looksLikeAuthWall(text)) {
-      throw new HubError('AUTH_REQUIRED', '作业列表返回登录页，会话已失效', {
+      throw new HubError('AUTH_REQUIRED', `${kind === 'exam' ? '考试' : '作业'}列表返回登录页，会话已失效`, {
         platformId: this.id,
         requiresUserAction: true,
       });
@@ -801,7 +859,7 @@ function chaoxingWorkUrl(
   return 'https://i.chaoxing.com';
 }
 
-export function parseTaskListHtml(html: string, now: Date): ParsedWorkItem[] {
+export function parseTaskListHtml(html: string, now: Date, kind: 'homework' | 'exam' = 'homework'): ParsedWorkItem[] {
   const out: ParsedWorkItem[] = [];
   for (const m of matchAll(html, /<li\b[\s\S]*?<\/li>/gi)) {
     const block = m[0];
@@ -815,7 +873,9 @@ export function parseTaskListHtml(html: string, now: Date): ParsedWorkItem[] {
     if (!cleanTitle) continue;
 
     const status = mapChaoxingStatus(
-      firstGroup(block, /(未交|已交|待批阅|待批改|已批阅|已完成|已过期)/),
+      firstGroup(block, kind === 'exam'
+        ? /(未开始|进行中|待考试|未参加|已参加|已交卷|未交卷|待批阅|已批阅|已完成|已结束)/
+        : /(未交|已交|待批阅|待批改|已批阅|已完成|已过期)/),
     );
 
     // 绝对时间优先（已布置截止时间的条目），否则用相对倒计时推算
@@ -834,15 +894,29 @@ export function parseTaskListHtml(html: string, now: Date): ParsedWorkItem[] {
       }
     }
 
+    // 考试用 examId，作业用 workId；两者也都可能藏在 data-id 里。
+    //
+    // **不跨类型兜底**（作业不认 examId、考试不认 workId）：两类 id 混用会让
+    // 作业和考试在同一个 id 空间里撞车 —— 一旦数值相同就被合并成一条，
+    // 而那种错误在界面上看不出来。id 缺失的代价只是退回 fingerprint（仍然稳定）。
     const id =
-      firstGroup(block, /(?:workId|workid|jobid)=(\d{3,})/i) ??
+      firstGroup(block, kind === 'exam'
+        ? /(?:examId|examid)=(\d{3,})/i
+        : /(?:workId|workid|jobid)=(\d{3,})/i) ??
       firstGroup(block, /data-id=["'](\d{3,})["']/);
+
+    // 直达链接：**只接受绝对地址**，原样搬过来。
+    // 相对路径不猜 host —— 猜错会得到一个打不开的页面，比退回首页更糟。
+    const hrefRaw = firstGroup(block, /href=["']([^"']+)["']/i);
+    const sourceUrl =
+      hrefRaw && /^https?:\/\//i.test(hrefRaw) ? hrefRaw.replace(/&amp;/g, '&') : undefined;
 
     out.push({
       platformTaskId: id ?? undefined,
       title: cleanTitle,
       status,
       deadline,
+      ...(sourceUrl ? { sourceUrl } : {}),
     });
   }
   return out;
@@ -853,13 +927,34 @@ function numeric(v: unknown): number | undefined {  if (v === undefined || v ===
   return Number.isFinite(n) ? n : undefined;
 }
 
-/** 超星的状态字段在不同接口里是数字或字符串，这里做兼容映射。 */
+/**
+ * 超星的状态字段在不同接口里是数字或字符串，这里做兼容映射。
+ *
+ * 考试的状态词和作业**不是一套**：作业说「未交/已交」，考试说「未开始/进行中/已参加」。
+ * 只认作业那套时，考试条目一律落到 unknown —— 不是终态，所以仍会显示，
+ * 但「已参加」的考试会一直挂在待办里提醒你去考。这是 2026-11-01 补的。
+ */
 function mapChaoxingStatus(raw: unknown): TaskStatus {
-  const s = String(raw ?? '').toLowerCase();
-  if (['0', 'todo', '未交', '待做', 'pending'].includes(s)) return 'pending';
-  if (['1', 'submitted', '已交', '已提交', '待批阅'].includes(s)) return 'submitted';
-  if (['2', 'graded', '已批阅', '已完成'].includes(s)) return 'graded';
-  if (['3', 'expired', '已过期', '已结束'].includes(s)) return 'expired';
+  const s = String(raw ?? '').trim();
+  const lower = s.toLowerCase();
+
+  // 纯数字走精确匹配：用 includes 的话 "2024" 会命中 '0'
+  if (/^\d+$/.test(s)) {
+    if (s === '0') return 'pending';
+    if (s === '1') return 'submitted';
+    if (s === '2') return 'graded';
+    if (s === '3') return 'expired';
+    return 'unknown';
+  }
+
+  // **先判「还没交」再判「交了」**，顺序不能反：「未参加」「未开始」含有完成类词根，
+  // 先判已交会把没考的试标成考完，直接从待办里消失。
+  if (/(未交|未开始|未参加|进行中|待考试|待做|todo|pending)/i.test(lower) || s === '未交') {
+    return 'pending';
+  }
+  if (/(已交卷|已参加|已交|待批阅|待批改|submitted)/i.test(lower)) return 'submitted';
+  if (/(已批阅|已完成|graded)/i.test(lower)) return 'graded';
+  if (/(已过期|已结束|expired)/i.test(lower)) return 'expired';
   return 'unknown';
 }
 
