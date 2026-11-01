@@ -461,8 +461,11 @@ export class ChaoxingAdapter implements PlatformAdapter {
           // 精确到这份作业。真实形态来自 2026-10-23 抓包：
           // /mooc-ans/mooc2/work/dowork?courseId=&classId=&cpi=&workId=
           // 但那条路径**每次都可能带一个服务端签发的 enc**，自己拼是打不开的。
-          // 所以优先用列表页里原样给出的 href（w.sourceUrl），拼装只作兜底。
-          ...(w.sourceUrl ? { sourceUrl: w.sourceUrl } : { sourceUrl: chaoxingWorkUrl(course, w.platformTaskId) }),
+          //
+          // 2026-11-01：我一时想改成"从列表页 href 原样搬"，那是**已经被否掉的方案** ——
+          // 更晚的结论写在 chaoxingWorkUrl 上方：href 里的 enc 是短命参数，
+          // 同步时抓到、过一会儿再点就回「信息提示 · 无权限」。所以这里不能用 w.sourceUrl。
+          sourceUrl: chaoxingWorkUrl(course, w.platformTaskId),
           raw: { source: 'task-list', title: w.title },
         }));
       } catch (e) {
@@ -859,6 +862,62 @@ function chaoxingWorkUrl(
   return 'https://i.chaoxing.com';
 }
 
+/**
+ * 状态词的判定优先级。
+ *
+ * **不按文本出现顺序取第一个**（2026-11-01 真机）：同一行里可能同时出现
+ * 「已交」「未交」（例如「已交 1 份，未交 2 份」），或者「已参加」「未参加」，
+ * 取"文本中最先出现的那个"会随页面渲染顺序抖动 —— 表现就是变更历史里
+ * 「已提交 ↔ 待完成」来回跳，而用户什么都没做。
+ *
+ * 顺序也不能反：**先判「还没交」再判「交了」**。「未参加」「未完成」都含有
+ * 完成类词根，先判已交会让没考的试标成考完、直接从待办里消失。
+ */
+const STATUS_WORDS: Array<[TaskStatus, string[]]> = [
+  ['pending', ['未开始', '未参加', '未交', '进行中', '待考试', '未完成', '待做']],
+  ['submitted', ['已参加', '已交卷', '已交', '已提交', '待批阅', '待批改']],
+  ['graded', ['已批阅', '已完成']],
+  ['expired', ['已过期', '已结束']],
+];
+
+/** 从一行 HTML 里判状态：按上面的优先级表，与词的出现位置无关。 */
+function statusOfBlock(block: string): TaskStatus {
+  for (const [status, words] of STATUS_WORDS) {
+    for (const w of words) if (block.includes(w)) return status;
+  }
+  return 'unknown';
+}
+
+/**
+ * 行内所有绝对日期，取**最晚**的一个。
+ *
+ * 为什么不是第一个（2026-11-01 真机）：一行里常有多个日期 —— 发布时间、开始时间、
+ * 截止时间、补交截止。取第一个会拿到"发布/开始"，于是：
+ *   · 截止时间落到过去 → 任务被判逾期（藏在折叠组里）；
+ *   · 或者页面条件渲染时有时有、有时没有 → 截止时间在两次同步间来回跳，
+ *     变更历史被刷成「10/22 → 11/5 → 10/22」。
+ * 截止/结束语义在行内一定是最晚的那个，所以取最晚既稳定又正确。
+ *
+ * 格式要放宽：超星的考试页用 `2026.11.08`、`2026年11月8日` 都很常见，
+ * 只认 `-` 和 `/` 会让考试全部落进「截止未知」。
+ */
+function latestDateIn(block: string): string | undefined {
+  const re = /(\d{4})\s*[-/.年]\s*(\d{1,2})\s*[-/.月]\s*(\d{1,2})\s*日?(?:[ T]*(\d{1,2}):(\d{2}))?/g;
+  let best: string | undefined;
+  let bestMs = Number.NEGATIVE_INFINITY;
+  for (const m of block.matchAll(re)) {
+    const [, y, mo, d, hh, mm] = m;
+    const date = `${y}-${(mo ?? '1').padStart(2, '0')}-${(d ?? '1').padStart(2, '0')}`;
+    const time = hh ? `${hh.padStart(2, '0')}:${mm ?? '00'}` : '';
+    const ms = new Date(`${date}T${time || '00:00'}:00`).getTime();
+    if (Number.isFinite(ms) && ms >= bestMs) {
+      bestMs = ms;
+      best = time ? `${date} ${time}` : date;
+    }
+  }
+  return best;
+}
+
 export function parseTaskListHtml(html: string, now: Date, kind: 'homework' | 'exam' = 'homework'): ParsedWorkItem[] {
   const out: ParsedWorkItem[] = [];
   for (const m of matchAll(html, /<li\b[\s\S]*?<\/li>/gi)) {
@@ -872,20 +931,11 @@ export function parseTaskListHtml(html: string, now: Date, kind: 'homework' | 'e
     const cleanTitle = stripTags(title).trim();
     if (!cleanTitle) continue;
 
-    const status = mapChaoxingStatus(
-      firstGroup(block, kind === 'exam'
-        ? /(未开始|进行中|待考试|未参加|已参加|已交卷|未交卷|待批阅|已批阅|已完成|已结束)/
-        : /(未交|已交|待批阅|待批改|已批阅|已完成|已过期)/),
-    );
+    const status = statusOfBlock(block);
 
     // 绝对时间优先（已布置截止时间的条目），否则用相对倒计时推算
-    let deadline: string | undefined;
-    const absMatch = /(\d{4}[-/]\d{1,2}[-/]\d{1,2})(?:[ T](\d{1,2}:\d{2}))?/.exec(block);
-    if (absMatch) {
-      deadline = absMatch[2]
-        ? `${absMatch[1]!.replace(/\//g, '-')} ${absMatch[2]}`
-        : absMatch[1]!.replace(/\//g, '-');
-    } else {
+    let deadline: string | undefined = latestDateIn(block);
+    if (!deadline) {
       const rest = /剩余\s*(?:(\d+)\s*天)?\s*(?:(\d+)\s*小时)?\s*(?:(\d+)\s*分钟)?/.exec(block);
       if (rest && (rest[1] || rest[2] || rest[3])) {
         const ms =

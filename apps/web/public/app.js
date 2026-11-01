@@ -2098,10 +2098,22 @@ async function doSync() {
       const names = bad.map((b) => b.label).join('、');
       showSyncBar(`同步 ${all} 个账号：${okN} 成功 · ${bad.length} 失败（${names}）—— 详情见日志`, 'error', 9000);
     } else {
+      // 成功时也要把「本轮说的话」带出来。
+      //
+      // notes 里装的是适配器/自检的结论（「考试信息没取到」「这些作业都没有截止时间」），
+      // 它们未必够得上失败，但正是用户最需要知道的那类事实。
+      // 只报数字的话，这条状态条 3 秒后消失，用户就再也找不到它了 ——
+      // 真机反馈（2026-11-01）：「同步日志里只报了 ok」，说的就是这种丢失。
+      const said = (r.accounts ?? [])
+        .filter((a) => a.message)
+        .map((a) => `${a.label}：${a.message}`)
+        .join('；');
       showSyncBar(
-        `同步完成 · ${all} 个账号 · 新增 ${r.totals.created} · 更新 ${r.totals.updated}`,
+        said
+          ? `同步完成 · 新增 ${r.totals.created} · 更新 ${r.totals.updated} —— ${said.slice(0, 220)}`
+          : `同步完成 · ${all} 个账号 · 新增 ${r.totals.created} · 更新 ${r.totals.updated}`,
         'done',
-        3500,
+        said ? 12000 : 3500,
       );
     }
     // 变更比「同步成功」重要得多：同步成功了但漏看一次改期，照样会错过作业。

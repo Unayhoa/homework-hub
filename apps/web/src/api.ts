@@ -943,6 +943,18 @@ export function createApiHandler(deps: ApiDeps): ApiHandler {
         const raw = Number(search.get('days') ?? 7);
         const days = Number.isFinite(raw) ? Math.min(Math.max(Math.round(raw), 1), 365) : 7;
         const changes = await deps.engine.recentChanges(new Date(Date.now() - days * 86_400_000));
+
+        // 课程名要用**用户改过的名字**（和待办页一致）。
+        //
+        // 只查一次、只放改过名的（映射通常是空对象）：变更历史一屏几十条，
+        // 每条都去查课程表会把这一页拖成秒级。
+        const titleMap: Record<string, string> = {};
+        for (const a of await deps.engine.listAccounts()) {
+          for (const c of await deps.engine.listCoursesWithState(a.id)) {
+            if (c.displayName) titleMap[c.id] = c.displayName;
+          }
+        }
+
         return {
           status: 200,
           body: {
@@ -950,7 +962,8 @@ export function createApiHandler(deps: ApiDeps): ApiHandler {
             changes: changes.map(({ task, changes: list }) => ({
               taskId: task.id,
               title: task.title,
-              courseName: task.courseName,
+              // 改过名就用新名字 —— 用户认的是自己起的那个，原名只会让他对不上号
+              courseName: titleMap[task.courseId] ?? task.courseName,
               revision: task.revision,
               // 任务可能已被软删除 / 被用户删除：记录照留，但必须标出来 ——
               // 否则用户在记录里找一条待办里根本不存在的作业，会以为看错了。

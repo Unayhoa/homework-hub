@@ -197,10 +197,51 @@ describe('chaoxing · 考试列表（2026-11-01 之前的接口是死路径）',
     assert.equal(items[0]!.deadline, '2026-11-08 14:00');
   });
 
-  it('作业页与考试页共用解析器，但用 kind 切换 id / 状态词规则', () => {
-    // 同一段 HTML 按作业解析：workId 规则不命中 examId，状态词也认不出 → unknown
+  it('作业页与考试页共用解析器，但 id 规则按 kind 切换（不跨类型兜底）', () => {
+    // 状态词表是**共用**的：作业页里出现「未完成」「已结束」也很正常，
+    // 按类型分两套词表反而会让某些表述落在 unknown 里。
+    // 但 id 必须按类型分开 —— 两类 id 混用会在同一空间撞车。
     const asWork = parseTaskListHtml(html, now, 'homework');
     assert.equal(asWork[0]!.platformTaskId, undefined, '作业规则不该从 examId 取值');
-    assert.equal(asWork[0]!.status, 'unknown');
+    assert.equal(asWork[0]!.status, 'pending', '状态词共用，所以照样认得出「未开始」');
+  });
+
+  it('多日期时取最晚的（截止语义），不取第一个', () => {
+    // 真机：截止时间在两次同步间来回跳（10/22 ↔ 11/5），因为行里同时有
+    // 发布/开始时间与截止时间，而原来取的是"文本中第一个"。
+    const twoDates = `
+      <ul><li>
+        <div><span>未交</span><p>数据结构上机实验</p></div>
+        <span>发布于 2026-10-22 23:50</span>
+        <span class="fr">截止 2026-11-05 15:15</span>
+      </li></ul>`;
+    const [item] = parseTaskListHtml(twoDates, now);
+    assert.equal(item!.deadline, '2026-11-05 15:15', '取最晚，才不会被判成逾期，也不会来回跳');
+  });
+
+  it('日期格式要放宽：2026.11.08 / 2026年11月8日 都要认（考试页常见）', () => {
+    const dot = parseTaskListHtml(
+      '<ul><li><div><span>未开始</span><p>期末</p></div><span>2026.11.08 14:00</span></li></ul>',
+      now,
+      'exam',
+    );
+    assert.equal(dot[0]!.deadline, '2026-11-08 14:00');
+
+    const cn = parseTaskListHtml(
+      '<ul><li><div><span>未开始</span><p>期末</p></div><span>2026年11月8日 14:00</span></li></ul>',
+      now,
+      'exam',
+    );
+    assert.equal(cn[0]!.deadline, '2026-11-08 14:00', '中文年月日以前完全解析不出来 → 落进「截止未知」');
+  });
+
+  it('状态按优先级判定，与词的出现位置无关', () => {
+    // 行里同时出现两个词时，取"文本中最先出现的"会随渲染顺序抖动，
+    // 表现就是变更历史里「已提交 ↔ 待完成」来回跳。
+    const both = parseTaskListHtml(
+      '<ul><li><div><span>已交</span><p>作业</p></div><span>未交 2 项</span></li></ul>',
+      now,
+    );
+    assert.equal(both[0]!.status, 'pending', '有"未交"就是没做完，不能被前面的"已交"带走');
   });
 });
