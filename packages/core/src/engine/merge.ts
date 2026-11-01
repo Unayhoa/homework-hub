@@ -29,6 +29,20 @@ import type { Deadline, DeadlineUnit } from '../domain/deadline.ts';
 /** 时间比较精度：1 分钟。低于这个粒度的差异视为噪音。 */
 const TIME_GRAIN_MS = 60_000;
 
+/**
+ * 「反复变动」的判据：同一字段在 24 小时内变了 3 次以上。
+ *
+ * 真机（2026-11-01）：用户连续同步三次，三次都提示「有作业信息更新」，
+ * 而每次指的还是不同的作业，他什么都没做。根源是页面渲染不稳定 ——
+ * 某轮给了 10/22、某轮给了 11/5，两个都是"有效值"，任何"缺失不覆盖"的规则都拦不住。
+ *
+ * 真实场景里老师不会一天内改三次截止时间。所以超过这个频率就不是"平台说变了"，
+ * 而是"我们每次看到的不一样"。此时**不再写变更历史**（值仍然照实更新）：
+ * 噪音的代价是真改期被淹没 —— 那才是这个页面唯一的价值。
+ */
+const FLAP_WINDOW_MS = 24 * 60 * 60 * 1000;
+const FLAP_LIMIT = 3;
+
 function grainIso(iso: string): string {
   const t = new Date(iso).getTime();
   if (!Number.isFinite(t)) return iso;
@@ -253,6 +267,17 @@ export function diffTask(prev: UnifiedTask, next: UnifiedTask): TaskChange[] {
   const nowIso = next.lastSeenAt;
 
   for (const field of fields) {
+    // 这个字段最近是不是已经在抖了？抖动的定义见 FLAP_WINDOW_MS。
+    // 放在最前面：抖动期间任何值差异都不写历史（但 mergeTasks 仍会用新值落库）。
+    const nowMs = new Date(nowIso).getTime();
+    const recentSameField = (prev.history ?? []).filter(
+      (h) =>
+        h.field === field &&
+        Number.isFinite(new Date(h.at).getTime()) &&
+        nowMs - new Date(h.at).getTime() < FLAP_WINDOW_MS,
+    ).length;
+    if (recentSameField >= FLAP_LIMIT) continue;
+
     const a = field === 'course' ? { id: prev.courseId, name: prev.courseName } : (prev as never)[field];
     const b = field === 'course' ? { id: next.courseId, name: next.courseName } : (next as never)[field];
     if (field === 'course') {

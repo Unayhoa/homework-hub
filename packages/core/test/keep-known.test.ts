@@ -15,7 +15,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { keepKnownFields } from '../src/engine/merge.ts';
+import { diffTask, keepKnownFields } from '../src/engine/merge.ts';
 import { materializeTask } from '../src/index.ts';
 import type { PlatformTask } from '../src/domain/task.ts';
 
@@ -77,5 +77,39 @@ describe('keepKnownFields：这轮没解析到 ≠ 平台改了', () => {
     const prev = { ...make({}), deadline: { kind: 'open' as const } };
     const next = make({ deadline: undefined });
     assert.equal(keepKnownFields(prev, next).deadline.kind, 'open');
+  });
+});
+
+describe('抖动期间不再写变更历史', () => {
+  it('同一字段 24 小时内变 3 次后，第 4 次不再记（值仍然更新）', () => {
+    // 真机：连续同步三次，三次都提示"有作业信息更新"，每次还是不同的作业。
+    // 两个都是"有效值"（10/22 和 11/5），所以"缺失不覆盖"那条规则拦不住。
+    const mkChange = (h: number) => ({
+      field: 'deadline' as const,
+      from: '2026-10-22 23:50',
+      to: '2026-11-05 15:15',
+      at: new Date(Date.now() - h * 3_600_000).toISOString(),
+    });
+    const prev = { ...make({}), history: [mkChange(1), mkChange(2), mkChange(3)] };
+    const next = make({ deadline: '2026-12-01 23:59' });
+
+    const changes = diffTask(prev, next);
+    assert.equal(
+      changes.some((c) => c.field === 'deadline'),
+      false,
+      '已经在抖了，不该再刷一条历史 —— 噪音会淹没真改期',
+    );
+  });
+
+  it('但只变过 1 次时，第二次照常记 —— 别把真改期当抖动吞掉', () => {
+    const prev = {
+      ...make({}),
+      history: [
+        { field: 'deadline' as const, from: '2026-10-22 23:50', to: '2026-11-05 15:15', at: new Date(Date.now() - 3_600_000).toISOString() },
+      ],
+    };
+    const next = make({ deadline: '2026-12-01 23:59' });
+    const changes = diffTask(prev, next);
+    assert.ok(changes.some((c) => c.field === 'deadline'));
   });
 });

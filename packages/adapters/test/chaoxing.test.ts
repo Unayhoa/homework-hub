@@ -8,7 +8,14 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { parseBackclazzData, parseTaskListHtml, dedupeById, tagSkeleton, ChaoxingAdapter } from '../chaoxing/src/index.ts';
+import {
+  parseBackclazzData,
+  parseTaskListHtml,
+  dedupeById,
+  tagSkeleton,
+  examPageDiagnosis,
+  ChaoxingAdapter,
+} from '../chaoxing/src/index.ts';
 
 describe('chaoxing · parseBackclazzData（课程 JSON）', () => {
   const fixture = JSON.stringify({
@@ -339,5 +346,48 @@ describe('chaoxing · 结构骨架（拿不到数据时唯一的取证手段）'
     const s = tagSkeleton('<li><script>var a=1</script><span>x</span><style>.a{color:red}</style></li>');
     assert.ok(!s.includes('var a=1'));
     assert.ok(!s.includes('color:red'));
+  });
+});
+
+describe('chaoxing · 没有 id 的同名任务也必须合并', () => {
+  const now = new Date('2026-11-01T12:30:00+08:00');
+
+  it('无 id + 同名 → 合并成一条（否则引擎会生成相同指纹，两条互相覆盖）', () => {
+    // 引擎对无 id 的任务用 `fp_<指纹>` 兜底，指纹只含「平台+课程+类型+标题」。
+    // 于是页面上两份同名条目会落到**同一个 id**，在同一轮里互相覆盖 ——
+    // 谁在后面取决于渲染顺序，所以每次同步"更新"的那一条都不一样。
+    const html = `
+      <ul>
+        <li><div><span>已交</span><p>第一次上机</p></div><span>2026-10-22 23:50</span></li>
+        <li><div><span>未交</span><p>第一次上机</p></div><span>2026-11-05 15:15</span></li>
+      </ul>`;
+    const { items, conflicts } = dedupeById(parseTaskListHtml(html, now));
+    assert.equal(items.length, 1, '同名无 id 两条必须合并成一条');
+    assert.equal(conflicts, 1);
+    assert.equal(items[0]!.deadline, '2026-11-05 15:15');
+  });
+
+  it('标题有空格/全角差异也算同名', () => {
+    const html = `
+      <ul>
+        <li><div><span>未交</span><p>实验 09　动态数据组织</p></div><span>2026-11-08 23:59</span></li>
+        <li><div><span>未交</span><p>实验09 动态数据组织</p></div><span>2026-11-08 23:59</span></li>
+      </ul>`;
+    const { items } = dedupeById(parseTaskListHtml(html, now));
+    assert.equal(items.length, 1);
+  });
+});
+
+describe('chaoxing · 考试页诊断（要能在日志里一眼看懂）', () => {
+  it('跳过 head，只报关键统计', () => {
+    const html = `<!DOCTYPE html><html><head>
+      <meta name="viewport" content="width=device-width"><link rel="stylesheet" href="//x/a.css">
+      <title>作业考试</title></head>
+      <body><ul><li><span>未开始</span><p>期中考试</p></li><li><span>已结束</span><p>期末</p></li></ul></body></html>`;
+    const d = examPageDiagnosis(html);
+    assert.ok(d.includes('<li> 2 个'), `实际：${d}`);
+    assert.ok(d.includes('带 href 的 0 个'));
+    assert.ok(!d.includes('viewport'), '不能再把 head 里的 meta 倒出来 —— 那等于什么都没看到');
+    assert.ok(d.includes('期中考试') === false, '文字仍要被替换掉');
   });
 });

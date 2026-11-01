@@ -35,6 +35,7 @@ import type { PlatformTask, TaskKind, TaskStatus } from '#core/domain/task.ts';
 import type { Credentials, Session } from '#core/ports/vault.ts';
 import type { ReadOnlyPolicy } from '#core/ports/read-only.ts';
 import { HubError, schemaDrift } from '#core/domain/errors.ts';
+import { normalizeTitle } from '#core/domain/ids.ts';
 import { SessionHttpClient } from '#core/engine/session-http.ts';
 import {
   firstGroup,
@@ -676,7 +677,7 @@ export class ChaoxingAdapter implements PlatformAdapter {
     // 文字已被替换成 …，能看出 <li> 里有没有 href / examId，又不带出任何内容。
     // 这是"我改了两版都没修对"之后唯一正确的动作 —— 不再猜结构，先要真凭据。
     if (firstExamHtml && (examNoLink > 0 || (examDetailFetches > 0 && examDetailFilled === 0))) {
-      adapterDetails.push(`考试页结构：${tagSkeleton(firstExamHtml)}`);
+      adapterDetails.push(`考试页诊断：${examPageDiagnosis(firstExamHtml)}`);
     }
     if (examFailedCourses > 0) {
       notes.push(
@@ -1076,6 +1077,35 @@ export function tagSkeleton(html: string, max = 600): string {
     .slice(0, max);
 }
 
+/**
+ * 考试页诊断：一行说清「结构长什么样」，而不是倒一段 HTML 出来。
+ *
+ * 为什么不能直接丢 tagSkeleton（2026-11-01 真机两次才改对）：
+ * 第一次直接把整页骨架塞进日志，600 字全被 `<head>` 里的 meta/link 占满 ——
+ * 用户截图给我，我只看到一堆 `<meta name="viewport">`，对排查毫无帮助。
+ *
+ * 所以这里先**丢掉 head**（它没有列表结构），再只报三个关键事实：
+ * 有几个 <li>、其中几个带 href、整页出现过几次 examId。
+ * 这三个数就能判断「这条路到底通不通」：
+ *   · `<li>` 有、href 有 → 跟进详情页就能拿到时间
+ *   · `<li>` 有、href 无、examId 也无 → 列表页压根没有跳转信息，得换数据源
+ *   · `<li>` 为 0 → 根本不是列表页（可能是壳页面/登录页）
+ */
+export function examPageDiagnosis(html: string): string {
+  const src = String(html ?? '');
+  const body = src.replace(/<head[\s\S]*?<\/head>/i, '');
+  const liBlocks = body.match(/<li\b[\s\S]*?<\/li>/gi) ?? [];
+  const withHref = liBlocks.filter((b) => /href\s*=/i.test(b)).length;
+  const examIdHits = (src.match(/examid/gi) ?? []).length;
+  const sample = liBlocks[0] ?? body;
+  return [
+    `<li> ${liBlocks.length} 个`,
+    `其中带 href 的 ${withHref} 个`,
+    `整页出现 examId ${examIdHits} 次`,
+    `样例：${tagSkeleton(sample, 380)}`,
+  ].join(' · ');
+}
+
 /** 同一个 id 出现多次时，按「保守」合并两条。 */
 function mergePreferred(a: ParsedWorkItem, b: ParsedWorkItem): ParsedWorkItem {
   // 状态：**只要有一条说"还没交"，就按没交算**。
@@ -1125,23 +1155,29 @@ function mergePreferred(a: ParsedWorkItem, b: ParsedWorkItem): ParsedWorkItem {
  * 页面结构问题不该只有我猜得到。
  */
 export function dedupeById(items: ParsedWorkItem[]): { items: ParsedWorkItem[]; conflicts: number } {
-  const byId = new Map<string, ParsedWorkItem>();
-  const noId: ParsedWorkItem[] = [];
+  const byKey = new Map<string, ParsedWorkItem>();
   let conflicts = 0;
   for (const it of items) {
-    if (!it.platformTaskId) {
-      noId.push(it);
-      continue;
-    }
-    const prev = byId.get(it.platformTaskId);
+    // **没有 id 的条目也必须合并**（2026-11-01 真机）。
+    //
+    // 引擎对无 id 的任务用 `fp_<指纹>` 兜底，而指纹只含「平台+课程+类型+标题」——
+    // 于是同一份作业在页面上出现两次（没有 id）时，两条会落到**同一个 id**，
+    // 在同一轮里互相覆盖：谁在后面取决于渲染顺序，所以每次同步"更新"的那一条
+    // 都不一样（用户连同步三次，三次分别是不同的实验）。
+    //
+    // 键用归一化标题：同一次调用必然是同一门课，标题足以定位。
+    const key = it.platformTaskId
+      ? `id:${it.platformTaskId}`
+      : `title:${normalizeTitle(it.title)}`;
+    const prev = byKey.get(key);
     if (!prev) {
-      byId.set(it.platformTaskId, it);
+      byKey.set(key, it);
       continue;
     }
     conflicts += 1;
-    byId.set(it.platformTaskId, mergePreferred(prev, it));
+    byKey.set(key, mergePreferred(prev, it));
   }
-  return { items: [...byId.values(), ...noId], conflicts };
+  return { items: [...byKey.values()], conflicts };
 }
 
 export function parseTaskListHtml(html: string, now: Date, kind: 'homework' | 'exam' = 'homework'): ParsedWorkItem[] {
