@@ -8,7 +8,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { parseBackclazzData, parseTaskListHtml, dedupeById, ChaoxingAdapter } from '../chaoxing/src/index.ts';
+import { parseBackclazzData, parseTaskListHtml, dedupeById, tagSkeleton, ChaoxingAdapter } from '../chaoxing/src/index.ts';
 
 describe('chaoxing · parseBackclazzData（课程 JSON）', () => {
   const fixture = JSON.stringify({
@@ -299,5 +299,45 @@ describe('chaoxing · 平台原话要保留（「未开放」不是「待完成�
       new Date('2026-11-01T10:30:00+08:00'),
     );
     assert.equal(item!.statusText, '未交');
+  });
+});
+
+describe('chaoxing · 考试 id 的三种写法', () => {
+  const now = new Date('2026-11-01T10:00:00+08:00');
+  const wrap = (attr: string) =>
+    `<ul><li><div><span>未开始</span><p>期中考试</p></div>${attr}</li></ul>`;
+
+  it('examId=数字（query 形式）', () => {
+    assert.equal(parseTaskListHtml(wrap('<a href="?examId=900001">进</a>'), now, 'exam')[0]!.platformTaskId, '900001');
+  });
+  it('data-examid="数字"（属性形式）', () => {
+    assert.equal(parseTaskListHtml(wrap('<div data-examid="900002"></div>'), now, 'exam')[0]!.platformTaskId, '900002');
+  });
+  it('"examId":123（JSON 形态）', () => {
+    assert.equal(
+      parseTaskListHtml(wrap('<script>var d = {"examId":900003};</script>'), now, 'exam')[0]!.platformTaskId,
+      '900003',
+    );
+  });
+  it('作业规则不认 examId（防两类 id 撞车）', () => {
+    assert.equal(parseTaskListHtml(wrap('<div data-examid="900004"></div>'), now, 'homework')[0]!.platformTaskId, undefined);
+  });
+});
+
+describe('chaoxing · 结构骨架（拿不到数据时唯一的取证手段）', () => {
+  it('只留标签，文字一律替换 —— 能看出结构，不泄漏内容', () => {
+    const s = tagSkeleton(
+      '<ul><li><span>张三</span><p class="title">期中考试</p><a href="/exam?examId=900001">进入考试</a></li></ul>',
+    );
+    assert.ok(!s.includes('张三'), '姓名绝不能出现在日志里');
+    assert.ok(!s.includes('期中考试'), '标题也是内容');
+    assert.ok(s.includes('href'), '但属性要留着 —— 排查要看的就是"有没有 href / examId"');
+    assert.ok(s.includes('examId=900001'));
+  });
+
+  it('脚本与样式被整段丢弃', () => {
+    const s = tagSkeleton('<li><script>var a=1</script><span>x</span><style>.a{color:red}</style></li>');
+    assert.ok(!s.includes('var a=1'));
+    assert.ok(!s.includes('color:red'));
   });
 });

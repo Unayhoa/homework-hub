@@ -116,6 +116,14 @@ export interface Page<T> {
    * 长内容请自己截断，engine 只做总量兜底。
    */
   notes?: string[];
+  /**
+   * 只进**同步日志**、不进弹窗的补充（给排查用的结构线索等）。
+   *
+   * 和 notes 的分工：notes 是"用户需要知道的事实"，会出现在同步完成的那条提示里；
+   * details 是"我（或排查者）需要看到的东西"，只落在日志页。
+   * 混在一起的结果就是弹窗被技术细节撑满 —— 2026-11-01 真机反馈过。
+   */
+  details?: string[];
 }
 
 export interface FetchCoursesRequest {

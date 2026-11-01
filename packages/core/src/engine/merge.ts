@@ -318,6 +318,40 @@ export const DEFAULT_MERGE_OPTIONS: MergeOptions = {
  * 纯函数合并：输入「库里已有的任务」+「本轮拉到的任务」，输出写入计划。
  * 不碰数据库、不碰网络、不碰时钟 —— 所以可以完整单元测试。
  */
+/**
+ * 缺信息不覆盖已知信息。
+ *
+ * 真机（2026-11-01）：同一份作业的截止时间在「有值」和 `unknown` 之间来回跳，
+ * 变更历史里 `10/30 11:59 → unknown` 与 `unknown → 10/30 23:59` 交替出现，
+ * 用户什么都没做。连续同步三次，每次"有一条更新"，而且是不同的作业轮流。
+ *
+ * 根源：页面某一轮没把日期/状态渲染出来，我们就把"这次没看到"当成了
+ * **"平台改了"**。这两件事在数据上长得一样（都是 unknown），但含义相反。
+ *
+ * 判据：平台真正"取消截止时间/撤下状态"极罕见，而"某轮没解析到"很常见。
+ * 所以新的解析结果**缺失**时，保留库里已有的值 —— 宁可偶尔显示一个过时的时间，
+ * 也不要每天把用户的变更历史刷成噪音（噪音的代价是：真改期会被淹没）。
+ */
+export function keepKnownFields(prev: UnifiedTask, next: UnifiedTask): UnifiedTask {
+  let out = next;
+  if (next.deadline.kind === 'unknown' && prev.deadline.kind !== 'unknown') {
+    out = {
+      ...out,
+      deadline: prev.deadline,
+      ...(prev.deadlineAt ? { deadlineAt: prev.deadlineAt } : {}),
+    };
+  }
+  if (next.status === 'unknown' && prev.status !== 'unknown') {
+    out = {
+      ...out,
+      status: prev.status,
+      ...(prev.statusSource ? { statusSource: prev.statusSource } : {}),
+      ...(prev.statusRaw ? { statusRaw: prev.statusRaw } : {}),
+    };
+  }
+  return out;
+}
+
 export function mergeTasks(
   existing: UnifiedTask[],
   incoming: UnifiedTask[],
@@ -338,9 +372,13 @@ export function mergeTasks(
   let updated = 0;
   let unchanged = 0;
 
-  for (const next of incoming) {
+  for (const incomingTask of incoming) {
     const prev =
-      byId.get(next.id) ?? byFingerprint.get(`${next.accountId}|${next.courseId}|${next.fingerprint}`);
+      byId.get(incomingTask.id) ??
+      byFingerprint.get(`${incomingTask.accountId}|${incomingTask.courseId}|${incomingTask.fingerprint}`);
+
+    // 缺信息不覆盖已知信息 —— 只在能对上旧记录时才有意义（见 keepKnownFields）
+    const next = prev ? keepKnownFields(prev, incomingTask) : incomingTask;
 
     if (!prev) {
       // 「新增」本身也要进变更历史 —— 否则这页只记录"已知任务被改"，

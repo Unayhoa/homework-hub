@@ -439,6 +439,10 @@ export class ChaoxingAdapter implements PlatformAdapter {
     /** 为了拿考试时间而跟进的详情页请求数 / 其中成功拿到时间的条数 */
     let examDetailFetches = 0;
     let examDetailFilled = 0;
+    /** 既没有详情链接、也没有 examId 的考试数 —— 这类注定拿不到时间 */
+    let examNoLink = 0;
+    /** 第一份考试页 HTML，用于在拿不到时间时把"标签骨架"带进日志 */
+    let firstExamHtml = '';
     const now = ctx.clock.now();
     /** 引擎判定为「静默」的课程（全部终态 + 长期无变化）—— 可跳过考试探测 */
     const quietCourseIds = new Set(req.quietCourseIds ?? []);
@@ -531,6 +535,7 @@ export class ChaoxingAdapter implements PlatformAdapter {
           // 也就是说考试从来没被采到过一条。而失败只 push 进 errors、items 又不为空，
           // 于是既不报错也不提示：用户看到「同步成功」，考试却永远不出现。
           const examHtml = await this.#fetchTaskListHtml(http, course, 'exam');
+          if (!firstExamHtml) firstExamHtml = examHtml;
           const deduped = dedupeById(parseTaskListHtml(examHtml, now, 'exam'));
           dupConflicts += deduped.conflicts;
 
@@ -543,17 +548,25 @@ export class ChaoxingAdapter implements PlatformAdapter {
           const examItems: PlatformTask[] = [];
           for (const w of deduped.items) {
             let deadline = w.deadline;
-            if (!deadline && w.status === 'pending' && w.detailUrl && examDetailFetches < EXAM_DETAIL_LIMIT) {
-              examDetailFetches += 1;
-              try {
-                const led = await this.#examDetailDeadline(http, w.detailUrl);
-                if (led) {
-                  deadline = led;
-                  examDetailFilled += 1;
+            if (!deadline && w.status === 'pending') {
+              // 优先用列表页里的 href；**没有就用 examId 拼** —— 列表项不一定有 <a>
+              // （真机那次就是没有，于是什么都没发生，用户只看到"依然截止未知"）。
+              const detailUrl =
+                w.detailUrl ?? (w.platformTaskId ? this.#examDetailUrl(course, w.platformTaskId) : undefined);
+              if (!detailUrl) {
+                examNoLink += 1; // 既没链接也没 id —— 这条考试拿不到时间，要能被看见
+              } else if (examDetailFetches < EXAM_DETAIL_LIMIT) {
+                examDetailFetches += 1;
+                try {
+                  const led = await this.#examDetailDeadline(http, detailUrl);
+                  if (led) {
+                    deadline = led;
+                    examDetailFilled += 1;
+                  }
+                } catch {
+                  // 详情页失败**不能**影响这条考试本身：宁可没有时间，
+                  // 也不要因为一个附加信息丢掉整场考试。
                 }
-              } catch {
-                // 详情页失败**不能**影响这条考试本身：宁可没有时间，
-                // 也不要因为一个附加信息丢掉整场考试。
               }
             }
             examItems.push({
@@ -641,6 +654,8 @@ export class ChaoxingAdapter implements PlatformAdapter {
     // 可以一路静默到用户面前（表现为「同步成功、考试永远没有」）。
     // 上一次 getAllExam 404 就是这样藏了不知多久。
     const notes: string[] = [];
+    /** 只进日志的补充（目前只放考试页的结构骨架） */
+    const adapterDetails: string[] = [];
     // 页面里同一任务出现多次且信息冲突 —— 这是"截止时间/状态来回跳"的根源。
     // 必须说出来：用户看到的是"我没动过它，它自己一直在变"。
     if (dupConflicts > 0) {
@@ -653,6 +668,15 @@ export class ChaoxingAdapter implements PlatformAdapter {
     // 这类"看起来做了但没生效"的事必须能看见，否则考试会一直挂在「截止未知」。
     if (examDetailFetches > 0 && examDetailFilled === 0) {
       notes.push(`有 ${examDetailFetches} 场考试翻进了详情页，但没能读出时间（页面结构可能变了）`);
+    }
+    if (examNoLink > 0) {
+      notes.push(`有 ${examNoLink} 场考试在列表里既没有详情链接也没有 examId，拿不到时间`);
+    }
+    // 拿不到时间时，把考试页的**标签骨架**放进日志（details）：
+    // 文字已被替换成 …，能看出 <li> 里有没有 href / examId，又不带出任何内容。
+    // 这是"我改了两版都没修对"之后唯一正确的动作 —— 不再猜结构，先要真凭据。
+    if (firstExamHtml && (examNoLink > 0 || (examDetailFetches > 0 && examDetailFilled === 0))) {
+      adapterDetails.push(`考试页结构：${tagSkeleton(firstExamHtml)}`);
     }
     if (examFailedCourses > 0) {
       notes.push(
@@ -668,6 +692,7 @@ export class ChaoxingAdapter implements PlatformAdapter {
       items,
       hasMore: false,
       ...(notes.length > 0 ? { notes } : {}),
+      ...(adapterDetails.length > 0 ? { details: adapterDetails } : {}),
       // 不给 declaredTotal：超星不返回总数。
       // 留空则 engine 不会误判 schema drift（我们已经在自己这层校验过了）。
     };
@@ -703,6 +728,21 @@ export class ChaoxingAdapter implements PlatformAdapter {
       });
     }
     return text;
+  }
+
+  /**
+   * 用 examId 拼考试详情页地址。
+   *
+   * 为什么可以拼：这条路径经匿名请求验证过是**真实存在**的（302 跳登录页，
+   * 死路径会是 404），和 chaoxingWorkUrl 面对的情况不同 ——
+   * 作业的 enc 由服务端按会话签发，考试详情页只靠 courseId/classId/examId 就能进。
+   * 如果实际还需要额外参数，请求会失败，代价只是"这次没拿到时间"，没有副作用。
+   */
+  #examDetailUrl(course: { courseId: string; classId: string; cpi?: string }, examId: string): string {
+    const p = new URLSearchParams({ courseId: course.courseId, classId: course.classId });
+    if (course.cpi) p.set('cpi', course.cpi);
+    p.set('examId', examId);
+    return `https://mooc1.chaoxing.com/mooc-ans/exam/test/reVersionTestStartNew?${p.toString()}`;
   }
 
   /**
@@ -1016,6 +1056,26 @@ function latestDateIn(block: string): string | undefined {
   return best;
 }
 
+/**
+ * 把一段 HTML 压成「只有标签、没有文字」的骨架。
+ *
+ * 用途只有一个：当解析拿不到东西时，让用户能把**结构**带给我看，
+ * 而不用教他抓包或导源码。文字全部换成 `…`，所以不会带出姓名、标题、学号。
+ *
+ * 为什么需要（2026-11-01）：考试时间连改两版都没拿到，我手上没有任何真实结构，
+ * 只能继续猜 `<li>` 长什么样。有了骨架，"有没有 href / 有没有 examId" 一眼就能看出来。
+ */
+export function tagSkeleton(html: string, max = 600): string {
+  return String(html ?? '')
+    .replace(/<script[\s\S]*?<\/script>/gi, '<script/>')
+    .replace(/<style[\s\S]*?<\/style>/gi, '<style/>')
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/>[^<]{1,80}</g, '>…<')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, max);
+}
+
 /** 同一个 id 出现多次时，按「保守」合并两条。 */
 function mergePreferred(a: ParsedWorkItem, b: ParsedWorkItem): ParsedWorkItem {
   // 状态：**只要有一条说"还没交"，就按没交算**。
@@ -1115,11 +1175,15 @@ export function parseTaskListHtml(html: string, now: Date, kind: 'homework' | 'e
     // **不跨类型兜底**（作业不认 examId、考试不认 workId）：两类 id 混用会让
     // 作业和考试在同一个 id 空间里撞车 —— 一旦数值相同就被合并成一条，
     // 而那种错误在界面上看不出来。id 缺失的代价只是退回 fingerprint（仍然稳定）。
-    const id =
-      firstGroup(block, kind === 'exam'
-        ? /(?:examId|examid)=(\d{3,})/i
-        : /(?:workId|workid|jobid)=(\d{3,})/i) ??
-      firstGroup(block, /data-id=["'](\d{3,})["']/);
+    //
+    // 写法要放宽（2026-11-01）：同一个 id 可能出现在
+    //   `?examId=123` / `data-examid="123"` / `{"examId":123}` 三种形态里，
+    // 只认第一种会让「拿考试时间」这一步在真机上静默不做任何事。
+    const idPattern =
+      kind === 'exam'
+        ? /(?:examid|exam_id)["']?\s*[:=]\s*["']?(\d{3,})/i
+        : /(?:(?:workid|jobid|work_id))["']?\s*[:=]\s*["']?(\d{3,})/i;
+    const id = firstGroup(block, idPattern) ?? firstGroup(block, /data-id=["'](\d{3,})["']/);
 
     // 直达链接：**只接受绝对地址**，原样搬过来。
     // 相对路径不猜 host —— 猜错会得到一个打不开的页面，比退回首页更糟。

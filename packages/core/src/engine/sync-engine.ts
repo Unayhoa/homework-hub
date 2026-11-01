@@ -863,6 +863,8 @@ export class SyncEngine {
     let pageError: unknown;
     /** 适配器本轮要说的话（诊断结论 / 已知边界）。见 Page.notes 的注释。 */
     const adapterNotes: string[] = [];
+    /** 适配器给的"只进日志"的补充（结构线索等） */
+    const adapterDetails: string[] = [];
 
     // 上轮适配器「提前中止」过 → 本轮跑完整诊断（消费式：读一次就复位，
     // 避免此后每轮都慢跑）。机制是通用的，不绑定任何平台。
@@ -907,6 +909,7 @@ export class SyncEngine {
         declaredTotal = page.declaredTotal ?? declaredTotal;
         collected.push(...page.items);
         if (page.notes?.length) adapterNotes.push(...page.notes);
+        if (page.details?.length) adapterDetails.push(...page.details);
         pages += 1;
 
         if (!page.hasMore || !page.nextCursor) {
@@ -1155,6 +1158,9 @@ export class SyncEngine {
     //
     // 顺带修掉一个重复：这段 push 此前被复制了两份（相邻两个 if 完全相同），
     // 于是自动接回成功时消息里会出现两遍「会话曾失效，已自动接回」。
+    // 适配器"只进日志"的补充，同样去重后并进 detail
+    for (const d of [...new Set(adapterDetails)]) details.push(d);
+
     for (const n of [...new Set(adapterNotes)]) {
       if (notes.join('；').length + n.length > 1200) break; // 消息是给人读的，不是日志倾倒口
       notes.push(n);
