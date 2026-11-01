@@ -296,6 +296,8 @@ export class YuketangAdapter implements PlatformAdapter {
     const courses = req.courses ?? [];
     const items: PlatformTask[] = [];
     const failures: string[] = [];
+    /** 只进日志的排查结论（例如"这个接口里出现过哪些 type"） */
+    const details: string[] = [];
 
     // 长江雨课堂：作业抓取主通道（2026-09-29 真实抓包校准）——
     //   1) GET /c27/.../get_basic_info/ → course_sign
@@ -311,6 +313,10 @@ export class YuketangAdapter implements PlatformAdapter {
       // 所以：匹配得到的给精确链接，匹配不到的统一给平台首页
       // （用户 2026-10-23 明确：修不好就退首页，不要给一个必然报错的地址）。
       const quizLinks = new Map<string, string>();
+      /** 这个接口里真正是「考试」的条目（type === 'exam'）—— 章节树里没有它们 */
+      const examFromUpcoming: PlatformTask[] = [];
+      /** 见过的 type 取值。写进诊断，用来判断"考试到底叫什么类型" */
+      const upstreamTypes = new Set<string>();
       try {
         const up = await http.getJson<{ data?: { upcomingExam?: Array<Record<string, unknown>> } }>(
           `${this.#base}/api/v3/classroom/on-lesson-upcoming-exam`,
@@ -319,13 +325,42 @@ export class YuketangAdapter implements PlatformAdapter {
           const cid = String(e.classroom_id ?? '');
           const title = String(e.title ?? '');
           const id = e.id;
-          if (cid && title && id !== undefined && id !== null) {
-            quizLinks.set(`${cid}|${title}`, `${this.#base}/v2/web/studentQuiz/${id}/1`);
+          if (!cid || !title || id === undefined || id === null) continue;
+          quizLinks.set(`${cid}|${title}`, `${this.#base}/v2/web/studentQuiz/${id}/1`);
+
+          // ---- 考试：章节树里没有，只能从这里拿 ----
+          //
+          // 2026-11-01 核对用户 HAR：这个接口一次返回全部「即将到来」的条目，
+          // 每条带 `type`（样本里是 "quiz"）和 `start_time`/`end_time`（epoch **秒**）。
+          // 章节树（mooc-api chapter）只有 leaf_type 7/8/9，都是授课/资料/作业，
+          // 没有考试 —— 所以考试如果存在，唯一来源就是这里。
+          //
+          // 之前这段只拿 `id` 拼作业链接，把条目本身丢掉了，于是「考试」这类内容
+          // 从来不会进库。现在只补 `type === 'exam'` 的（quiz 章节树已经覆盖，避免重复）。
+          const type = String(e.type ?? '');
+          if (type) upstreamTypes.add(type);
+          if (type === 'exam') {
+            const endSec = typeof e.end_time === 'number' ? e.end_time : undefined;
+            examFromUpcoming.push({
+              platformTaskId: String(id),
+              courseId: cid,
+              courseName: String(e.classroom_name ?? ''),
+              kind: 'exam',
+              title,
+              status: 'pending',
+              ...(endSec !== undefined ? { deadline: new Date(endSec * 1000) } : {}),
+              raw: e,
+            });
           }
         }
       } catch {
         // 拿不到就全部退首页，不影响作业本身
       }
+      // type 分布只进日志（排查用）：如果哪天出现 "exam"，说明有考试可采
+      if (upstreamTypes.size > 0) {
+        details.push(`雨课堂 upcomingExam 的 type 取值：${[...upstreamTypes].join(' / ')}`);
+      }
+      items.push(...examFromUpcoming);
       for (const course of courses) {
         try {
           // 浏览器真实请求：?classroom_id=&notSetParamsUvId=true（缺参返回 XTBZ IS REQUIRED）
@@ -386,7 +421,12 @@ export class YuketangAdapter implements PlatformAdapter {
           platformId: this.id,
         });
       }
-      return { items, hasMore: false, declaredTotal: items.length };
+      return {
+        items,
+        hasMore: false,
+        declaredTotal: items.length,
+        ...(details.length > 0 ? { details } : {}),
+      };
     }
 
     // 性能关键路径：一学期 = N 门课 × M 个课次，请求数轻松过百。

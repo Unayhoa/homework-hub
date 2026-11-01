@@ -448,8 +448,12 @@ export class ChaoxingAdapter implements PlatformAdapter {
     let examNoLink = 0;
     /** 哪个 URL 变体才真正返回了列表（plain / stuenc / empty）—— 写进诊断 */
     let examVariant = '';
-    /** 第一份考试页 HTML，用于在拿不到时间时把"标签骨架"带进日志 */
+    /** 本轮一共解析出多少场考试（用于判断"一条都没有"是不是异常） */
+    let examTotal = 0;
+    /** 第一份**解析出了考试**的页面 HTML（诊断用） */
     let firstExamHtml = '';
+    /** 第一份**没解析出考试**的页面 HTML（只在全都没结果时才需要） */
+    let emptyExamHtml = '';
     const now = ctx.clock.now();
     /** 引擎判定为「静默」的课程（全部终态 + 长期无变化）—— 可跳过考试探测 */
     const quietCourseIds = new Set(req.quietCourseIds ?? []);
@@ -540,7 +544,6 @@ export class ChaoxingAdapter implements PlatformAdapter {
           // 结构与作业**不**同构：标题/状态在 `<p>` 里，**时间在 onclick 的 goTest(...) 参数里**。
           // 所以这里用专用解析器，不再复用作业那个。
           const { html: examHtml, variant } = await this.#fetchExamListHtml(http, course);
-          if (!firstExamHtml) firstExamHtml = examHtml;
           if (variant !== 'plain') examVariant = variant; // 记下"哪个变体才通"，写进诊断
           const deduped = dedupeById(parseExamListHtml(examHtml, now));
           dupConflicts += deduped.conflicts;
@@ -561,8 +564,16 @@ export class ChaoxingAdapter implements PlatformAdapter {
             });
           }
           items.push(...examItems);
-          if (examItems.length > 0) diag.push(`${course.name}/考试: ${examItems.length} 条`);
-          else examZeroCourses += 1;
+          if (examItems.length > 0) {
+            diag.push(`${course.name}/考试: ${examItems.length} 条`);
+            examTotal += examItems.length;
+            // 只记**解析出了考试**的那一份：拿一份"本来就没有考试"的页面去做诊断，
+            // 结论必然是 `<li> 0 个`，那是误导（2026-11-01 真机就报了这种假警报）。
+            if (!firstExamHtml) firstExamHtml = examHtml;
+          } else {
+            examZeroCourses += 1;
+            if (!emptyExamHtml) emptyExamHtml = examHtml;
+          }
         } catch (e) {
           const msg = `${course.name}/考试: ${(e as Error).message}`;
           errors.push(msg);
@@ -645,18 +656,27 @@ export class ChaoxingAdapter implements PlatformAdapter {
     const examProbed = courses.length - skippedExamCourses;
     // 翻了详情页却没拿到时间 —— 说明详情页的结构和我假设的不一样。
     // 这类"看起来做了但没生效"的事必须能看见，否则考试会一直挂在「截止未知」。
+    // examId 缺失不弹窗：考试本身仍然显示得出（靠标题指纹兜底），
+    // 只是"定位不到"——这属于排查信息，不该占用户的注意力。
     if (examNoLink > 0) {
-      notes.push(`有 ${examNoLink} 场考试在列表里没有 examId，定位不到（可能是页面改版）`);
+      adapterDetails.push(`有 ${examNoLink} 场考试没有 examId（靠标题指纹入库，可正常显示）`);
     }
     // 拿不到时间时，把考试页的**标签骨架**放进日志（details）：
     // 文字已被替换成 …，能看出 <li> 里有没有 href / examId，又不带出任何内容。
     // 这是"我改了两版都没修对"之后唯一正确的动作 —— 不再猜结构，先要真凭据。
-    // 诊断只在"有异常"时写：没 examId、或者第一个变体没拿到列表。
-    // 正常情况下不打扰日志 —— 每轮都塞一段 HTML 统计会把有用信息淹掉。
-    if (firstExamHtml && (examNoLink > 0 || (examVariant && examVariant !== 'plain'))) {
-      adapterDetails.push(
-        `考试页诊断（变体 ${examVariant || 'plain'}）：${examPageDiagnosis(firstExamHtml)}`,
-      );
+    // 诊断只在**真的没拿到考试**时写，而且要区分两种情形：
+    //   · 探测过、但一条都没解析出来 → 可能页面改版，要报（进弹窗，用户能据此找我）
+    //   · 有课正常解析出了考试 → 那些空页面只是"这门课没有考试"，不该报
+    // 2026-11-01 真机的假警报就是第二种：拿了一门"本来没考试"的课去诊断，
+    // 得出 `<li> 0 个`，而同一轮考试其实采到了、时间也对。
+    const examProbedCourses = courses.length - skippedExamCourses;
+    if (examProbedCourses > 0 && examTotal === 0) {
+      notes.push('这个平台的考试一条都没解析出来（可能页面结构变了）');
+      const sampleHtml = emptyExamHtml || firstExamHtml;
+      if (sampleHtml) adapterDetails.push(`考试页诊断（变体 ${examVariant || 'plain'}）：${examPageDiagnosis(sampleHtml)}`);
+    } else if (examVariant && examVariant !== 'plain' && firstExamHtml) {
+      // 靠 stuenc 变体才通 —— 记一笔，以后可以省掉第一次无效请求
+      adapterDetails.push(`考试列表需要带 stuenc 才能返回数据（${examPageDiagnosis(firstExamHtml)}）`);
     }
     if (examFailedCourses > 0) {
       notes.push(
