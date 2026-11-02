@@ -177,6 +177,8 @@ export interface UnifiedTask {
   statusSource?: 'platform' | 'inferred';
   /** 平台原话，只用于展示；不参与任何判定（见 PlatformTask.statusRaw） */
   statusRaw?: string;
+  /** 开考时刻（ISO）。只对考试有意义，见 PlatformTask.startsAt */
+  startsAt?: string;
   /** 平台原始数据，排查问题用 */
   raw?: unknown;
 }
@@ -206,6 +208,18 @@ export interface PlatformTask {
   statusRaw?: string;
   /** 任意形态，交给 normalizeDeadline 处理 */
   deadline?: unknown;
+  /**
+   * 开考时刻（只对考试有意义）。
+   *
+   * 为什么和 deadline 分开存（2026-11-02 用户要求）：
+   * 考试真正要"行动"的时刻是**开考**（10:00 到考场），而不是结束（11:40）。
+   * 所以界面显示和分组都该按 startsAt；但"是否已逾期"必须按 deadline ——
+   * 否则考试一开始就被标成逾期，那是错的（还在考）。
+   *
+   * 超星的考试列表页只给结束时间（`goTest(...)` 第 4 参），
+   * 开始时间只在详情页 `examnotes?examId=` 里，所以要多一个请求（有上限）。
+   */
+  startsAt?: string;
   publishedAt?: unknown;
   score?: number;
   totalScore?: number;

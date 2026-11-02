@@ -125,27 +125,60 @@ function escapeHtml(s) {
 }
 
 /** 「截止 9/30 23:59」—— 剩余时间会随展示时刻漂移，绝对日期才是用户核对真机界面的锚点。 */
-function fmtDueDate(task) {
+/**
+ * 这条任务以哪个时刻为准。
+ *
+ * 考试看**开考**，作业看**截止** —— 这是两种不同的"要行动的时刻"：
+ * 10:00 该去考场，而不是 11:40（那时候已经考完了）。
+ * 2026-11-02 用户明确提出：考试卡片上显示结束时间没有意义。
+ *
+ * 只影响**显示与分组**；"是否已逾期"仍按 deadline 判（见 fmtCountdown 与 bucket）。
+ */
+function anchorOf(task) {
+  if (task.kind === 'exam' && task.startsAt) {
+    const t = new Date(task.startsAt);
+    if (!Number.isNaN(t.getTime())) return { at: t, isStart: true };
+  }
   const d = task.deadline;
-  if (!d || d.kind !== 'absolute') return '';
-  const at = task.deadlineAt ? new Date(task.deadlineAt) : (d.at ? new Date(d.at) : null);
-  if (!at || Number.isNaN(at.getTime())) return '';
-  return `${at.getMonth() + 1}/${at.getDate()} ${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}`;
+  if (!d || d.kind !== 'absolute') return null;
+  const t = task.deadlineAt ? new Date(task.deadlineAt) : d.at ? new Date(d.at) : null;
+  if (!t || Number.isNaN(t.getTime())) return null;
+  return { at: t, isStart: false };
+}
+
+function fmtDueDate(task) {
+  const a = anchorOf(task);
+  if (!a) return '';
+  return `${a.at.getMonth() + 1}/${a.at.getDate()} ${String(a.at.getHours()).padStart(2, '0')}:${String(a.at.getMinutes()).padStart(2, '0')}`;
+}
+
+/** 时间前面那个词：考试叫「开考」，作业叫「截止」。 */
+function dateLabelOf(task) {
+  return task.kind === 'exam' && task.startsAt ? '开考' : '截止';
 }
 
 function fmtCountdown(task) {
-  const d = task.deadline;
-  if (d.kind === 'open') return { text: '不限时', cls: 'normal' };
-  if (d.kind === 'unknown') return { text: '截止未知', cls: 'normal' };
-  const at = task.deadlineAt ? new Date(task.deadlineAt) : new Date(d.at);
-  const ms = at.getTime() - Date.now();
+  const a = anchorOf(task);
+  if (!a) {
+    if (task.deadline && task.deadline.kind === 'open') return { text: '不限时', cls: 'normal' };
+    return { text: '截止未知', cls: 'normal' };
+  }
+  const ms = a.at.getTime() - Date.now();
   const abs = Math.abs(ms);
   const day = Math.floor(abs / 86400000);
   const hour = Math.floor((abs % 86400000) / 3600000);
   const min = Math.floor((abs % 3600000) / 60000);
-  let span = day > 0 ? `${day} 天 ${hour} 小时` : hour > 0 ? `${hour} 小时 ${min} 分钟` : `${Math.max(min, 1)} 分钟`;
-  if (ms < 0) return { text: `已逾期 ${span}`, cls: 'overdue' };
-  return { text: `还剩 ${span}`, cls: ms < 86400000 ? 'today' : 'normal' };
+  const span = day > 0 ? `${day} 天 ${hour} 小时` : hour > 0 ? `${hour} 小时 ${min} 分钟` : `${Math.max(min, 1)} 分钟`;
+
+  if (ms < 0) {
+    // 考试开考后、结束前 → 正在考，不能说"已逾期"（那是错的，用户还在答题）
+    const endAt = task.deadline && task.deadline.kind === 'absolute' ? new Date(task.deadline.at).getTime() : NaN;
+    if (a.isStart && Number.isFinite(endAt) && Date.now() < endAt) {
+      return { text: `进行中 · ${Math.max(min, 1)} 分钟后结束`, cls: 'today' };
+    }
+    return { text: a.isStart ? `已开考 ${span}` : `已逾期 ${span}`, cls: 'overdue' };
+  }
+  return { text: a.isStart ? `距开考 ${span}` : `还剩 ${span}`, cls: ms < 86400000 ? 'today' : 'normal' };
 }
 
 function fmtLocal(iso) {
@@ -414,7 +447,7 @@ function renderTodo(state) {
           <div class="task-body">
             ${link}
             <div class="task-meta"><span class="kind">${KIND[t.kind] ?? t.kind}</span><span class="plat">${escapeHtml(taskPlatform(t))}</span>${status}${manualHint}</div>
-            <div class="countdown ${cd.cls}">${cd.text}${fmtDueDate(t) ? ` · 截止 ${fmtDueDate(t)}` : ''}</div>
+            <div class="countdown ${cd.cls}">${cd.text}${fmtDueDate(t) ? ` · ${dateLabelOf(t)} ${fmtDueDate(t)}` : ''}</div>
             ${renderProgress(t)}
             ${renderManualNeed(t)}
           </div>

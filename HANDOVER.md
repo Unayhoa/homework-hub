@@ -143,6 +143,12 @@
 原来那个 `/mooc-ans/exam/test/getAllExam` 是 **404**（代码里还挂着 TODO(verify)）。
 验证手法（可以复用）：未登录请求，**302 到登录页 = 路径存在，404 = 死路径**。
 
+**考试的时间语义（v0.2.28）**：考试用 `startsAt`（开考）显示与分组，`deadline`（结束）判逾期。
+- 列表页的 `goTest(...)` 只给结束时间，**开考时间只在详情页** `examnotes?examId=` 里
+  （`<p>开始时间：<span>2026-11-02 10:00</span></p>`），所以每场待考考试 +1 请求（上限 8）
+- **不能把 deadline 改成开考时间**：那样一开考就判逾期，而用户还在答题
+- 开考后、结束前，倒计时显示「进行中 · N 分钟后结束」
+
 **两个包（v0.2.27 起）**：同一套代码，唯一差异是构建开关 `--user-build`，
 它注入 `window.__HH_USER_BUILD__` → 隐藏「＋ 添加自定义平台」入口。
 - 自用包：`node scripts/build-android.mjs` → `release/homework-hub-<ver>-debug.apk`

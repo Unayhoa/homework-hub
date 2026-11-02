@@ -75,6 +75,8 @@ export interface TaskDto {
   status: string;
   /** 平台原话，只用于展示（null = 平台没给状态词） */
   statusRaw: string | null;
+  /** 开考时刻（只对考试有值；null = 平台没给或没取到） */
+  startsAt: string | null;
   /** 'platform' | 'manual' —— 界面上给手动标记的条目加「手动」标注，别让本地数据伪装成平台数据 */
   completionOrigin: string | null;
   /** 用户是否标记过完成（哪怕此刻被平台优先规则压住） */
@@ -147,6 +149,8 @@ export function taskDto(t: UnifiedTask): TaskDto {
     manualSkipped: Boolean(t.userSkippedAt),
     canSkip: canSkip(t),
     deadline: t.deadline,
+    // 开考时刻（只对考试有值）。界面用它显示"几点开考"，deadline 仍用于判逾期。
+    startsAt: t.startsAt ?? null,
     deadlineAt: t.deadlineAt ?? null,
     deadlineMs: deadlineToMs(t.deadline, t.deadlineAt),
     progress: t.progress ?? null,
@@ -398,9 +402,20 @@ export function createApiHandler(deps: ApiDeps): ApiHandler {
         }
         const now = Date.now();
         const bucket = (t: UnifiedTask): string => {
-          if (t.deadline.kind !== 'absolute') return t.deadline.kind === 'open' ? 'open' : 'unknown';
-          const ms = new Date(t.deadline.at).getTime() - now;
-          if (ms < 0) return 'overdue';
+          const endMs = t.deadline.kind === 'absolute' ? new Date(t.deadline.at).getTime() : NaN;
+          // 考试按**开考时间**分组（10:00 该去考场，不是 11:40）。
+          // 但"已逾期"必须按结束时间判 —— 开考后还在考，标成逾期是错的。
+          const startMs = t.startsAt ? new Date(t.startsAt).getTime() : NaN;
+          const anchorMs = Number.isFinite(startMs) ? startMs : endMs;
+          if (!Number.isFinite(anchorMs)) {
+            return t.deadline.kind === 'open' ? 'open' : 'unknown';
+          }
+          const ms = anchorMs - now;
+          if (ms < 0) {
+            // 已过开考：只有**结束时间也过了**才算逾期，否则仍在进行中（放今天）
+            if (Number.isFinite(endMs) && now < endMs) return 'today';
+            return 'overdue';
+          }
           if (ms < 86_400_000) return 'today';
           if (ms < 3 * 86_400_000) return 'soon';
           return 'later';

@@ -97,6 +97,14 @@ export interface ChaoxingEndpointMap {
   userInfo: string;
 }
 
+/**
+ * 每轮最多翻多少个考试详情页去取开考时间。
+ *
+ * 一场待考考试 +1 个请求；正常学期个位数。设上限是因为超星风控对请求量敏感，
+ * 而"开考时间"是附加信息 —— 拿不到就退化成只显示结束时间，不影响考试本身。
+ */
+const EXAM_TIME_LIMIT = 8;
+
 export const ChaoxingEndpoints: ChaoxingEndpointMap = {
   login: 'https://passport2.chaoxing.com/fanyalogin',
   courseData: 'https://mooc1-api.chaoxing.com/mycourse/backclazzdata?view=json&rss=1',
@@ -450,10 +458,21 @@ export class ChaoxingAdapter implements PlatformAdapter {
     let examVariant = '';
     /** 本轮一共解析出多少场考试（用于判断"一条都没有"是不是异常） */
     let examTotal = 0;
+    /** 为取开考时间翻了多少个详情页 / 其中成功拿到的条数 */
+    let examDetailFetches = 0;
+    let examStartFilled = 0;
     /** 第一份**解析出了考试**的页面 HTML（诊断用） */
     let firstExamHtml = '';
     /** 第一份**没解析出考试**的页面 HTML（只在全都没结果时才需要） */
     let emptyExamHtml = '';
+    /** 只进日志的诊断（抓取路径、多日期、相对推算、考试页骨架…） */
+    const adapterDetails: string[] = [];
+    /** 作业这一轮走的是哪条路（html / json 回退），以及各走了几门课 */
+    let htmlPathCourses = 0;
+    let jsonFallbackCourses = 0;
+    /** 诊断输出上限：这两类信息只列前几条，避免日志被几百条作业冲垮 */
+    let dateDebugCount = 0;
+    let relativeDebugCount = 0;
     const now = ctx.clock.now();
     /** 引擎判定为「静默」的课程（全部终态 + 长期无变化）—— 可跳过考试探测 */
     const quietCourseIds = new Set(req.quietCourseIds ?? []);
@@ -479,8 +498,33 @@ export class ChaoxingAdapter implements PlatformAdapter {
       let workItems: PlatformTask[] = [];
       try {
         const html = await this.#fetchTaskListHtml(http, course);
-        const parsed = dedupeById(parseTaskListHtml(html, now));
+        // 先留着**去重前**的原始解析结果：诊断要看"页面上一共给了几条、各有几个日期"，
+        // 去重之后被合并掉的那条就看不见了。
+        const rawParsed = parseTaskListHtml(html, now);
+        const parsed = dedupeById(rawParsed);
         dupConflicts += parsed.conflicts;
+        htmlPathCourses += 1;
+
+        // ---- 诊断：为什么同一条作业会"反复显示更新" ----
+        //
+        // 两个原因的可能形态完全相反，必须先分清（2026-11-02 用户要求先定位再修）：
+        //   · 行内**有多个日期** → 我们每次取的可能是不同那个（发布/开始 vs 截止）
+        //   · 行内**没有日期**、只有"剩余X小时" → 每轮按当前时间推算，值必然不同
+        // 前者要改取值规则，后者要改成"锚定首次推算值"。先看日志再动。
+        for (const w of rawParsed) {
+          if (w.debugDates && w.debugDates.length > 1 && dateDebugCount < 5) {
+            dateDebugCount += 1;
+            adapterDetails.push(
+              `多日期：${w.title} → 取 ${w.deadline ?? '无'}（候选 ${w.debugDates.join(' / ')}）`,
+            );
+          } else if ((!w.debugDates || w.debugDates.length === 0) && w.deadline && relativeDebugCount < 3) {
+            relativeDebugCount += 1;
+            adapterDetails.push(
+              `相对推算：${w.title} → ${w.deadline}（页面只有"剩余X小时"，每轮按当前时间算，值必然不同）`,
+            );
+          }
+        }
+
         workItems = parsed.items.map((w) => ({
           platformTaskId: w.platformTaskId,
           courseId: course.courseId,
@@ -509,6 +553,7 @@ export class ChaoxingAdapter implements PlatformAdapter {
       if (workItems.length === 0) {
         try {
           workItems = await this.#fetchPerCourse(http, this.#ep.workList, course, 'homework');
+          jsonFallbackCourses += 1;
         } catch (e) {
           const msg = `${course.name}/作业(JSON): ${(e as Error).message}`;
           errors.push(msg);
@@ -550,6 +595,20 @@ export class ChaoxingAdapter implements PlatformAdapter {
 
           const examItems: PlatformTask[] = [];
           for (const w of deduped.items) {
+            // 开考时间只在详情页里。只为"还没结束"的考试去翻（已考完的没必要），
+            // 且整轮有上限，避免一场考试列表把请求量翻倍。
+            let startsAt: string | undefined;
+            if (w.status === 'pending' && w.platformTaskId && examDetailFetches < EXAM_TIME_LIMIT) {
+              examDetailFetches += 1;
+              try {
+                const times = await this.#examDetailTimes(http, course, w.platformTaskId);
+                if (times.start) startsAt = times.start;
+                if (times.end && !w.deadline) w.deadline = times.end;
+                if (startsAt) examStartFilled += 1;
+              } catch {
+                // 拿不到就只显示结束时间（退化为改动前的样子），不影响这条考试
+              }
+            }
             if (!w.platformTaskId) examNoLink += 1; // 没有 examId → 这条考试再也定位不到
             examItems.push({
               platformTaskId: w.platformTaskId,
@@ -560,6 +619,7 @@ export class ChaoxingAdapter implements PlatformAdapter {
               status: w.status,
               ...(w.statusText ? { statusRaw: w.statusText } : {}),
               ...(w.deadline ? { deadline: w.deadline } : {}),
+              ...(startsAt ? { startsAt } : {}),
               raw: { source: 'exam-list', title: w.title },
             });
           }
@@ -644,8 +704,6 @@ export class ChaoxingAdapter implements PlatformAdapter {
     // 可以一路静默到用户面前（表现为「同步成功、考试永远没有」）。
     // 上一次 getAllExam 404 就是这样藏了不知多久。
     const notes: string[] = [];
-    /** 只进日志的补充（目前只放考试页的结构骨架） */
-    const adapterDetails: string[] = [];
     // 页面里同一任务出现多次且信息冲突 —— 这是"截止时间/状态来回跳"的根源。
     // 必须说出来：用户看到的是"我没动过它，它自己一直在变"。
     if (dupConflicts > 0) {
@@ -658,8 +716,18 @@ export class ChaoxingAdapter implements PlatformAdapter {
     // 这类"看起来做了但没生效"的事必须能看见，否则考试会一直挂在「截止未知」。
     // examId 缺失不弹窗：考试本身仍然显示得出（靠标题指纹兜底），
     // 只是"定位不到"——这属于排查信息，不该占用户的注意力。
+    // 作业走的是哪条路：HTML 与 JSON 回退的口径不同（状态词、时间格式都不一样），
+    // 如果同一门课在两轮之间换过路，值就会跳 —— 这是"反复更新"的另一个可能来源。
+    if (htmlPathCourses > 0 || jsonFallbackCourses > 0) {
+      adapterDetails.push(`作业抓取路径：HTML ${htmlPathCourses} 门${jsonFallbackCourses > 0 ? ` / JSON 回退 ${jsonFallbackCourses} 门` : ''}`);
+    }
     if (examNoLink > 0) {
       adapterDetails.push(`有 ${examNoLink} 场考试没有 examId（靠标题指纹入库，可正常显示）`);
+    }
+    // 翻了详情页却没拿到开考时间 —— 说明详情页结构变了（或需要额外参数）。
+    // 退化行为是"只显示结束时间"，用户能看出差别（考试时间没变），所以只进日志。
+    if (examDetailFetches > 0 && examStartFilled === 0) {
+      adapterDetails.push(`翻了 ${examDetailFetches} 个考试详情页，都没取到开考时间（页面结构可能变了）`);
     }
     // 拿不到时间时，把考试页的**标签骨架**放进日志（details）：
     // 文字已被替换成 …，能看出 <li> 里有没有 href / examId，又不带出任何内容。
@@ -783,6 +851,46 @@ export class ChaoxingAdapter implements PlatformAdapter {
       if (/<li\b/i.test(text)) return { html: text, variant: v.name };
     }
     return { html: last, variant: 'empty' };
+  }
+
+  /**
+   * 取一场考试的**开考时间**（详情页才有）。
+   *
+   * 为什么必须进详情页：考试列表页的 `goTest(...)` 只带结束时间，
+   * 页面上也只显示"未开始"，**没有任何地方写着几点开考**。
+   * 而用户真正需要的是开考时刻（10:00 到考场），不是结束时刻（11:40）。
+   *
+   * 详情页（2026-11-01 HAR 实证）：
+   *   `<p>开始时间：<span class="din font15">2026-11-02 10:00</span></p>`
+   *   `<p>结束时间：<span class="din font15">2026-11-02 11:40</span></p>`
+   *
+   * 失败一律返回空对象，**绝不抛错**：时间是附加信息，拿不到也不该丢整场考试。
+   */
+  async #examDetailTimes(
+    http: SessionHttpClient,
+    course: { courseId: string; classId: string; cpi?: string },
+    examId: string,
+  ): Promise<{ start?: string; end?: string }> {
+    const p = new URLSearchParams({
+      courseId: course.courseId,
+      classId: course.classId,
+      examId,
+    });
+    if (course.cpi) p.set('cpi', course.cpi);
+    const res = await http.request({
+      url: `https://mooc1.chaoxing.com/exam-ans/exam/test/examcode/examnotes?${p.toString()}`,
+      method: 'GET',
+      headers: { Referer: 'https://mooc1.chaoxing.com/' },
+    });
+    const html = await res.text();
+    if (looksLikeAuthWall(html)) return {};
+    const pick = (label: string) => {
+      const m = new RegExp(`${label}[：:]\\s*(?:<[^>]+>\\s*)*(\\d{4}-\\d{1,2}-\\d{1,2}\\s+\\d{1,2}:\\d{2})`).exec(html);
+      return m?.[1];
+    };
+    const start = pick('开始时间');
+    const end = pick('结束时间');
+    return { ...(start ? { start } : {}), ...(end ? { end } : {}) };
   }
 
   async #fetchPerCourse(
@@ -928,6 +1036,8 @@ export interface ParsedWorkItem {
   status: TaskStatus;
   /** 平台原话（命中的状态词），只用于展示 */
   statusText?: string;
+  /** 诊断用：这一行里出现的所有绝对日期（不含则视为"没有日期"） */
+  debugDates?: string[];
   /** ISO 时间或原始字符串，交给 deadline 归一化处理 */
   deadline?: string;
   /**
@@ -1049,6 +1159,26 @@ function statusOfBlock(block: string): { status: TaskStatus; text?: string } {
  * 格式要放宽：超星的考试页用 `2026.11.08`、`2026年11月8日` 都很常见，
  * 只认 `-` 和 `/` 会让考试全部落进「截止未知」。
  */
+/**
+ * 行内**所有**绝对日期（按出现顺序，去重）。
+ *
+ * 只用于诊断：`latestDateIn` 只能告诉我们"取了哪个"，看不到"还有哪些"。
+ * 而"上机实验反复显示更新"的关键问题正是——**这一行里到底有几个日期**。
+ * 如果每轮解析出的候选集合不同，说明页面渲染不稳定；如果候选相同而结果不同，
+ * 才是我们自己的取值逻辑有问题。两者的修法完全相反，所以必须先分清。
+ */
+function allDatesIn(block: string): string[] {
+  const re = /(\d{4})\s*[-/.年]\s*(\d{1,2})\s*[-/.月]\s*(\d{1,2})\s*日?(?:[ T]*(\d{1,2}):(\d{2}))?/g;
+  const out: string[] = [];
+  for (const m of block.matchAll(re)) {
+    const [, y, mo, d, hh, mm] = m;
+    const date = `${y}-${(mo ?? '1').padStart(2, '0')}-${(d ?? '1').padStart(2, '0')}`;
+    const text = hh ? `${date} ${hh.padStart(2, '0')}:${mm ?? '00'}` : date;
+    if (!out.includes(text)) out.push(text);
+  }
+  return out;
+}
+
 function latestDateIn(block: string): string | undefined {
   const re = /(\d{4})\s*[-/.年]\s*(\d{1,2})\s*[-/.月]\s*(\d{1,2})\s*日?(?:[ T]*(\d{1,2}):(\d{2}))?/g;
   let best: string | undefined;
@@ -1205,6 +1335,7 @@ export function parseTaskListHtml(html: string, now: Date, kind: 'homework' | 'e
     const { status, text: statusText } = statusOfBlock(block);
 
     // 绝对时间优先（已布置截止时间的条目），否则用相对倒计时推算
+    const dates = allDatesIn(block);
     let deadline: string | undefined = latestDateIn(block);
     if (!deadline) {
       const rest = /剩余\s*(?:(\d+)\s*天)?\s*(?:(\d+)\s*小时)?\s*(?:(\d+)\s*分钟)?/.exec(block);
@@ -1241,6 +1372,7 @@ export function parseTaskListHtml(html: string, now: Date, kind: 'homework' | 'e
       title: cleanTitle,
       status,
       ...(statusText ? { statusText } : {}),
+      ...(dates.length > 0 ? { debugDates: dates } : {}),
       deadline,
       ...(sourceUrl ? { sourceUrl } : {}),
     });

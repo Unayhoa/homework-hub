@@ -93,6 +93,7 @@ export function materializeTask(input: {
     // 锚点只对相对型截止时间有意义：把「还剩 3 天」钉死在首次观测的时刻上。
     // 绝对型截止时间自己就是准的，不需要也不应该记锚点。
     deadlineAt: deadline.kind === 'relative' ? deadlineInstant(deadline, now)?.toISOString() : undefined,
+    ...(platformTask.startsAt ? { startsAt: platformTask.startsAt } : {}),
     publishedAt: published.kind === 'absolute' ? published.at : undefined,
     score: platformTask.score,
     totalScore: platformTask.totalScore,
