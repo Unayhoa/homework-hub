@@ -198,9 +198,9 @@ node apps/cli/src/main.ts attach chaoxing --port 9222
 
 ```bash
 npm install            # 只为拿 typescript
-npm run android:apk    # 生成前端资源 + 打 APK
-# 产物：release/homework-hub-1.0.0-debug.apk（约 860 KB）
-adb install -r release/homework-hub-1.0.0-debug.apk
+npm run android:apk:user   # 生成前端资源 + 打面向用户的 APK
+# 产物：release/homework-hub-1.0.0-user-debug.apk（约 860 KB）
+adb install -r release/homework-hub-1.0.0-user-debug.apk
 ```
 
 也可以用 Android Studio 打开 `android/` 目录直接 Run。
@@ -294,7 +294,7 @@ node apps/cli/src/main.ts platforms
 node apps/web/src/server.ts
 
 # 打 Android APK（需要 JDK 17 + Android SDK）
-npm run android:apk
+npm run android:apk:user
 ```
 
 Windows 下如果中文输出乱码，用辅助脚本（会处理 UTF-8 与控制台编码）：
@@ -421,7 +421,7 @@ HH_LOG=debug HH_TRACE=1 node apps/cli/src/main.ts sync --dry-run
 1. 修改 `android/app/build.gradle.kts` 与 `package.json` 的版本号；
 2. `npm test && npm run demo && npx tsc --noEmit`；
 3. `npm run android:sync && cd android && gradle assembleDebug`；
-4. 把 APK 放到 GitHub Releases（`release/` 默认不提交到仓库）；
+4. 把 APK 放到 GitHub Releases（`release/` 默认不提交到仓库；发布用 `-user-debug.apk`）；
 5. `git tag -a v<version> -m "HomeworkHub <version>" && git push --tags`。
 
 ---

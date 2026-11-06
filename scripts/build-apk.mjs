@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+﻿#!/usr/bin/env node
 /**
  * 一条命令构建 APK：生成前端资源 → 调 Gradle 打包 → 报告产物。
  *
@@ -39,8 +39,8 @@ function run(cmd, args, cwd) {
  * `--user-build`：产出面向用户的包（隐藏「添加自定义平台」入口）。
  *
  * **必须透传给 build-android.mjs**：这个脚本自己会重跑一遍资源构建，
- * 不传就等于"要用户版、却打包出自用版"。2026-11-02 踩过 ——
- * 两个 APK 的 md5 完全一致，而日志里还写着"用户版：已隐藏自定义平台"，
+ * 不传就等于"要发布包、却打出了默认构建"。2026-11-02 踩过 ——
+ * 两个 APK 的 md5 完全一致，而日志里还写着"发布构建：已隐藏自定义平台"，
  * 因为那行是**前一次**独立调用的输出。产物的真相只能看字节。
  */
 const USER_BUILD = process.argv.includes('--user-build');
@@ -100,3 +100,4 @@ log(`\n✓ APK 已生成：${APK}（${sizeMb} MB）`);
 log('\n安装到手机（USB 调试打开后）：');
 log(`  adb install -r "${APK}"`);
 log('或直接把 APK 拷进手机点击安装（需允许「安装未知来源应用」）。');
+

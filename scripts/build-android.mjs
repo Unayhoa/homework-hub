@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+﻿#!/usr/bin/env node
 /**
  * Android 前端资源构建：编译产物后处理 + 资源拷贝 + 安全校验。
  *
@@ -45,7 +45,7 @@ const VERIFY_ONLY = process.argv.includes('--verify-only');
  * `--user-build`：产出**面向用户**的包。
  *
  * 唯一区别是隐藏「＋ 添加自定义平台」入口（见 app.js 里那段注释）。
- * 一套代码两个包，差异只有这一个开关 —— 而不是分叉出两份 UI：
+ * 一套代码两个构建目标，差异只有这一个开关 —— 而不是分叉出两份 UI：
  * 分叉之后两边会各自漂移，最后没有一份是可信的（本项目在"两份清单"上栽过多次）。
  */
 const USER_BUILD = process.argv.includes('--user-build');
@@ -240,7 +240,7 @@ await writeFile(join(OUT, 'index.html'), androidHtml, 'utf8');
 
 const total = await dirSize(OUT);
 log(`  前端资源：${relative(ROOT, OUT)}（${(total / 1024).toFixed(0)} KB）`);
-log(`  index.html 已指向 /hh/apps/android/www/main.js${USER_BUILD ? '（用户版：已隐藏自定义平台）' : ''}`);
+log(`  index.html 已指向 /hh/apps/android/www/main.js${USER_BUILD ? '（发布构建：已隐藏自定义平台）' : ''}`);
 log('\n完成。接下来在 Android Studio 里打开 android/ 目录，或命令行：');
 log('  cd android && gradle assembleDebug');
 
@@ -269,3 +269,4 @@ async function dirSize(dir) {
 function escapeRe(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
+
