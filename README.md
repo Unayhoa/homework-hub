@@ -407,6 +407,7 @@ HH_LOG=debug HH_TRACE=1 node apps/cli/src/main.ts sync --dry-run
 - 不要提交包含 Cookie / Token / 学号 / 姓名 / 手机号的 HAR 原文；需要时先脱敏。
 - 平台接口全部来自真机抓包。改动解析器时，请附上对应的真实响应片段（脱敏后）或样本包。
 - 提交前至少跑：`npx tsc --noEmit`、`npm test`、`npm run demo`。
+- 更深入的设计红线与踩坑记录见 [`HANDOVER.md`](./HANDOVER.md)，通用排障思路见 [`LESSONS.md`](./LESSONS.md)。
 
 ## License
 
