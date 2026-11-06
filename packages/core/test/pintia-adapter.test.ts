@@ -17,7 +17,7 @@ import { PintiaAdapter } from '../../adapters/pintia/src/index.ts';
 import { createSilentLogger } from '../src/ports/logger.ts';
 import { systemClock, TokenBucket, UnavailableSigner } from '../src/index.ts';
 import { hasPendingAc } from '../src/domain/task.ts';
-import { materializeTask } from '../src/engine/merge.ts';
+import { materializeTask, mergeTasks } from '../src/engine/merge.ts';
 import type { HttpClient, HttpRequest, HttpResponse } from '../src/ports/http.ts';
 import type { AdapterContext, FetchTasksRequest } from '../src/ports/adapter.ts';
 import type { Session } from '../src/ports/vault.ts';
@@ -292,5 +292,62 @@ describe('PTA 适配器：请求头（错了会静默拿到 protobuf）', () => 
       const accept = h.Accept ?? h.accept ?? '';
       assert.match(accept, /application\/json/, `请求缺少 JSON 格式协商：${JSON.stringify(Object.keys(h))}`);
     }
+  });
+});
+
+/**
+ * 2026-11-02 真机事故的回归。
+ *
+ * 用户看到「25级数据结构上机实验（第3次）」的卡片写着 4/4 已交，点进去却是第 2 次；
+ * 下一次同步又反过来。真机数据里这几条题目集一直并存（第1次 / 第2次 / 选做题），
+ * 但标题归一化把它们判成同一个指纹，merge 于是把它们融成**一条**记录 ——
+ * 标题、进度、跳转地址分别来自不同轮次。
+ *
+ * 这类错乱最坏的地方是：界面上每个字段都"看着正常"，用户无法归因。
+ */
+describe('PTA 适配器：多个「第N次上机实验」必须各自独立', () => {
+  const NOW = new Date('2026-10-22T00:00:00Z');
+
+  it('上一轮只看到一条、这一轮三条都回来：不能互相认领', async () => {
+    const adapter = new PintiaAdapter();
+    const ctx = makeCtx({ '/api/exams/': statusBody(ALL_AC), '/api/problem-sets': LIST_BODY });
+    const page = await adapter.fetchTasks(ctx, session, req);
+
+    const unified = page.items.map((t) =>
+      materializeTask({ platformId: 'pintia', accountId: 'pintia::u', platformTask: t, now: NOW }),
+    );
+    assert.equal(new Set(unified.map((u) => u.id)).size, 3, '主键不能重复');
+
+    // 复现真机的关键一步：**上一轮库里只有「第1次」**（首次同步、翻页、上游抖动都会这样）。
+    // 下一轮三条都回来时，旧逻辑会让「第2次」靠指纹认领「第1次」那条记录 ——
+    // 于是「第1次」被改名成「第2次」，进度和跳转地址也一起换了主人。
+    const firstRound = mergeTasks([], [unified[2]!]);
+    assert.equal(firstRound.created, 1);
+
+    const secondRound = mergeTasks(firstRound.writes, unified);
+    assert.equal(secondRound.created, 2, '第2次与选做题应各自新建');
+    assert.equal(secondRound.updated, 0, '第1次不该被改名成第2次');
+
+    const after = [...firstRound.writes, ...secondRound.writes];
+    const byId = (id: string) => after.find((t) => t.platformTaskId === id);
+    assert.equal(byId('2112830611630542848')?.title, '25级数据结构上机实验（第2次）');
+    assert.equal(byId('2109129330082820096')?.title, '25级数据结构上机实验（第1次）');
+    // 跳转地址也必须指回自己那一条
+    assert.match(byId('2112830611630542848')?.sourceUrl ?? '', /2112830611630542848/);
+    assert.match(byId('2109129330082820096')?.sourceUrl ?? '', /2109129330082820096/);
+  });
+
+  it('排查信息里有每条的主键与 examId —— 没有它就只能靠猜', async () => {
+    const adapter = new PintiaAdapter();
+    const ctx = makeCtx({ '/api/problem-sets': LIST_BODY });
+    const page = await adapter.fetchTasks(ctx, session, req);
+
+    const log = (page.details ?? []).join('\n');
+    assert.ok(log.length > 0, 'PTA 以前一条排查信息都不给，出问题时无从下手');
+    assert.match(log, /题目集 3 个/);
+    assert.match(log, /id=2112830611630542848/);
+    assert.match(log, /id=2109129330082820096/);
+    assert.match(log, /examId=2110298075464994816/, '有 examId 的要报出来');
+    assert.match(log, /examId=无/, '没 examId 的也要报出来（它的进度只能靠总题数）');
   });
 });

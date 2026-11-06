@@ -1,14 +1,34 @@
 # HomeworkHub · 课业中枢
 
-跨平台汇总自己的作业、考试信息 —— 学习通、雨课堂（含长江雨课堂）、iSmart……
+跨平台汇总自己的作业、考试信息 —— 学习通 / 雨课堂（含长江雨课堂）/ iSmart / PTA 拼题A。
 
-现在的状态：**核心引擎已完成并通过验证，平台适配器待用真实账号校准。**
+**当前版本：1.0.0（首个开源版本）**
 
 ```
 $ node apps/cli/src/main.ts demo
 ...
-全部通过：57 通过 / 0 失败
+全部通过：83 通过 / 0 失败
+
+$ npm test
+...
+tests 566 / pass 566 / fail 0
 ```
+
+## 功能与验证状态
+
+这个项目的平台接口来自真机抓包，不是平台官方 API；平台改版就可能失效。**有设计 ≠ 已验证**，下面按真实数据验证程度区分：
+
+| 能力 | 状态 | 说明 |
+| --- | --- | --- |
+| 账号登录与保活 | ✅ 长期使用 | 应用内登录 + 会话保活；不接触明文密码 |
+| 作业待办抓取 | ✅ 长期使用 | 学习通 / 雨课堂 / iSmart / PTA |
+| 超星任务点抓取 | ✅ 长期使用 | 课程级 X/Y 与「现在可做 N 个」 |
+| 按课程自定义筛选 | ✅ 长期使用 | 勾选参与同步，取消后保留历史记录 |
+| 即将截止的提醒与通知 | ✅ 长期使用 | 三档提醒密度 + 每日汇总 |
+| **任务点提醒（排期）** | ⚠️ 未经过真实数据验证 | 数据抓取已验证，但「提前量 / 工作量估算」还没有真实到期数据检验，可能偏早/偏晚 |
+| **考试待办抓取（尤其超星）** | ⚠️ 高风险区域 | 历史上出现过考试列表/时间解析问题；数据不对先看同步日志 |
+
+如果你只依赖某个未验证的能力做决定，请先核对平台原始页面。
 
 ---
 
@@ -179,8 +199,8 @@ node apps/cli/src/main.ts attach chaoxing --port 9222
 ```bash
 npm install            # 只为拿 typescript
 npm run android:apk    # 生成前端资源 + 打 APK
-# 产物：release/homework-hub-0.1.0-debug.apk（约 550 KB）
-adb install -r release/homework-hub-0.1.0-debug.apk
+# 产物：release/homework-hub-1.0.0-debug.apk（约 860 KB）
+adb install -r release/homework-hub-1.0.0-debug.apk
 ```
 
 也可以用 Android Studio 打开 `android/` 目录直接 Run。
@@ -264,7 +284,7 @@ cd homework-hub
 # 复现改版、限流、会话失效、任务增删改，逐条断言引擎的处理是否正确
 node apps/cli/src/main.ts demo
 
-# 单元测试（85 项：核心引擎 69 + 浏览器端 16）
+# 单元测试（566 项）
 npm test
 
 # 查看支持的平台与能力矩阵
@@ -378,6 +398,30 @@ HH_LOG=debug HH_TRACE=1 node apps/cli/src/main.ts sync --dry-run
 绕过考试的功能，也不会读取或存储明文密码（只保存平台下发的会话凭证，且加密落盘）。
 
 请遵守所在学校的学术规范与平台用户协议。作者不对任何滥用后果负责。
+
+---
+
+## 参与贡献
+
+- 提交 issue 时请说明：平台、页面版本/时间、期望行为、实际行为，以及（如可能）同步日志片段。
+- 不要提交包含 Cookie / Token / 学号 / 姓名 / 手机号的 HAR 原文；需要时先脱敏。
+- 平台接口全部来自真机抓包。改动解析器时，请附上对应的真实响应片段（脱敏后）或样本包。
+- 提交前至少跑：`npx tsc --noEmit`、`npm test`、`npm run demo`。
+
+## License
+
+[MIT](./LICENSE) © 2026 HomeworkHub contributors
+
+本项目只读取作业与考试信息，不包含提交答案、自动签到、刷课、绕过考试等功能；
+请遵守所在学校的学术规范与平台用户协议。
+
+## 发布清单（开源维护者）
+
+1. 修改 `android/app/build.gradle.kts` 与 `package.json` 的版本号；
+2. `npm test && npm run demo && npx tsc --noEmit`；
+3. `npm run android:sync && cd android && gradle assembleDebug`；
+4. 把 APK 放到 GitHub Releases（`release/` 默认不提交到仓库）；
+5. `git tag -a v<version> -m "HomeworkHub <version>" && git push --tags`。
 
 ---
 

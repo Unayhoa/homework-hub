@@ -231,6 +231,10 @@ export class PintiaAdapter implements PlatformAdapter {
     const sets = (data.problemSets ?? []).filter((ps) => ps.id && ps.name);
     const http = new SessionHttpClient(ctx, session);
     const failures: string[] = [];
+    /** 逐条取证：题目集 ID / examId / 进度来源。排查"点进去是另一个作业"必须靠它 */
+    const perSet = new Map<string, string>();
+    let withExam = 0;
+    let withoutExam = 0;
 
     // 每条题目集最多两次请求：
     //   有 examId → problem-status（每题状态）
@@ -242,20 +246,45 @@ export class PintiaAdapter implements PlatformAdapter {
     // （"这周要做 4 题"），它不需要 examId 就能拿到。
     const items = await mapLimit(sets, 3, async (ps) => {
       const examId = data.examIdByProblemSetId?.[ps.id];
+      if (examId) withExam += 1;
+      else withoutExam += 1;
       let statuses: ProblemStatusResponse['problemStatus'];
       if (examId) {
         statuses = await this.#fetchProblemStatus(http, examId, ps.id, failures);
       }
       // 线程安全的说法：没有每题状态（没开考 / 取不到）时补一次总题数
       const total = statuses?.length ? 0 : await this.#fetchProblemTotal(http, ps.id, failures);
-      return this.#toTask(ps, data, statuses, total);
+      const item = this.#toTask(ps, data, statuses, total);
+      // 这一行是给"进度/跳转串了"那类故障留的证据：标题、主键、examId 必须一一对应。
+      // 真机（2026-11-02）出现过「第3次」的卡片点进去是第2次，而没有这份对照
+      // 就只能靠猜 —— 猜一次就是一次返工。
+      const prog = item.progress ? `${item.progress.submitted}/${item.progress.total}` : '无进度';
+      perSet.set(
+        ps.id,
+        `${ps.name}｜id=${ps.id}｜examId=${examId ?? '无'}｜进度=${prog}（${statuses?.length ? '逐题' : '总题数'}）`,
+      );
+      return item;
     });
+
+    const details: string[] = [];
+    if (sets.length > 0) {
+      details.push(
+        `题目集 ${sets.length} 个 · 有 examId ${withExam} 个（能取逐题状态）· 无 examId ${withoutExam} 个（只取得到总题数）`,
+      );
+      // 只列前 6 条：再多就不是诊断而是倾倒，而"串记录"这类故障通常一眼就能看出来。
+      for (const ps of sets.slice(0, 6)) {
+        const line = perSet.get(ps.id);
+        if (line) details.push(line);
+      }
+      if (sets.length > 6) details.push(`…另有 ${sets.length - 6} 个题目集未列出`);
+    }
 
     return {
       items,
       hasMore: false,
       declaredTotal: typeof data.total === 'number' ? data.total : sets.length,
       notes: this.#buildNotes(sets, data, failures),
+      ...(details.length > 0 ? { details } : {}),
     };
   }
 

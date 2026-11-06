@@ -25,18 +25,22 @@ import type {
   AdapterCapabilities,
   AdapterContext,
   AuthMethod,
+  CourseProgressItem,
+  FetchCourseProgressRequest,
   FetchCoursesRequest,
   FetchTasksRequest,
   Page,
   PlatformAdapter,
 } from '#core/ports/adapter.ts';
-import type { PlatformCourse } from '#core/domain/course.ts';
+import type { PlatformCourse, TaskPointWindow, UnifiedCourse } from '#core/domain/course.ts';
+import { normalizeDeadline } from '#core/domain/deadline.ts';
 import type { PlatformTask, TaskKind, TaskStatus } from '#core/domain/task.ts';
 import type { Credentials, Session } from '#core/ports/vault.ts';
 import type { ReadOnlyPolicy } from '#core/ports/read-only.ts';
 import { HubError, schemaDrift } from '#core/domain/errors.ts';
 import { normalizeTitle } from '#core/domain/ids.ts';
 import { SessionHttpClient } from '#core/engine/session-http.ts';
+import { mapLimit } from '#core/engine/http-pipeline.ts';
 import {
   firstGroup,
   looksLikeAuthWall,
@@ -59,9 +63,17 @@ export interface ChaoxingEndpointMap {
   /** 账号密码登录。返回 JSON，而非重定向。 */
   login: string;
   /**
-   * 课程列表（JSON）。社区多方验证的主路径：
-   * 返回 channelList[]，每个课程频道的 content.course.data[0] 带
-   * name 与 courseSquareUrl（内含 courseId/classId），频道上有 cpi。
+   * 课程任务点页（课程目录）。**返回 HTML**，课程级统计在页面头部：
+   *   `<h2 class="xs_head_name">已完成任务点: <span>0</span>/2`
+   *
+   * 需要 `stuenc`（= 课程页地址里的 enc），与考试列表同源；不带它页面可能是空的。
+   * 2026-11-02 HAR 实证。
+   */
+  courseCatalog: string;
+  /**
+   * 课程列表（JSON）。社区多方验证的主路径：返回 channelList[]，
+   * 每个课程频道的 content.course.data[0] 带 name 与 courseSquareUrl
+   * （内含 courseId/classId），频道上有 cpi。
    */
   courseData: string;
   /** 课程列表（HTML 备用）。courseData 失败时回退到旧版页面解析。 */
@@ -107,6 +119,8 @@ const EXAM_TIME_LIMIT = 8;
 
 export const ChaoxingEndpoints: ChaoxingEndpointMap = {
   login: 'https://passport2.chaoxing.com/fanyalogin',
+  // 课程目录页（任务点统计）。HAR 实证 2026-11-02：mooc2-ans 域，必须带 stuenc
+  courseCatalog: 'https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/studentcourse',
   courseData: 'https://mooc1-api.chaoxing.com/mycourse/backclazzdata?view=json&rss=1',
   courseList: 'https://mooc1-2.chaoxing.com/visit/interaction',
   workTaskList: 'https://mooc1-api.chaoxing.com/work/task-list',
@@ -133,6 +147,8 @@ interface CourseRef {
    * 拿不到时退化为不传（见 #fetchExamListHtml 的多变体尝试）。
    */
   enc?: string;
+  /** 课程卡片上的完整链接（可能带 enc/t）。点击跳转时优先用它。 */
+  squareUrl?: string;
   name: string;
   teacher?: string;
 }
@@ -142,6 +158,11 @@ export class ChaoxingAdapter implements PlatformAdapter {
   readonly displayName = '超星学习通';
   readonly homepage = 'https://i.chaoxing.com';
   readonly #ep: typeof ChaoxingEndpoints;
+  /**
+   * 最近一次「点击时解析链接」的失败定位轨迹。
+   * 只进日志 / 界面的诊断提示，不参与业务判断；一次解析最多十几条。
+   */
+  #resolveTrace: string[] = [];
 
   readonly capabilities: AdapterCapabilities = {
     courses: true,
@@ -193,6 +214,7 @@ export class ChaoxingAdapter implements PlatformAdapter {
       { pattern: /fanyalogin/, why: '账号密码登录' },
       { pattern: /mooc-ans\/work\/getAllWork/, why: '查询作业列表（只读）' },
       { pattern: /mooc-ans\/exam\/test\/getAllExam/, why: '查询考试列表（只读）' },
+      { pattern: /visit\/courselistdata/, why: '查询课程列表（只读，POST 只为传参数）' },
     ],
   };
 
@@ -341,7 +363,7 @@ export class ChaoxingAdapter implements PlatformAdapter {
         teacher: r.teacher,
         // classId / cpi 不放进 PlatformCourse（不是课程标识），
         // 但作业接口需要它们 —— 塞进 raw 里随课程一起缓存，避免请求翻倍。
-        raw: { classId: r.classId, cpi: r.cpi, enc: r.enc },
+        raw: { classId: r.classId, cpi: r.cpi, enc: r.enc, squareUrl: r.squareUrl },
       })),
       hasMore: false,
       declaredTotal: refs.length,
@@ -377,7 +399,7 @@ export class ChaoxingAdapter implements PlatformAdapter {
     for (const block of blocks.length > 0 ? blocks : [html]) {
       const links = matchAll(
         block,
-        /<a[^>]+href=["']([^"']*(?:studentstudy|visit\/interaction)[^"']*)["'][^>]*>([\s\S]{0,300}?)<\/a>/gi,
+        /<a[^>]+href=["']([^"']*(?:studentstudy|stucoursemiddle|visit\/interaction)[^"']*)["'][^>]*>([\s\S]{0,300}?)<\/a>/gi,
       );
       for (const m of links) {
         const href = m[1] ?? '';
@@ -397,6 +419,7 @@ export class ChaoxingAdapter implements PlatformAdapter {
         out.push({
           platformCourseId: courseId,
           classId: classId ?? '',
+          ...(href ? { squareUrl: /^https?:\/\//i.test(href) ? href : new URL(href, 'https://mooc2-ans.chaoxing.com').toString() } : {}),
           name: stripTags(name),
           teacher: firstGroup(block, /(?:教师|老师)[：:]\s*([^<\s]{1,20})/),
         });
@@ -461,6 +484,8 @@ export class ChaoxingAdapter implements PlatformAdapter {
     /** 为取开考时间翻了多少个详情页 / 其中成功拿到的条数 */
     let examDetailFetches = 0;
     let examStartFilled = 0;
+    /** 已结束、却始终没有开考时间的考试数（决定了已完成里显示"开考"还是"截止"） */
+    let examStartMissing = 0;
     /** 第一份**解析出了考试**的页面 HTML（诊断用） */
     let firstExamHtml = '';
     /** 第一份**没解析出考试**的页面 HTML（只在全都没结果时才需要） */
@@ -470,9 +495,10 @@ export class ChaoxingAdapter implements PlatformAdapter {
     /** 作业这一轮走的是哪条路（html / json 回退），以及各走了几门课 */
     let htmlPathCourses = 0;
     let jsonFallbackCourses = 0;
-    /** 诊断输出上限：这两类信息只列前几条，避免日志被几百条作业冲垮 */
+    /** 诊断输出上限：「多日期」只列前几条，避免日志被几百条作业冲垮 */
     let dateDebugCount = 0;
-    let relativeDebugCount = 0;
+    /** 只有「剩余X小时」、没有绝对日期的作业条数（只计数，见下方的取舍说明） */
+    let relativeOnly = 0;
     const now = ctx.clock.now();
     /** 引擎判定为「静默」的课程（全部终态 + 长期无变化）—— 可跳过考试探测 */
     const quietCourseIds = new Set(req.quietCourseIds ?? []);
@@ -511,17 +537,18 @@ export class ChaoxingAdapter implements PlatformAdapter {
         //   · 行内**有多个日期** → 我们每次取的可能是不同那个（发布/开始 vs 截止）
         //   · 行内**没有日期**、只有"剩余X小时" → 每轮按当前时间推算，值必然不同
         // 前者要改取值规则，后者要改成"锚定首次推算值"。先看日志再动。
+        //
+        // 2026-11-02 起「相对推算」只计数不逐条列：那几行里唯一会变的就是时间戳本身，
+        // 每轮必然不同 —— 它证明不了任何新东西，只是把别的信息挤出屏幕。
+        // 「多日期」仍然逐条列（最多 5 条）：它还需要人看具体取的是哪一个。
         for (const w of rawParsed) {
           if (w.debugDates && w.debugDates.length > 1 && dateDebugCount < 5) {
             dateDebugCount += 1;
             adapterDetails.push(
               `多日期：${w.title} → 取 ${w.deadline ?? '无'}（候选 ${w.debugDates.join(' / ')}）`,
             );
-          } else if ((!w.debugDates || w.debugDates.length === 0) && w.deadline && relativeDebugCount < 3) {
-            relativeDebugCount += 1;
-            adapterDetails.push(
-              `相对推算：${w.title} → ${w.deadline}（页面只有"剩余X小时"，每轮按当前时间算，值必然不同）`,
-            );
+          } else if (!w.debugDates || w.debugDates.length === 0) {
+            if (w.deadline) relativeOnly += 1;
           }
         }
 
@@ -539,9 +566,13 @@ export class ChaoxingAdapter implements PlatformAdapter {
           // 但那条路径**每次都可能带一个服务端签发的 enc**，自己拼是打不开的。
           //
           // 2026-11-01：我一时想改成"从列表页 href 原样搬"，那是**已经被否掉的方案** ——
-          // 更晚的结论写在 chaoxingWorkUrl 上方：href 里的 enc 是短命参数，
+          // 更晚的结论写在 chaoxingCourseUrl 上方：href 里的 enc 是短命参数，
           // 同步时抓到、过一会儿再点就回「信息提示 · 无权限」。所以这里不能用 w.sourceUrl。
-          sourceUrl: chaoxingWorkUrl(course, w.platformTaskId),
+          //
+          // v0.2.46：不再退到 `i.chaoxing.com`（那在手机上会落到账号/门户页，等于没跳）。
+          // 改为**这门课的课程页**：比首页近一层，且用的是课程级 enc（任务点抓取一直在用，
+          // 不是作业级那种短命 enc）。
+          sourceUrl: chaoxingCourseUrl(course),
           raw: { source: 'task-list', title: w.title },
         }));
       } catch (e) {
@@ -594,11 +625,22 @@ export class ChaoxingAdapter implements PlatformAdapter {
           dupConflicts += deduped.conflicts;
 
           const examItems: PlatformTask[] = [];
-          for (const w of deduped.items) {
-            // 开考时间只在详情页里。只为"还没结束"的考试去翻（已考完的没必要），
-            // 且整轮有上限，避免一场考试列表把请求量翻倍。
-            let startsAt: string | undefined;
-            if (w.status === 'pending' && w.platformTaskId && examDetailFetches < EXAM_TIME_LIMIT) {
+          // 库里已经知道的开考时间（engine 传下来）。抓到过的不再抓：
+          // 详情页一个考试一个请求，每轮重抓同一场考完的试是纯浪费。
+          const knownStarts = req.knownStartsAt ?? {};
+          // 先待考/进行中、后已结束：详情页预算用完时，宁可漏掉历史补全，
+          // 也不能让"下周就要考"的那场拿不到开考时间。
+          const examOrder = [...deduped.items].sort(
+            (a, b) => Number(b.status === 'pending') - Number(a.status === 'pending'),
+          );
+          for (const w of examOrder) {
+            // 开考时间只在详情页里。
+            //  - 待考/进行中：要用来显示「几点开考」和倒计时
+            //  - 已结束：要用来让已完成列表显示「10:00 开考」而不是「11:40 截止」
+            //    （真机 2026-11-02：期中考试在已完成栏里被显示成"截止 11:40"）
+            let startsAt: string | undefined = w.platformTaskId ? knownStarts[w.platformTaskId] : undefined;
+            const wantsStart = w.status === 'pending' || w.status === 'expired';
+            if (!startsAt && wantsStart && w.platformTaskId && examDetailFetches < EXAM_TIME_LIMIT) {
               examDetailFetches += 1;
               try {
                 const times = await this.#examDetailTimes(http, course, w.platformTaskId);
@@ -609,6 +651,9 @@ export class ChaoxingAdapter implements PlatformAdapter {
                 // 拿不到就只显示结束时间（退化为改动前的样子），不影响这条考试
               }
             }
+            // 已结束却始终拿不到开考时间 → 界面会把结束时间当截止时间显示。
+            // 用户看不出这是"我们没取到"还是"平台就这么写的"，所以要能统计出来。
+            if (!startsAt && w.status === 'expired') examStartMissing += 1;
             if (!w.platformTaskId) examNoLink += 1; // 没有 examId → 这条考试再也定位不到
             examItems.push({
               platformTaskId: w.platformTaskId,
@@ -721,6 +766,13 @@ export class ChaoxingAdapter implements PlatformAdapter {
     if (htmlPathCourses > 0 || jsonFallbackCourses > 0) {
       adapterDetails.push(`作业抓取路径：HTML ${htmlPathCourses} 门${jsonFallbackCourses > 0 ? ` / JSON 回退 ${jsonFallbackCourses} 门` : ''}`);
     }
+    // 页面只给"剩余X小时"的作业：它们的截止时间是我们按当前时刻推算的。
+    // 这说明**那一批**作业的日期本来就不是精确值 —— 判断"这条有没有被平台改期"时要扣掉这一层。
+    if (relativeOnly > 0) {
+      adapterDetails.push(
+        `${relativeOnly} 条作业只给了"剩余X小时"、没有绝对日期（截止时间按当轮时刻推算，变短是时间流逝，不是改期）`,
+      );
+    }
     if (examNoLink > 0) {
       adapterDetails.push(`有 ${examNoLink} 场考试没有 examId（靠标题指纹入库，可正常显示）`);
     }
@@ -728,6 +780,13 @@ export class ChaoxingAdapter implements PlatformAdapter {
     // 退化行为是"只显示结束时间"，用户能看出差别（考试时间没变），所以只进日志。
     if (examDetailFetches > 0 && examStartFilled === 0) {
       adapterDetails.push(`翻了 ${examDetailFetches} 个考试详情页，都没取到开考时间（页面结构可能变了）`);
+    }
+    // 已结束的考试补不到开考时间 → 界面上会显示「截止 <结束时间>」。
+    // 这种"看起来有值、其实是另一个含义"的退化必须留痕（本项目最忌讳的失败形态）。
+    if (examStartMissing > 0) {
+      adapterDetails.push(
+        `${examStartMissing} 场已结束的考试没有开考时间（详情页没返回），已完成里显示的是结束时间`,
+      );
     }
     // 拿不到时间时，把考试页的**标签骨架**放进日志（details）：
     // 文字已被替换成 …，能看出 <li> 里有没有 href / examId，又不带出任何内容。
@@ -742,9 +801,12 @@ export class ChaoxingAdapter implements PlatformAdapter {
       notes.push('这个平台的考试一条都没解析出来（可能页面结构变了）');
       const sampleHtml = emptyExamHtml || firstExamHtml;
       if (sampleHtml) adapterDetails.push(`考试页诊断（变体 ${examVariant || 'plain'}）：${examPageDiagnosis(sampleHtml)}`);
-    } else if (examVariant && examVariant !== 'plain' && firstExamHtml) {
-      // 靠 stuenc 变体才通 —— 记一笔，以后可以省掉第一次无效请求
-      adapterDetails.push(`考试列表需要带 stuenc 才能返回数据（${examPageDiagnosis(firstExamHtml)}）`);
+    } else if (examVariant && examVariant !== 'plain') {
+      // 靠 stuenc 变体才通 —— 只记一句结论。
+      // 以前这里会附上整段考试页骨架（`<li> N 个 · 样例：<li>…`），那是排查
+      // "考试一条都抓不到"时的取证；变体已经实现且稳定，留着就是每轮刷一遍长文本。
+      // 真要再看骨架，删掉 examId 或换账号就能复现「一条都没解析出来」那条分支。
+      adapterDetails.push('考试列表走 stuenc 变体才返回数据（不带它时页面是空的）');
     }
     if (examFailedCourses > 0) {
       notes.push(
@@ -954,6 +1016,169 @@ export class ChaoxingAdapter implements PlatformAdapter {
     } satisfies PlatformTask;
   }
 
+  // ---------------------------------------------------------------- 任务点
+
+  /**
+   * 抓「课程级任务点完成度」。
+   *
+   * ⚠️ 这是**可选能力**（`PlatformAdapter.fetchCourseProgress`），不在 syncAccount 里跑。
+   * 一门课一个请求、且任务是慢变量 —— 挂进每轮同步等于给 32 门课 +63% 请求量。
+   *
+   * 数据来源（2026-11-02 HAR 实证，不是猜的）：
+   *   `GET mooc2-ans.chaoxing.com/mooc2-ans/mycourse/studentcourse?courseid=&clazzid=&cpi=&ut=s&t=&stuenc=`
+   *   → 200 / text/html / 32KB，课程级统计在页面头部：
+   *     `<h2 class="xs_head_name"><i class="catalog_points_yi fl"></i>
+   *      已完成任务点: <span style="color:#00B368">0</span>/2`
+   *
+   * 同一页面里每章还有 `input.knowledgeJobCount`（该章任务点数）与
+   * `span.catalog_points_yi`（该章待完成数）—— 以后要做章节级展示不必再发请求。
+   *
+   * 两条必须记住的边界：
+   *   1. **要带 `stuenc`**（= 课程页地址里的 `enc`，已存在 `course.raw.enc`）。
+   *      和考试列表同源，2026-11-01 已经踩过「不带就返回空页」。
+   *   2. 这个页面**没有截止时间**（`截止` 全文 0 次），所以只能做统计，
+   *      做不了「临近截止提醒」—— 那需要另找数据源，别在这里硬凑。
+   */
+  async fetchCourseProgress(
+    ctx: AdapterContext,
+    session: Session,
+    courses: UnifiedCourse[],
+    req?: FetchCourseProgressRequest,
+  ): Promise<Page<CourseProgressItem>> {
+    const want = new Set(req?.courseIds ?? []);
+    const list = want.size > 0 ? courses.filter((c) => want.has(c.platformCourseId)) : courses;
+    const http = new SessionHttpClient(ctx, session);
+    const items: CourseProgressItem[] = [];
+    const failures: string[] = [];
+    /** 页面正常、但确实没有任务点的课程数 */
+    let noTaskPoint = 0;
+    /** 连课程目录骨架都没有 —— 拿到的不是这个页面（不回退、记为异常） */
+    let noSkeleton = 0;
+    let noEnc = 0;
+    /** 解析出章节开放窗口的课程数（解释"为什么进度不动") */
+    let withWindow = 0;
+    /** 第一份解析失败页面的文字摘要，只在真的失败时才输出 */
+    let sampleText = '';
+
+    // 并发 2：超星对突发请求敏感，而这是一次 30KB 整页 HTML × 32 门课。
+    // 这个能力本来就是低频的（用户打开任务点页才触发），不值得为速度冒风控的险。
+    await mapLimit(list, 2, async (c) => {
+      const raw = (c.raw ?? {}) as { classId?: string; cpi?: string; enc?: string };
+      if (!raw.classId) {
+        failures.push(`${c.name}：缺 classId（课程缓存可能过期，重新同步一次）`);
+        return;
+      }
+      const p = new URLSearchParams({
+        courseid: c.platformCourseId,
+        clazzid: raw.classId,
+        ut: 's',
+        t: String(ctx.clock.now().getTime()),
+      });
+      if (raw.cpi) p.set('cpi', raw.cpi);
+      if (raw.enc) p.set('stuenc', raw.enc);
+      else noEnc += 1;
+
+      try {
+        const res = await http.request({
+          url: `${this.#ep.courseCatalog}?${p.toString()}`,
+          method: 'GET',
+          // Referer 照 HAR 抄：浏览器是在课程主页的 iframe 里加载这个页面的。
+          // 这类"必须从 A 页跳过来"的校验用 cookie 测不出来，只能照真机拿到的值给。
+          headers: {
+            Referer: `https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/stu?courseid=${c.platformCourseId}&clazzid=${raw.classId}`,
+          },
+        });
+        // 非 2xx 一律算失败：SessionHttpClient 只对 401/403 抛错，其余状态码会原样返回，
+        // 而 404/500 的响应体往往是一段空 HTML —— 那会被下面误判成"这门课没有任务点"。
+        if (res.status >= 400) {
+          failures.push(`${c.name}：HTTP ${res.status}`);
+          return;
+        }
+        const html = await res.text();
+        if (looksLikeAuthWall(html)) {
+          failures.push(`${c.name}：返回登录页`);
+          return;
+        }
+        const parsed = parseTaskPointProgress(html, ctx.clock.now());
+        if (parsed) {
+          // 只挑"还没结束、最快关闭"的那个窗口。全部过期就不给 ——
+          // 那门课已经没有可做的事，留个日期只会让人以为还要赶。
+          const win = nearestUpcomingWindow(parsed.windows, ctx.clock.now());
+          // 再记一个"最近关闭"，让界面能说出"还差 N 个，但窗口已经关了"。
+          const closed = latestClosedWindow(parsed.windows, ctx.clock.now());
+          const nowMs = ctx.clock.now().getTime();
+          // 「现在能做」有两条来源：窗口正开着，**或者**有带待完成标记的章节。
+          // 只看前者会漏掉那些没设时间限制的章节（真机程设基础就是这么错的）。
+          const windowOpen = parsed.windows.some((w) => {
+            const o = new Date(w.opensAt).getTime();
+            const c2 = new Date(w.closesAt).getTime();
+            return Number.isFinite(o) && Number.isFinite(c2) && o <= nowMs && nowMs < c2;
+          });
+          const hasOpenNow = windowOpen || parsed.hasPendingChapter;
+          items.push({
+            platformCourseId: c.platformCourseId,
+            total: parsed.total,
+            done: parsed.done,
+            hasOpenNow,
+            ...(parsed.availableNow !== undefined ? { availableNow: parsed.availableNow } : {}),
+            ...(win ? { nextWindow: win } : {}),
+            ...(closed ? { lastClosedAt: closed.closesAt } : {}),
+          });
+          // 有开放窗口的课单独计数：它是"进度为什么不动"的解释
+          if (parsed.windows.length > 0) withWindow += 1;
+          return;
+        }
+        // 没有「已完成任务点」这句：要么这门课真没有任务点，要么页面改版了。
+        // 判据是**页面骨架**——有目录骨架说明页面拿对了，那就是"没有任务点"。
+        // 这条区分不能省：把解析失败当成 0/0，界面会显示"已全部完成"，
+        // 那是在撒谎，而且用户没有任何线索去怀疑。
+        if (/fanyaChapterWhite|chapter_head/.test(html)) {
+          noTaskPoint += 1;
+          items.push({ platformCourseId: c.platformCourseId, total: 0, done: 0 });
+        } else {
+          noSkeleton += 1;
+          if (!sampleText) sampleText = stripTags(html).replace(/\s+/g, ' ').trim().slice(0, 160);
+        }
+      } catch (e) {
+        failures.push(`${c.name}：${(e as Error).message.slice(0, 40)}`);
+      }
+    });
+
+    const details: string[] = [];
+    const withTaskPoint = items.filter((i) => i.total > 0).length;
+    if (list.length > 0) {
+      details.push(
+        `检查了 ${list.length} 门课：${withTaskPoint} 门有任务点 · ${noTaskPoint} 门没有 · ${failures.length} 门抓取失败`,
+      );
+    }
+    if (withWindow > 0) {
+      const next = items.find((i) => i.nextWindow)?.nextWindow;
+      details.push(
+        `${withWindow} 门课设了章节开放时间` +
+          (next ? `，最快关闭：${next.chapter || '（无章节名）'} → ${shortLocal(next.closesAt)}` : '，但都已关闭'),
+      );
+    }
+    if (noEnc > 0) {
+      details.push(`${noEnc} 门课没有 enc（没带 stuenc，页面可能是空的 —— 多半是课程缓存在旧版本写入的）`);
+    }
+    if (noSkeleton > 0) {
+      details.push(
+        `${noSkeleton} 门课拿到的页面里既没有"已完成任务点"也没有目录骨架（可能改版，或需要重新登录）` +
+          (sampleText ? `；样例：${sampleText}` : ''),
+      );
+    }
+    if (failures.length > 0) {
+      details.push(`失败 ${failures.length} 门：${failures.slice(0, 3).join(' / ')}`);
+    }
+
+    return {
+      items,
+      hasMore: false,
+      declaredTotal: items.length,
+      ...(details.length > 0 ? { details } : {}),
+    };
+  }
+
   /**
    * 作业 / 考试的答题页。
    *
@@ -974,6 +1199,394 @@ export class ChaoxingAdapter implements PlatformAdapter {
       return `https://mooc1.chaoxing.com/mooc-ans/exam/test/reVersionTestStartNew?courseId=${cid}&examId=${id}&ut=s`;
     }
     return `https://mooc1.chaoxing.com/mooc-ans/work/doHomeWorkNew?courseId=${cid}&workId=${id}&ut=s`;
+  }
+
+  /**
+   * 课程页地址：任务点卡片点击、以及作业深链不可用时的兜底都走这里。
+   * `raw` 里 classId/cpi/enc 是同步课程时存下来的（任务点抓取用的同一份）。
+   */
+  /** 最近一次解析的失败定位轨迹（给 /api/task/url 的 debug 字段用）。 */
+  resolveDebug(): string[] {
+    return this.#resolveTrace.slice(0, 16);
+  }
+
+  buildCourseUrl(course: UnifiedCourse): string | undefined {
+    const raw = (course.raw ?? {}) as { classId?: string; cpi?: string; enc?: string; squareUrl?: string };
+    if (!course.platformCourseId || !raw.classId) return undefined;
+    // 有课程级 enc 时**优先自己拼、并把 t 补成当前时刻**：
+    // 0.2.47 真机「无效的参数」的关键差异就是少了 t（HAR 里浏览器地址必带 t）。
+    if (raw.enc) {
+      return chaoxingCourseUrl({
+        courseId: course.platformCourseId,
+        classId: raw.classId,
+        cpi: raw.cpi,
+        enc: raw.enc,
+        t: Date.now(),
+      });
+    }
+    // 没有 enc 时退回课程卡片的原始链接（可能自带 enc/t）
+    const direct = course.sourceUrl ?? raw.squareUrl;
+    if (direct && /^https?:\/\//i.test(direct) && /(mycourse\/stu|studentstudy|stucoursemiddle)/i.test(direct)) return direct;
+    return chaoxingCourseUrl({
+      courseId: course.platformCourseId,
+      classId: raw.classId,
+      cpi: raw.cpi,
+      t: Date.now(),
+    });
+  }
+
+  /**
+   * 点击时解析课程页地址。
+   *
+   * 按可靠性从高到低尝试 `#locateCoursePage`；都失败才退回「我的课程」页。
+   */
+  async resolveCourseUrl(
+    ctx: AdapterContext,
+    session: Session,
+    course: UnifiedCourse,
+  ): Promise<string | undefined> {
+    const http = new SessionHttpClient(ctx, session);
+    this.#resolveTrace = ['course:start'];
+    const page = await this.#locateCoursePage(http, course);
+    if (page) return withPageHeader(page.url, '1'); // 章节 tab：任务点就在章节里
+    this.#resolveTrace.push('course:fallback-interaction');
+    return 'https://mooc2-ans.chaoxing.com/visit/interaction';
+  }
+
+  /**
+   * 点击时解析作业的最终地址。
+   *
+   * 浏览器里的真实链路（2026-11-05 两份 HAR 实证）：
+   *   课程页（HTML 隐藏域 enc / workEnc / t）
+   *   → 作业列表 `mooc1.chaoxing.com/mooc2/work/list?...&stuenc=<enc>&enc=<workEnc>`
+   *   → 每行 `<li data="https://mooc1.chaoxing.com/mooc-ans/mooc2/work/task?...&workId=<id>&answerId=0&enc=<per-work enc>">`
+   *   → `work/task` 再 302 到 `work/dowork?...&standardEnc=<新签发>&enc=<同一个 per-work enc>`
+   */
+  async resolveTaskUrl(
+    ctx: AdapterContext,
+    session: Session,
+    req: { course: UnifiedCourse; platformTaskId: string; kind: PlatformTask['kind'] },
+  ): Promise<string | undefined> {
+    const http = new SessionHttpClient(ctx, session);
+    const interaction = 'https://mooc2-ans.chaoxing.com/visit/interaction';
+    this.#resolveTrace = ['task:start'];
+    if (req.kind !== 'homework' || !req.platformTaskId) {
+      return (await this.resolveCourseUrl(ctx, session, req.course)) ?? interaction;
+    }
+
+    const page = await this.#locateCoursePage(http, req.course);
+    if (!page) {
+      this.#resolveTrace.push('task:no-course-page');
+      return interaction;
+    }
+    const courseUrl = withPageHeader(page.url, '8'); // 作业 tab
+    try {
+      const courseHtml = page.html;
+      // 课程页把作业列表需要的两个 enc 和 t 都放在隐藏域里
+      const workEnc =
+        firstGroup(courseHtml, /id=["']workEnc["'][^>]*value=["']([^"']+)["']/i) ??
+        firstGroup(courseHtml, /name=["']workEnc["'][^>]*value=["']([^"']+)["']/i);
+      const enc = firstGroup(courseHtml, /id=["']enc["'][^>]*value=["']([^"']+)["']/i);
+      const t =
+        firstGroup(courseHtml, /id=["']t["'][^>]*value=["']([^"']+)["']/i) ??
+        String(ctx.clock.now().getTime());
+      const raw = (req.course.raw ?? {}) as { classId?: string; cpi?: string };
+      if (!workEnc || !enc || !raw.classId) {
+        this.#resolveTrace.push(
+          `task:course-page-missing workEnc=${Boolean(workEnc)} enc=${Boolean(enc)} classId=${Boolean(raw.classId)}`,
+        );
+        return courseUrl;
+      }
+      this.#resolveTrace.push('task:course-page-ok');
+
+      const params = new URLSearchParams({
+        courseId: req.course.platformCourseId,
+        classId: raw.classId,
+        ut: 's',
+        t,
+        stuenc: enc,
+        enc: workEnc,
+      });
+      if (raw.cpi) params.set('cpi', raw.cpi);
+      const listUrl = `https://mooc1.chaoxing.com/mooc2/work/list?${params.toString()}`;
+      const lRes = await http.request({ url: listUrl, method: 'GET', headers: { Referer: courseUrl } });
+      this.#resolveTrace.push(`task:list-status=${lRes.status}`);
+      if (lRes.status >= 400) return courseUrl;
+      const listHtml = await lRes.text();
+      const hit = new RegExp(
+        `data=["']([^"']*[?&]workId=${req.platformTaskId}(?:[&"'])[^"']*)["']`,
+        'i',
+      ).exec(listHtml) ?? new RegExp(`data=["']([^"']*workId=${req.platformTaskId}[^"']*)["']`, 'i').exec(listHtml);
+      this.#resolveTrace.push(hit ? 'task:list-hit' : 'task:list-no-workid');
+      if (!hit) return courseUrl;
+      return hit[1]!.replace(/&amp;/g, '&');
+    } catch (e) {
+      this.#resolveTrace.push(`task:error ${(e as Error).message.slice(0, 40)}`);
+      return courseUrl;
+    }
+  }
+
+  /**
+   * 找到课程页，按可靠性从高到低尝试：
+   *   ① `studentcourse`（任务点用的那个页）里的**隐藏 enc** → 拼课程页 → 验证
+   *   ② 同步时存下的 raw.enc → 拼课程页（补当前 t）→ 验证
+   *   ③ 课程卡片原始链接
+   *   ④ 「我的课程」页里现找
+   * 每一步都验证「workEnc/enc 隐藏域存在」—— 200 + 「无效的参数」不算成功。
+   */
+  async #locateCoursePage(
+    http: SessionHttpClient,
+    course: UnifiedCourse,
+  ): Promise<{ url: string; html: string } | undefined> {
+    const raw = (course.raw ?? {}) as { classId?: string; cpi?: string; enc?: string; squareUrl?: string };
+    const seeds: Array<{ tag: string; url: string }> = [];
+    // ① studentcourse 里的隐藏 enc
+    const scEnc = await this.#studentCourseEnc(http, course);
+    if (scEnc && raw.classId) {
+      seeds.push({
+        tag: 'student-enc',
+        url: chaoxingCourseUrl({
+          courseId: course.platformCourseId,
+          classId: raw.classId,
+          cpi: raw.cpi,
+          enc: scEnc,
+          t: Date.now(),
+        }),
+      });
+    }
+    // ② 课程卡片原始链接（有些学校里它才是带正确 enc/t 的那一份）
+    const square = course.sourceUrl ?? raw.squareUrl;
+    if (square && /^https?:\/\//i.test(square) && /(mycourse\/stu|studentstudy|stucoursemiddle)/i.test(square)) {
+      seeds.push({ tag: 'square', url: square });
+    }
+    // ②.2 现打「课程列表」接口：HAR 实证它返回每门课的 `stucoursemiddle?courseid=&clazzid=&cpi=` 链接，
+    //     这个链接重定向后就是带新鲜 enc/t 的课程页 —— 这是浏览器真正点课程用的入口。
+    const listLink = await this.#courseListLinkFromApi(http, course.platformCourseId);
+    if (listLink) seeds.push({ tag: 'courselist-api', url: listLink });
+    this.#resolveTrace.push(`course:apiSquare=${Boolean(listLink)}`);
+    // ③ raw.enc 现拼
+    if (raw.classId) {
+      seeds.push({
+        tag: 'raw-enc',
+        url: chaoxingCourseUrl({
+          courseId: course.platformCourseId,
+          classId: raw.classId,
+          cpi: raw.cpi,
+          enc: raw.enc,
+          t: Date.now(),
+        }),
+      });
+    }
+    // ④ 完全不带 enc 现拼
+    if (raw.classId) {
+      seeds.push({
+        tag: 'no-enc',
+        url: chaoxingCourseUrl({
+          courseId: course.platformCourseId,
+          classId: raw.classId,
+          cpi: raw.cpi,
+          t: Date.now(),
+        }),
+      });
+    }
+    this.#resolveTrace.push(
+      `course:seeds=${seeds.map((s) => s.tag).join(',') || 'none'} square=${Boolean(square)} rawEnc=${Boolean(raw.enc)}`,
+    );
+    for (const seed of seeds) {
+      const page = await this.#fetchCoursePage(http, seed.url);
+      if (page) {
+        this.#resolveTrace.push(`course:ok-${seed.tag}`);
+        return page;
+      }
+    }
+    // ⑤ 我的课程页里现找
+    const fresh = await this.#freshCoursePageUrl(http, course.platformCourseId);
+    if (fresh) {
+      const page = await this.#fetchCoursePage(http, fresh);
+      if (page) {
+        this.#resolveTrace.push('course:ok-interaction');
+        return page;
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * 打「课程列表」接口（HAR 实证）：POST `mooc2-ans/visit/courselistdata`
+   * → 返回课程卡片 HTML，卡片链接是 `mooc1.chaoxing.com/visit/stucoursemiddle?courseid=&clazzid=&cpi=`
+   *   → 这个链接重定向后才是带新鲜 `enc/t` 的课程页。
+   */
+  async #courseListLinkFromApi(http: SessionHttpClient, courseId: string): Promise<string | undefined> {
+    try {
+      const res = await http.request({
+        url: 'https://mooc2-ans.chaoxing.com/mooc2-ans/visit/courselistdata',
+        method: 'POST',
+        form: {
+          courseType: '1',
+          courseFolderId: '0',
+          query: '',
+          pageHeader: '-1',
+          single: '0',
+          superstarClass: '0',
+          isFirefly: '0',
+          courseLevelLabelId: '0',
+          fid: '',
+          from: '',
+        },
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+          'X-Requested-With': 'XMLHttpRequest',
+          Referer: 'https://mooc2-ans.chaoxing.com/visit/interaction',
+        },
+      });
+      this.#resolveTrace.push(`list:status=${res.status}`);
+      if (res.status >= 400) return undefined;
+      const html = await res.text();
+      if (looksLikeAuthWall(html)) {
+        this.#resolveTrace.push('list:authwall');
+        return undefined;
+      }
+      const links = [...html.matchAll(/href=["']([^"']+)["']/gi)].map((m) => m[1]!.replace(/&amp;/g, '&'));
+      const idRe = new RegExp(`[?&](?:courseId|courseid)=${courseId}(?:[&]|$)`, 'i');
+      const hit =
+        links.find((h) => idRe.test(h) && /stucoursemiddle|mycourse\/stu/i.test(h)) ?? links.find((h) => idRe.test(h));
+      this.#resolveTrace.push(`list:len=${html.length} links=${links.length} hit=${Boolean(hit)}`);
+      return hit;
+    } catch (e) {
+      this.#resolveTrace.push(`list:error ${(e as Error).message.slice(0, 30)}`);
+      return undefined;
+    }
+  }
+
+  /** 现抓课程列表 JSON，取这门课的 courseSquareUrl（有的学校这里带正确 enc/t）。 */
+  async #freshSquareUrl(http: SessionHttpClient, courseId: string): Promise<string | undefined> {
+    try {
+      const res = await http.request({ url: this.#ep.courseData, method: 'GET' });
+      if (res.status >= 400) return undefined;
+      const text = await res.text();
+      if (looksLikeAuthWall(text)) return undefined;
+      const refs = parseBackclazzData(text);
+      return refs.find((r) => r.platformCourseId === courseId)?.squareUrl;
+    } catch (e) {
+      this.#resolveTrace.push(`apiSquare:error ${(e as Error).message.slice(0, 30)}`);
+      return undefined;
+    }
+  }
+
+  /** 抓 studentcourse，取页面里隐藏的课程级 `enc`（不是 URL 上的 stuenc）。 */
+  async #studentCourseEnc(http: SessionHttpClient, course: UnifiedCourse): Promise<string | undefined> {
+    const raw = (course.raw ?? {}) as { classId?: string; cpi?: string; enc?: string };
+    if (!raw.classId) return undefined;
+    const p = new URLSearchParams({
+      courseid: course.platformCourseId,
+      clazzid: raw.classId,
+      ut: 's',
+      t: String(Date.now()),
+    });
+    if (raw.cpi) p.set('cpi', raw.cpi);
+    if (raw.enc) p.set('stuenc', raw.enc);
+    try {
+      const res = await http.request({
+        url: `${this.#ep.courseCatalog}?${p.toString()}`,
+        method: 'GET',
+        headers: {
+          Referer: `https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/stu?courseid=${course.platformCourseId}&clazzid=${raw.classId}`,
+        },
+      });
+      this.#resolveTrace.push(`student:status=${res.status}`);
+      if (res.status >= 400) return undefined;
+      const html = await res.text();
+      if (looksLikeAuthWall(html)) {
+        this.#resolveTrace.push('student:authwall');
+        return undefined;
+      }
+      const enc = firstGroup(html, /id=["']enc["'][^>]*value=["']([^"']+)["']/i);
+      const isTaskPage = /已完成任务点|fanyaChapterWhite|chapter_head/.test(html);
+      this.#resolveTrace.push(`student:enc=${Boolean(enc)} taskPage=${isTaskPage} len=${html.length}`);
+      // 登录/错误页里也可能有 id="enc"（验证码等），不能只凭 enc 就信
+      if (!isTaskPage) return undefined;
+      return enc;
+    } catch (e) {
+      this.#resolveTrace.push(`student:error ${(e as Error).message.slice(0, 30)}`);
+      return undefined;
+    }
+  }
+
+  /**
+   * 拉一个候选课程页，并**验证它真的是课程页**（含 workEnc/enc 隐藏域）。
+   * 验证这一步不能省：拿着过期 enc 拼的地址常常返回 200 + 一句「无效的参数」，
+   * 不验证就会把错误页当成课程页交给用户。
+   */
+  async #fetchCoursePage(
+    http: SessionHttpClient,
+    url: string | undefined,
+  ): Promise<{ url: string; html: string } | undefined> {
+    if (!url) return undefined;
+    try {
+      const res = await http.request({
+        url,
+        method: 'GET',
+        headers: { Referer: 'https://mooc2-ans.chaoxing.com/visit/interaction' },
+      });
+      if (res.status >= 400) {
+        this.#resolveTrace.push(`page:status=${res.status}`);
+        return undefined;
+      }
+      const html = await res.text();
+      if (looksLikeAuthWall(html)) {
+        this.#resolveTrace.push('page:authwall');
+        return undefined;
+      }
+      const hasEnc = /id=["']workEnc["']|name=["']workEnc["']|id=["']enc["']/.test(html);
+      const finalUrl = res.url && /^https?:\/\//i.test(res.url) ? res.url : url;
+      let finalPath = '';
+      try {
+        finalPath = new URL(finalUrl).pathname;
+      } catch {
+        finalPath = '?';
+      }
+      this.#resolveTrace.push(`page:len=${html.length} hasEnc=${hasEnc} final=${finalPath}`);
+      if (!hasEnc) return undefined;
+      // 跟随重定向后的最终地址更准确（stucoursemiddle → mycourse/stu?...enc=…&t=…）
+      return { url: finalUrl, html };
+    } catch (e) {
+      this.#resolveTrace.push(`page:error ${(e as Error).message.slice(0, 30)}`);
+      return undefined;
+    }
+  }
+
+  /** 从「我的课程」页里取出这门课当前可用的课程页 href（带新鲜 enc/t）。 */
+  async #freshCoursePageUrl(http: SessionHttpClient, courseId: string): Promise<string | undefined> {
+    const candidates = [
+      'https://i.chaoxing.com',
+      'https://mooc2-ans.chaoxing.com/visit/interaction',
+      'https://mooc1-2.chaoxing.com/visit/interaction',
+    ];
+    for (const url of candidates) {
+      try {
+        const res = await http.request({ url, method: 'GET' });
+        if (res.status >= 400) {
+          this.#resolveTrace.push(`fresh:${new URL(url).host}=${res.status}`);
+          continue;
+        }
+        const html = await res.text();
+        if (looksLikeAuthWall(html)) {
+          this.#resolveTrace.push(`fresh:${new URL(url).host}=authwall`);
+          continue;
+        }
+        const links = [...html.matchAll(/href=["']([^"']+)["']/gi)].map((m) => m[1]!.replace(/&amp;/g, '&'));
+        const idRe = new RegExp(`[?&](?:courseId|courseid)=${courseId}(?:[&]|$)`, 'i');
+        const hit =
+          links.find((h) => idRe.test(h) && /(mycourse\/stu|stucoursemiddle)/i.test(h)) ?? links.find((h) => idRe.test(h));
+        this.#resolveTrace.push(`fresh:${new URL(url).host}=len ${html.length} links=${links.length} hit=${Boolean(hit)}`);
+        if (!hit) continue;
+        if (/^https?:\/\//i.test(hit)) return hit;
+        return new URL(hit, 'https://mooc2-ans.chaoxing.com').toString();
+      } catch {
+        // 试下一个候选
+      }
+    }
+    return undefined;
   }
 }
 
@@ -1022,6 +1635,8 @@ export function parseBackclazzData(text: string): CourseRef[] {
       ...(firstGroup(squareUrl, /[?&]enc=([0-9a-zA-Z]+)/i)
         ? { enc: firstGroup(squareUrl, /[?&]enc=([0-9a-zA-Z]+)/i)! }
         : {}),
+      // 整条链接也留着：点击跳转时它可能比"用存下的 enc 重新拼"更完整（含 t）
+      ...(squareUrl ? { squareUrl: squareUrl.replace(/&amp;/g, '&') } : {}),
       name,
       teacher: typeof info.teacherName === 'string' ? info.teacherName : undefined,
     });
@@ -1090,26 +1705,51 @@ export interface ParsedWorkItem {
  * 这比给一个必然报错的链接好 —— 后者会让人以为应用坏了。
  */
 /**
- * 超星没有可靠的「直达作业」链接 —— 只能回我的课程。
+ * 超星「这门课」的页面地址（课程目录 / 作业入口都从这里进）。
  *
- * 为什么放弃直达（2026-10-23 连试四版，逐层排除）：
- *   1. `/mooc-ans/work/doWork`        → 404（死路径）
- *   2. `/mooc-ans/mooc2/work/dowork`  → 404（缺 enc）
- *   3. 从列表页 href 原样搬参数（含 answerId + enc）→ 真机回「信息提示 · 无权限！」
- *   4. 再补 Referer 模拟"从列表点进来" → 仍无权限
+ * 为什么不给作业直达：`enc` 是**服务端按会话/时间签发**的短命参数（见下）。
+ * 为什么不给 `https://i.chaoxing.com`：那在手机上会落到账号/门户页，用户点完
+ * 还得自己找课，等于没跳（真机 2026-11-05 反馈「只能跳转至账号页」）。
  *
- * 结论：`enc` 是**服务端按会话/时间签发**的短命参数。同步时抓到的那一份，
- * 用户过一会儿再点就已经失效 —— 任何"提前拼好、存进库里"的链接都会过期，
- * 这条路在原理上走不通（不是参数没找对）。
- *
- * 所以退到首页：让平台自己生成 enc，用户多点两下。
- * 这比给一个必然报错的链接好 —— 后者会让人以为应用坏了。
+ * 这里用课程级参数（courseid/clazzid/cpi/enc）。其中 `enc` 就是课程页地址里的
+ * 那个，任务点抓取（studentcourse）一直复用它且长期有效 —— 和作业级 enc 不是一回事。
  */
-function chaoxingWorkUrl(
-  _course: { courseId: string; classId: string; cpi?: string },
-  _workId: string | undefined,
-): string {
-  return 'https://i.chaoxing.com';
+function chaoxingCourseUrl(course: {
+  courseId: string;
+  classId: string;
+  cpi?: string;
+  enc?: string;
+  t?: string | number;
+}): string {
+  const p = new URLSearchParams({
+    courseid: course.courseId,
+    clazzid: course.classId,
+    ut: 's',
+    pageHeader: '8',
+    v: '2',
+    hideHead: '0',
+  });
+  if (course.cpi) p.set('cpi', course.cpi);
+  if (course.enc) p.set('enc', course.enc);
+  if (course.t !== undefined) p.set('t', String(course.t));
+  return `https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/stu?${p.toString()}`;
+}
+
+/**
+ * 把课程页 URL 的 `pageHeader` 换成指定标签页。
+ *
+ * 浏览器里的课程页用 `pageHeader` 选默认标签（2026-11-05 课程页 HTML 实证）：
+ *   0=任务、1=章节、2=讨论、8=作业、9=考试、…
+ * 同步来的课程页默认是 0（任务），点作业/任务点都落到"任务"就是没改这个参数。
+ */
+function withPageHeader(url: string, header: string): string {
+  try {
+    const u = new URL(url);
+    u.searchParams.set('pageHeader', header);
+    return u.toString();
+  } catch {
+    return url;
+  }
 }
 
 /**
@@ -1438,6 +2078,239 @@ export function parseExamListHtml(html: string, now: Date): ParsedWorkItem[] {
     });
   }
   return out;
+}
+
+/**
+ * 从课程目录页里取「已完成任务点: X/Y」+ 章节开放窗口。
+ *
+ * 真实 HTML（2026-11-02 HAR，`mooc2-ans/mycourse/studentcourse`）：
+ *   `<h2 class="xs_head_name fl" tabindex="0"><i class="catalog_points_yi fl"></i>
+ *    已完成任务点: <span style="color:#00B368">0</span>/2`
+ *
+ * 数字两侧的标签形态不固定（也可能没有 span），所以两处都用 `(?:<[^>]*>\s*)*`
+ * 兼容 —— 这个正则不是照着"好看的样例"写的，是按真机字节写的。
+ *
+ * 返回 null 表示**页面上没有这句话**（不是"0/0"）。这两件事必须分开：
+ * 前者可能是改版，后者是真的没有任务点；混成一样会让界面显示"已全部完成"。
+ */
+export function parseTaskPointProgress(
+  html: string,
+  now: Date = new Date(),
+): {
+  total: number;
+  done: number;
+  windows: TaskPointWindow[];
+  hasPendingChapter: boolean;
+  /**
+   * 此刻还能做的任务点条数（只算已开放、且还有未完成点的章节）。
+   * 无法把「N个待完成任务点」可靠归属到章节时**不返回**这个键 ——
+   * 那时界面退回"还有可做的"，好过显示一个把未开放章节也算进去的错数字。
+   */
+  availableNow?: number;
+} | null {
+  const m = /已完成任务点\s*[:：]\s*(?:<[^>]*>\s*)*(\d+)\s*(?:<[^>]*>\s*)*\/\s*(\d+)/.exec(html);
+  if (!m) return null;
+  const done = Number(m[1]);
+  const total = Number(m[2]);
+  if (!Number.isFinite(done) || !Number.isFinite(total) || total < 0 || done < 0) return null;
+
+  // 章节名与开放窗口在页面里是**两段并列的兄弟节点**，不是父子关系，
+  // 所以按"往前找最近的序号"配对，而不是按 DOM 嵌套切块 ——
+  // 真机页面上 chapter_item 有 19 个而章节只有 15 个（空节点 + 嵌套），
+  // 切块必然错位，而错误配对会安静地把时间挂到别的章节上。
+  const names = [...html.matchAll(CATALOG_NAME_RE)].map((x) => ({
+    at: x.index ?? 0,
+    label: `${x[1] ?? ''} ${x[2] ?? ''}`.replace(/\s+/g, ' ').trim(),
+  }));
+
+  /** 位置 at 之前最近的章节序号；没有则 -1。数组按出现顺序排列，遇到更晚的就停。 */
+  const indexBefore = (at: number): number => {
+    let idx = -1;
+    for (let i = 0; i < names.length; i++) {
+      if ((names[i]!.at ?? 0) < at) idx = i;
+      else break;
+    }
+    return idx;
+  };
+
+  const windows: TaskPointWindow[] = [];
+  /** 章节序号 → 该章的窗口。用来判断"这一章现在能不能做"。 */
+  const windowOfChapter = new Map<number, TaskPointWindow>();
+  const collect = (at: number, opensAt: string, closesAt: string) => {
+    const idx = indexBefore(at);
+    const win: TaskPointWindow = { chapter: idx >= 0 ? (names[idx]!.label ?? '') : '', opensAt, closesAt };
+    windows.push(win);
+    if (idx >= 0) {
+      // 同一章偶尔会同时出现多种窗口写法；保留"最晚关闭"的那条，
+      // 它才是这一章最后还能做的时间。
+      const prev = windowOfChapter.get(idx);
+      if (!prev || new Date(win.closesAt).getTime() > new Date(prev.closesAt).getTime()) {
+        windowOfChapter.set(idx, win);
+      }
+    }
+  };
+
+  // 形态 ①：`开放时间：2026-11-08 23:00 至 ...`（年份齐全）
+  for (const w of html.matchAll(OPEN_WINDOW_RE)) {
+    const opens = normalizeDeadline(w[1], now);
+    const closes = normalizeDeadline(w[2], now);
+    // 两个时间都必须是绝对时刻；解析不出来就丢掉这一条，
+    // 绝不用"当前时间 + 猜测"顶上去（那会造出一个假截止）。
+    if (opens.kind !== 'absolute' || closes.kind !== 'absolute') continue;
+    collect(w.index ?? 0, opens.at, closes.at);
+  }
+
+  // 形态 ②：`定时开放：09-14 00:00 至 12-12 23:30`（**只有月日**）
+  // 按当前年份补；"结束早于开始"说明跨年，把结束推到下一年。
+  const year = now.getFullYear();
+  for (const w of html.matchAll(TIMED_WINDOW_RE)) {
+    const opens = normalizeDeadline(`${year}-${w[1]}`, now);
+    if (opens.kind !== 'absolute') continue;
+    let closes = normalizeDeadline(`${year}-${w[2]}`, now);
+    if (closes.kind !== 'absolute') continue;
+    if (new Date(closes.at).getTime() < new Date(opens.at).getTime()) {
+      const next = normalizeDeadline(`${year + 1}-${w[2]}`, now);
+      if (next.kind !== 'absolute') continue;
+      closes = next;
+    }
+    collect(w.index ?? 0, opens.at, closes.at);
+  }
+
+  // 「有未完成任务点的章节」—— 判断"现在能不能做"的关键补充。
+  //
+  // 真机 2026-11-03：程设基础 24/50，9 个章节测验**已经开放**却没出现在
+  // 开放窗口列表里（老师没给它们设时间限制）。只看窗口就会判成"一章都没开"，
+  // 界面于是写着"剩下的等 11/23 开放"，而用户点进去明明能做。
+  //
+  // 判定依据是超星自己给的「N个待完成任务点」标记：它只出现在还有任务点没完成的
+  // 章节上，且不会给已关闭的章节挂这个标记（关闭的章节显示的是「已关闭」）。
+  const pendingMarks = [...html.matchAll(PENDING_RE)]
+    .map((x) => ({ at: x.index ?? 0, count: Number(x[1]) }))
+    .filter((x) => Number.isFinite(x.count) && x.count > 0);
+  const pending = pendingMarks.length > 0;
+
+  // ---- 「现在可做 n 个」----
+  // 把每个「N个待完成任务点」归属到它前面最近的章节，再按该章此刻是否开放
+  // 决定算不算。要点是**不能直接把 done/total 相减**：那个差里含着还没开放的
+  // 章节（分阶段开放），把它当成"可做"会让用户白跑。
+  let availableNow: number | undefined;
+  if (pendingMarks.length > 0) {
+    const pendingOfChapter = new Map<number, number>();
+    let unattributed = 0;
+    for (const pm of pendingMarks) {
+      const idx = indexBefore(pm.at);
+      if (idx < 0) {
+        // 出现在第一个章节名之前：可能是一条汇总/别的布局，归属不了 →
+        // 宁可整门课不给数字，也不猜（错数字比没有数字更糟）。
+        unattributed += 1;
+        continue;
+      }
+      pendingOfChapter.set(idx, (pendingOfChapter.get(idx) ?? 0) + pm.count);
+    }
+    if (unattributed === 0 && pendingOfChapter.size > 0) {
+      const nowMs = now.getTime();
+      let sum = 0;
+      for (const [idx, count] of pendingOfChapter) {
+        const win = windowOfChapter.get(idx);
+        let openNow = true; // 没设窗口的章节 = 不限时，随时可做
+        if (win) {
+          const o = new Date(win.opensAt).getTime();
+          const cl = new Date(win.closesAt).getTime();
+          openNow = Number.isFinite(o) && Number.isFinite(cl) && o <= nowMs && nowMs < cl;
+        }
+        if (openNow) sum += count;
+      }
+      availableNow = sum;
+    }
+  }
+
+  // 完成数大于总数只可能是页面把两个数搞反了（或我们取错位）。
+  // 宁可按"全做完"截断，也不要显示 110% —— 那会让整个数字失去可信度。
+  return {
+    total,
+    done: Math.min(done, total),
+    windows,
+    hasPendingChapter: pending,
+    ...(availableNow !== undefined ? { availableNow } : {}),
+  };
+}
+
+/** 章节序号 + 名称：`<span class="catalog_sbar">2.1</span> 什么是真理？` */
+const CATALOG_NAME_RE = /<span class="catalog_sbar">\s*([^<]*?)\s*<\/span>\s*([^<]*)/g;
+
+/**
+ * 开放窗口：`本章节暂未开放，不能查看。开放时间： 2026-11-08 23:00 至 2026-11-29 23:00`
+ *
+ * 两个时间都是**本地墙上时间**（不带时区），交给 normalizeDeadline 按本地时区解析。
+ * 不要自己 `new Date(str)` —— WebView 对 "YYYY-MM-DD HH:mm" 的解析行为不一致。
+ */
+/** 「1个待完成任务点」/「3个待完成任务点」——有它说明这一章现在还能做 */
+const PENDING_RE = /(\d+)\s*个待完成任务点/g;
+
+const OPEN_WINDOW_RE =
+  /开放时间\s*[：:]\s*(\d{4}-\d{1,2}-\d{1,2}\s+\d{1,2}:\d{2})\s*至\s*(\d{4}-\d{1,2}-\d{1,2}\s+\d{1,2}:\d{2})/g;
+
+/**
+ * 形态 ②：`定时开放：09-14 00:00 至 12-12 23:30` —— 已开放但限时的章节用这种写法。
+ *
+ * 2026-11-03 真机：程设基础的章节**全是**这种，而上面的正则只认"开放时间"，
+ * 于是整门课的窗口一个都没抓到，页面把它判成"一章都没开"，
+ * 写着"剩下的等 11/23 开放"，而用户点进去明明有 9 个测验能做。
+ *
+ * 注意这里**没有年份**，要按当前年份补（见 parseTaskPointProgress）。
+ */
+const TIMED_WINDOW_RE =
+  /定时开放\s*[：:]\s*(\d{1,2}-\d{1,2}\s+\d{1,2}:\d{2})\s*至\s*(\d{1,2}-\d{1,2}\s+\d{1,2}:\d{2})/g;
+
+/**
+ * 在所有开放窗口里挑「还没结束、且最快关闭」的那个。
+ *
+ * 全过期 → 返回 undefined。这不是"没数据"，而是**这门课已经没有可做的事**：
+ * 留着日期只会让人以为还有截止要赶。
+ */
+export function nearestUpcomingWindow(windows: TaskPointWindow[], now: Date): TaskPointWindow | undefined {
+  const t = now.getTime();
+  let best: TaskPointWindow | undefined;
+  let bestClose = Number.POSITIVE_INFINITY;
+  for (const w of windows) {
+    const close = new Date(w.closesAt).getTime();
+    if (!Number.isFinite(close) || close <= t) continue;
+    if (close < bestClose) {
+      best = w;
+      bestClose = close;
+    }
+  }
+  return best;
+}
+
+/** ISO → 「11/29 23:00」。日志是给人读的，ISO 串在这句话里只是噪音。 */
+function shortLocal(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getMonth() + 1}/${d.getDate()} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+/**
+ * 最近一个**已经关闭**的窗口。
+ *
+ * 它存在的唯一理由：让界面区分「还差 2 个，还能补」和「还差 2 个，窗口已经关了」。
+ * 没有它，这两种完全相反的情况长得一模一样 —— 真机上「形势与政策」就是这种：
+ * 4/6 未完成，两个章节的窗口 10/18 就关了，而界面上什么提示都没有。
+ */
+export function latestClosedWindow(windows: TaskPointWindow[], now: Date): TaskPointWindow | undefined {
+  const t = now.getTime();
+  let best: TaskPointWindow | undefined;
+  let bestClose = Number.NEGATIVE_INFINITY;
+  for (const w of windows) {
+    const close = new Date(w.closesAt).getTime();
+    if (!Number.isFinite(close) || close > t) continue;
+    if (close > bestClose) {
+      best = w;
+      bestClose = close;
+    }
+  }
+  return best;
 }
 
 function numeric(v: unknown): number | undefined {  if (v === undefined || v === null || v === '') return undefined;

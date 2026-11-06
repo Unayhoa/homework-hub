@@ -20,7 +20,7 @@ import type { TaskKind, UnifiedTask } from '../domain/task.ts';
 import { completionOrigin, effectiveStatus, hasPendingAc, isTerminalStatus } from '../domain/task.ts';
 import { makeCourseId } from '../domain/ids.ts';
 import { effectiveInstant } from '../domain/deadline.ts';
-import { courseTitle, maskUsername } from '../domain/course.ts';
+import { TASK_POINT_SCHEMA, courseTitle, maskUsername } from '../domain/course.ts';
 import { DeclarativeAdapter, DomAdapter, validateConfig } from './declarative-adapter.ts';
 import type { AdapterConfig } from './declarative-adapter.ts';
 import { describe, HubError, schemaDrift, toHubError } from '../domain/errors.ts';
@@ -35,10 +35,18 @@ import { UnavailableSigner } from '../ports/signer.ts';
 import { TokenBucket, defaultLimitsFor } from '../infra/token-bucket.ts';
 import { createHttpStats, createResilientHttpClient, mapLimit } from './http-pipeline.ts';
 import type { HttpStats, RetryPolicy } from './http-pipeline.ts';
-import { DEFAULT_MERGE_OPTIONS, materializeTask, mergeTasks } from './merge.ts';
+import { DEFAULT_MERGE_OPTIONS, materializeTask, mergeTasks, describeUpdates } from './merge.ts';
 import type { TaskEvent } from './merge.ts';
 import { DEFAULT_REMINDER_RULES, planReminders } from './reminder.ts';
 import { buildNotificationSchedule } from './notify-schedule.ts';
+import {
+  DEFAULT_TASK_POINT_REMINDER,
+  digestLineFor,
+  planTaskPointNotifications,
+  taskPointAlertCount,
+  type TaskPointCourse,
+  type TaskPointReminderConfig,
+} from './task-point-reminder.ts';
 import type { NotifyPrefs, ScheduledNotification } from './notify-schedule.ts';
 import type { PlannedReminder, ReminderRule } from './reminder.ts';
 
@@ -169,6 +177,25 @@ export interface AccountSyncReport {
   durationMs: number;
 }
 
+/**
+ * 任务点刷新结果。
+ *
+ * 用状态字符串而不是抛异常：UI 要根据「这个平台不支持 / 没登录 / 抓失败」
+ * 分别做不同的事（隐藏入口 / 引导登录 / 显示错误），三者混成一个 catch 就全糊了。
+ */
+export interface CourseProgressReport {
+  accountId: string;
+  platformId: string;
+  status: 'ok' | 'unsupported' | 'auth-required' | 'empty' | 'failed' | 'busy';
+  /** 本轮真正写回课程的条数 */
+  updated: number;
+  message?: string;
+  /** 只进日志的排查信息 */
+  detail?: string;
+  /** 适配器要对用户说的话 */
+  notes?: string[];
+}
+
 export interface SyncReport {
   startedAt: string;
   finishedAt: string;
@@ -217,6 +244,8 @@ const DAY_MS = 86_400_000;
 export class SyncEngine {
   readonly #registry: AdapterRegistry;
   readonly #store: HubStore;
+  /** 正在抓任务点的账号。后台自动刷新和用户手动刷新会撞车，撞上就是两份 32 请求 */
+  readonly #progressInFlight = new Set<string>();
   readonly #vault: Vault;
   readonly #baseHttp: HttpClient;
   readonly #clock: Clock;
@@ -608,6 +637,359 @@ export class SyncEngine {
     }
   }
 
+  /**
+   * 刷新「课程任务点进度」。
+   *
+   * 独立于 syncAccount（理由见 `PlatformAdapter.fetchCourseProgress` 的注释）：
+   * 它是**慢变量 + 用户主动触发**的数据，不该让每轮同步都背上"每门课 +1 请求"。
+   * 调用方是 UI（打开任务点页 / 点刷新），不是同步流程。
+   *
+   * 绝不抛错：UI 拿到的是状态，不是异常 —— 任务点抓不到不该让人连作业也看不了。
+   */
+  async refreshCourseProgress(
+    accountId: string,
+    opts: { platformCourseIds?: string[] } = {},
+  ): Promise<CourseProgressReport> {
+    // 同一账号同时只跑一份。后台自动刷新（同步后）和用户手动「重新读取」
+    // 都可能在这几秒里发起，撞上就是两份各 32 个请求 —— 对超星来说是双倍风控暴露。
+    // 后来的那个立刻返回 busy，反正先跑的那份马上会把数据写进去。
+    if (this.#progressInFlight.has(accountId)) {
+      const busy = await this.#store.getAccount(accountId);
+      return {
+        accountId,
+        platformId: busy?.platformId ?? '',
+        status: 'busy',
+        updated: 0,
+        message: '正在读取中，稍等一下',
+      };
+    }
+    this.#progressInFlight.add(accountId);
+    try {
+      return await this.#refreshCourseProgressInner(accountId, opts);
+    } finally {
+      this.#progressInFlight.delete(accountId);
+    }
+  }
+
+  async #refreshCourseProgressInner(
+    accountId: string,
+    opts: { platformCourseIds?: string[] } = {},
+  ): Promise<CourseProgressReport> {
+    const account = await this.#store.getAccount(accountId);
+    const base = { accountId, platformId: account?.platformId ?? '' };
+    if (!account) return { ...base, status: 'failed', updated: 0, message: '账号不存在' };
+
+    const adapter = this.#registry.get(account.platformId);
+    if (!adapter?.fetchCourseProgress) {
+      // 不是错误：这个平台根本没有"任务点"这个概念（PTA / 雨课堂 / iSmart）。
+      // UI 据此隐藏整个入口，而不是显示一个永远空的页签。
+      return { ...base, status: 'unsupported', updated: 0 };
+    }
+
+    const session = await this.#vault.load(accountId);
+    if (!session) {
+      return { ...base, status: 'auth-required', updated: 0, message: '这个账号还没有登录' };
+    }
+
+    const allCourses = await this.#store.listCourses([accountId]);
+    if (allCourses.length === 0) {
+      return { ...base, status: 'empty', updated: 0, message: '还没有同步到课程' };
+    }
+    // 用户静音/删除的课程不抓：省请求，也和课程栏的语义保持一致
+    const hidden = await this.#hiddenCourseIds(accountId);
+    const courses = allCourses.filter((c) => !hidden.has(c.id));
+    if (courses.length === 0) {
+      return { ...base, status: 'empty', updated: 0, message: '所有课程都被设为「不再同步」了' };
+    }
+
+    const ctx = this.#contextFor(account.platformId, accountId);
+    const now = this.#clock.now();
+    let page: Awaited<ReturnType<NonNullable<typeof adapter.fetchCourseProgress>>>;
+    try {
+      page = await adapter.fetchCourseProgress(ctx, session, courses, {
+        ...(opts.platformCourseIds ? { courseIds: opts.platformCourseIds } : {}),
+      });
+    } catch (e) {
+      const err = toHubError(e, account.platformId);
+      this.#logger.warn('任务点抓取失败', { platformId: account.platformId, error: describe(e) });
+      return { ...base, status: 'failed', updated: 0, message: err.message };
+    }
+
+    // 写回课程。**只覆盖本轮真的拿到的那些**：某一门失败就保留它上次的数值 ——
+    // 把没抓到的写成 0/0 会让界面显示"已全部完成"，那是在撒谎。
+    const byPlatformId = new Map(courses.map((c) => [c.platformCourseId, c]));
+    const patches: UnifiedCourse[] = [];
+    /** 被"归零保护"拦下的条数（本轮说没有任务点，但上一轮明明有） */
+    let zeroDowngrade = 0;
+    for (const item of page.items) {
+      const c = byPlatformId.get(item.platformCourseId);
+      if (!c) continue;
+
+      // ---- 归零保护 ----
+      //
+      // 平台这一轮说「这门课没有任务点」，而上一轮它有 —— 更可能是这一轮的页面
+      // 没加载全（半渲染、需要重新登录、接口限流返回空壳），而不是老师把任务点删了。
+      // 用 0/0 覆盖好数据，界面上就是"整页空白"，而且**再也回不来**（下一次还是 0）。
+      // 真机 2026-11-03 撞上：同步之后任务点栏全空。
+      //
+      // 宁可显示旧数字（最多旧一天），也不要显示一个假的"零"。
+      // 连续两轮都报 0 的情况这里不特判 —— 那时用户会看到列表空但诊断里有记录，
+      // 而"老师真的删了任务点"本来就是极罕见的事，用日志兜着足够。
+      if (item.total === 0 && (c.taskPoints?.total ?? 0) > 0) {
+        zeroDowngrade += 1;
+        continue;
+      }
+
+      patches.push({
+        ...c,
+        taskPoints: {
+          // 版本号必须跟着写：前端靠它判断"这条记录是不是旧形状、要不要强制重抓"
+          schema: TASK_POINT_SCHEMA,
+          total: item.total,
+          done: item.done,
+          ...(item.nextWindow ? { nextWindow: item.nextWindow } : {}),
+          ...(item.lastClosedAt ? { lastClosedAt: item.lastClosedAt } : {}),
+          hasOpenNow: item.hasOpenNow === true,
+          ...(typeof item.availableNow === 'number' ? { availableNow: item.availableNow } : {}),
+          fetchedAt: now.toISOString(),
+        },
+      });
+    }
+    if (patches.length > 0) await this.#store.upsertCourses(patches);
+
+    // 游标要如实反映"抓到了什么"，不能因为归零保护就假装成功：
+    // 一条都没写进去时，让下一轮还愿意再试（否则要等满 24h）。
+    if (patches.length > 0) {
+      await this.#store.setCursor({
+        accountId,
+        kind: 'course-progress',
+        cursor: now.toISOString(),
+        updatedAt: now.toISOString(),
+      });
+    }
+
+    const detailParts: string[] = [];
+    if (zeroDowngrade > 0) {
+      detailParts.push(
+        `${zeroDowngrade} 门课本轮报"没有任务点"，但上一轮有数据 —— 已保留旧值（多半是页面没加载全）`,
+      );
+    }
+    if (page.details?.length) detailParts.push(...page.details);
+
+    return {
+      ...base,
+      status: 'ok',
+      updated: patches.length,
+      ...(detailParts.length ? { detail: detailParts.join('；') } : {}),
+      ...(page.notes?.length ? { notes: page.notes } : {}),
+    };
+  }
+
+  /**
+   * 用户明确「不要这门课」的课程 ID 集合（静音 + 删除）。
+   *
+   * 任务点必须跟着这个语义走。真机（2026-11-02）：用户在课程栏取消了
+   * 「思想道德与法治」的勾选，任务点里它还在 —— 用户只会得出
+   * "取消没生效"这个结论，而不会去猜"这两个功能各有各的名单"。
+   *
+   * 判据是**用户的意志**，不是"哪边数据更完整"。同一个开关不能有两个解释。
+   */
+  async #hiddenCourseIds(accountId: string): Promise<Set<string>> {
+    const out = new Set<string>();
+    for (const kind of ['course-mute', 'course-exclude']) {
+      try {
+        const c = await this.#store.getCursor(accountId, kind);
+        if (c?.cursor) for (const id of JSON.parse(c.cursor) as string[]) out.add(id);
+      } catch {
+        // 游标损坏就当没有：最坏是多抓一门课，不会丢数据
+      }
+    }
+    return out;
+  }
+
+  /**
+   * 「过期才抓」——给后台自动刷新用。
+   *
+   * 为什么要有这个而不是直接调 refreshCourseProgress：
+   * 任务点是天级数据，抓一次要"每门课一个请求"。跟着每次同步跑等于把
+   * 分钟级的动作塞进天级的成本里（一天同步 8 次 = 256 个请求）。
+   * 这里只在**距上次超过 ttl** 时才真的抓，所以自然就是"每天最多一次"。
+   */
+  async refreshCourseProgressIfStale(
+    accountId: string,
+    ttlMs = 24 * 60 * 60 * 1000,
+  ): Promise<CourseProgressReport | undefined> {
+    const account = await this.#store.getAccount(accountId);
+    if (!account) return undefined;
+    // 平台没有这个能力就彻底不折腾 —— 连游标都不用读
+    if (!this.#registry.get(account.platformId)?.fetchCourseProgress) return undefined;
+    // 正在抓就别排队了（用户可能刚点过手动刷新）
+    if (this.#progressInFlight.has(accountId)) return undefined;
+
+    const last = await this.courseProgressFetchedAt(accountId);
+    if (last && this.#clock.now().getTime() - new Date(last).getTime() < ttlMs) return undefined;
+
+    return this.refreshCourseProgress(accountId);
+  }
+
+  /** 任务点数据上次刷新时刻（ISO）。没有游标 = 从没刷过。 */
+  async courseProgressFetchedAt(accountId: string): Promise<string | undefined> {
+    try {
+      const c = await this.#store.getCursor(accountId, 'course-progress');
+      return c?.cursor || undefined;
+    } catch {
+      // 游标损坏不该让整个页面打不开
+      return undefined;
+    }
+  }
+
+  /**
+   * 任务点视图（只读缓存，**从不发请求**）。
+   *
+   * 抓取只发生在 `refreshCourseProgress`。这两件事分开，是为了让 UI 能
+   * "先显示上次的数字，再决定要不要刷" —— 打开页面就强制全量抓，
+   * 等于每次都替用户花掉 32 个请求。
+   */
+  async listTaskPointProgress(accountId: string): Promise<{
+    supported: boolean;
+    /** 当前代码期望的数据形状版本。前端拿它和每门课的 schema 比较，落后就强制重抓 */
+    schema: number;
+    fetchedAt?: string;
+    /**
+     * 诊断计数。**界面在列表为空时要靠它说话**：
+     * "空"有三种完全不同的原因（没抓过 / 抓到了 0 / 课程被忽略），
+     * 不给数字的话用户只能看到一片空白，连反馈都无从说起。
+     */
+    stats: { courses: number; hidden: number; hiddenPoints: number; withData: number; zeroed: number };
+    courses: Array<{
+      id: string;
+      name: string;
+      displayName?: string;
+      /** 这条课程属于哪个账号（点击卡片去平台时需要用它找会话） */
+      accountId: string;
+      platformCourseId: string;
+      /** 这条记录实际的数据形状版本。缺失 = 1（加字段之前的旧数据） */
+      schema: number;
+      total: number;
+      done: number;
+      fetchedAt: string;
+      nextWindow?: { chapter: string; opensAt: string; closesAt: string };
+      /** 最近一个已关闭窗口的关闭时刻（ISO）。有它 + done<total + 无 nextWindow = 逾期 */
+      lastClosedAt?: string;
+      /** 此刻有没有开放中的章节 */
+      hasOpenNow: boolean;
+      /** 此刻还能做的任务点条数（只算已开放且还有未完成点的章节）。取不到则无此键 */
+      availableNow?: number;
+      /** 这门课在平台上的页面地址（可选）。任务点卡片点一下就能去平台继续做 */
+      courseUrl?: string;
+    }>;
+  }> {
+    const account = await this.#store.getAccount(accountId);
+    if (!account) {
+      return {
+        supported: false,
+        schema: TASK_POINT_SCHEMA,
+        stats: { courses: 0, hidden: 0, hiddenPoints: 0, withData: 0, zeroed: 0 },
+        courses: [],
+      };
+    }
+    const adapter = this.#registry.get(account.platformId);
+    const allCourses = await this.#store.listCourses([accountId]);
+    const hidden = await this.#hiddenCourseIds(accountId);
+    const fetchedAt = await this.courseProgressFetchedAt(accountId);
+
+    // 静音/删除的课程不出现 —— 与课程栏同一个名单，同一个解释
+    const visible = allCourses.filter((c) => !hidden.has(c.id));
+    // 用户手动隐藏的课程（任务点不计入成绩）也不出现，但它们仍然被抓取 ——
+    // 万一哪天又想看了，数据是现成的，不用等一轮抓取。
+    const shown = visible.filter((c) => c.taskPointHidden !== true);
+    const withData = shown.filter((c) => c.taskPoints);
+
+    return {
+      supported: Boolean(adapter?.fetchCourseProgress),
+      schema: TASK_POINT_SCHEMA,
+      ...(fetchedAt ? { fetchedAt } : {}),
+      stats: {
+        courses: allCourses.length,
+        hidden: allCourses.length - visible.length,
+        hiddenPoints: visible.length - shown.length,
+        withData: withData.length,
+        zeroed: withData.filter((c) => (c.taskPoints?.total ?? 0) === 0).length,
+      },
+      courses: withData.map((c) => {
+        const tp = c.taskPoints!;
+        // 课程页地址交给适配器拼（它才知道 classId/cpi/enc 这些平台参数）
+        const courseUrl = adapter?.buildCourseUrl?.(c);
+        return {
+          id: c.id,
+          name: c.name,
+          ...(c.displayName ? { displayName: c.displayName } : {}),
+          accountId: c.accountId,
+          platformCourseId: c.platformCourseId,
+          schema: tp.schema ?? 1,
+          total: tp.total,
+          done: tp.done,
+          fetchedAt: tp.fetchedAt,
+          ...(tp.nextWindow ? { nextWindow: tp.nextWindow } : {}),
+          ...(tp.lastClosedAt ? { lastClosedAt: tp.lastClosedAt } : {}),
+          hasOpenNow: tp.hasOpenNow === true,
+          ...(typeof tp.availableNow === 'number' ? { availableNow: tp.availableNow } : {}),
+          ...(courseUrl ? { courseUrl } : {}),
+        };
+      }),
+    };
+  }
+
+  /**
+   * 点击时解析某条任务的最终地址（可选能力）。
+   *
+   * 为什么不在同步时算好：超星作业的 `enc` 是点击那刻由列表页现签发的，
+   * 存进库里的那份过一会儿就「无权限/无效参数」。这里让适配器在点击时重抓一次。
+   */
+  async resolveTaskUrl(taskId: string): Promise<{ url?: string; debug?: string }> {
+    try {
+      const tasks = await this.#store.listTasks({ includeDeleted: true });
+      const task = tasks.find((t) => t.id === taskId);
+      if (!task) return { debug: 'task-not-found' };
+      const account = await this.#store.getAccount(task.accountId);
+      if (!account) return { debug: 'account-not-found' };
+      const adapter = this.#registry.get(account.platformId);
+      if (!adapter?.resolveTaskUrl) return { debug: 'no-resolver' };
+      const session = await this.#vault.load(account.id);
+      if (!session) return { debug: 'no-session' };
+      const course = (await this.#store.listCourses([account.id])).find((c) => c.id === task.courseId);
+      if (!course) return { debug: 'course-not-found' };
+      const ctx = this.#contextFor(account.platformId, account.id);
+      const url = await adapter.resolveTaskUrl(ctx, session, {
+        course,
+        platformTaskId: task.platformTaskId,
+        kind: task.kind as never,
+      });
+      return { url, debug: adapter.resolveDebug?.().join(' | ') };
+    } catch (e) {
+      return { debug: `error ${(e as Error).message.slice(0, 60)}` };
+    }
+  }
+
+  /** 点击任务点卡片时解析课程页地址（可选能力）。 */
+  async resolveCourseUrl(accountId: string, courseId: string): Promise<{ url?: string; debug?: string }> {
+    try {
+      const account = await this.#store.getAccount(accountId);
+      if (!account) return { debug: 'account-not-found' };
+      const adapter = this.#registry.get(account.platformId);
+      if (!adapter?.resolveCourseUrl) return { debug: 'no-resolver' };
+      const course = (await this.#store.listCourses([accountId])).find((c) => c.id === courseId);
+      if (!course) return { debug: 'course-not-found' };
+      const session = await this.#vault.load(accountId);
+      if (!session) return { debug: 'no-session' };
+      const ctx = this.#contextFor(account.platformId, accountId);
+      const url = await adapter.resolveCourseUrl(ctx, session, course);
+      return { url, debug: adapter.resolveDebug?.().join(' | ') };
+    } catch (e) {
+      return { debug: `error ${(e as Error).message.slice(0, 60)}` };
+    }
+  }
+
   /** 单账号同步主体。所有异常在这里被转成报告，绝不向外抛。 */
   async #syncAccountInner(account: PlatformAccount, opts: SyncOptions): Promise<AccountSyncReport> {
     const startMs = this.#clock.nowMs();
@@ -892,6 +1274,28 @@ export class SyncEngine {
       // 那是「缺课程列表」的故障状态，必须照常交给适配器去响亮报错。
       log.info('全部课程均在跳过 TTL 内，本轮不拉取任务');
     } else {
+      /**
+       * 库里已知的开考时刻（考试任务 → ISO）。
+       *
+       * 开考时间在超星只写在详情页里（一个考试一个请求）。适配器每轮都是新调用，
+       * 记不住上一轮抓过没有，于是只能"每轮全抓"或"只抓没结束的"：
+       * 前者请求量翻倍，后者让已结束的考试永远缺开考时间 —— 已完成列表
+       * 只好把结束时间当成截止时间显示（真机 2026-11-02：10:00 开考显示成 11:40）。
+       *
+       * 引擎知道库里有什么，所以由它把已知值传下去：适配器跳过已抓过的、补抓缺失的。
+       * 读库失败就当没有 —— 最坏是多重抓一次，不影响正确性。
+       */
+      let knownStartsAt: Record<string, string> | undefined;
+      try {
+        const knownTasks = await this.#store.listTasks({ accountIds: [account.id] });
+        const map: Record<string, string> = {};
+        for (const t of knownTasks) {
+          if (t.kind === 'exam' && t.startsAt) map[t.platformTaskId] = t.startsAt;
+        }
+        if (Object.keys(map).length > 0) knownStartsAt = map;
+      } catch {
+        log.warn('读取已知开考时间失败，本轮按未知处理', { platformId: account.platformId });
+      }
       try {
         for (;;) {
           if (pages >= maxPages) {
@@ -904,6 +1308,7 @@ export class SyncEngine {
             limit: 100,
             fullDiagnostics,
             quietCourseIds,
+            ...(knownStartsAt ? { knownStartsAt } : {}),
           };
         const page = await adapter.fetchTasks(ctx, session, req);
         declaredTotal = page.declaredTotal ?? declaredTotal;
@@ -1154,6 +1559,13 @@ export class SyncEngine {
       // 这类数据丢失以前是完全静默的（真机：拉取 84 条，列表只剩几条）
       notes.push(`注意：${mergedCount} 条任务的标题与已有记录重复，已被合并`);
     }
+    // ---- 本轮到底变了哪几条 ----
+    //
+    // 只报「更新 N」的时候，用户看到「有更新」却不知道该去看哪条，还得另点一页。
+    // 真机（2026-11-02）：连续同步三次、每次提示的是**不同**作业，而日志里只有「更新 1」——
+    // 那正是 PTA 两条记录互相顶替的时期，靠"哪个平台 + 几条"根本归不了因。
+    const changedLine = describeUpdates(plan.events);
+    if (changedLine) details.push(changedLine);
     // 适配器要说的话放最后：它是补充说明，不该挤掉上面这些「本轮发生了什么」。
     //
     // 顺带修掉一个重复：这段 push 此前被复制了两份（相邻两个 if 完全相同），
@@ -1727,9 +2139,73 @@ export class SyncEngine {
   /** 当前算出来的未来提醒（只读，无副作用）。界面用它显示「已排期 N 条」。 */
   async upcomingNotifications(): Promise<ScheduledNotification[]> {
     const tasks = await this.#store.listTasks();
-    return buildNotificationSchedule(tasks, this.#clock.now(), {
+    const now = this.#clock.now();
+    const cfg = this.#pointsCfg();
+    const pointCourses = await this.#taskPointCourses(now);
+
+    const base = buildNotificationSchedule(tasks, now, {
       prefs: this.#notifyPrefs?.(),
+      // 每日汇总里那一行任务点。用回调传进去，避免 notify-schedule 反向依赖
+      // task-point-reminder（那会成环）。
+      extraLine: (day) => digestLineFor(pointCourses, day, cfg),
     });
+    // 一次性弹窗单独算：判据是"还差多少活"，不是"离某个时刻还有多久"。
+    // 混进 buildNotificationSchedule 会让那边的规则表（T-24h/T-3h…）失去意义。
+    const points = planTaskPointNotifications(pointCourses, now, cfg);
+    return [...base, ...points].sort((a, b) => a.fireAt.localeCompare(b.fireAt));
+  }
+
+  /**
+   * 把课程摊平成任务点提醒需要的最小形状。
+   *
+   * 两处过滤：静音/删除的课（用户对整门课的态度）、手动隐藏的课（不计成绩的）。
+   * 还有一处关键判断：**只有窗口此刻真的开着，那个关闭时间才算数** ——
+   * 一个还没开放的窗口，它的关闭日期不是"还敢拖到什么时候"。
+   */
+  async #taskPointCourses(now: Date): Promise<TaskPointCourse[]> {
+    const accounts = await this.#store.listAccounts();
+    const out: TaskPointCourse[] = [];
+    for (const a of accounts) {
+      const hidden = await this.#hiddenCourseIds(a.id);
+      for (const c of await this.#store.listCourses([a.id])) {
+        if (hidden.has(c.id) || c.taskPointHidden === true) continue;
+        const tp = c.taskPoints;
+        if (!tp || tp.total === 0) continue;
+        const w = tp.nextWindow;
+        const openMs = w ? new Date(w.opensAt).getTime() : NaN;
+        const closeMs = w ? new Date(w.closesAt).getTime() : NaN;
+        const windowOpen = Number.isFinite(openMs) && Number.isFinite(closeMs) && openMs <= now.getTime() && now.getTime() < closeMs;
+        out.push({
+          id: c.id,
+          name: courseTitle(c),
+          total: tp.total,
+          done: tp.done,
+          hasOpenNow: tp.hasOpenNow === true,
+          ...(windowOpen && w ? { closesAt: w.closesAt } : {}),
+        });
+      }
+    }
+    return out;
+  }
+
+  /**
+   * 任务点页签的角标数：有几门课已经进入"该催"的窗口（含来不及的）。
+   *
+   * 和弹窗互补：弹窗只在**提醒点还没过**时排（过了就不补发，否则每次开 App 都弹）；
+   * 角标则一直显示 —— 那部分正好是弹窗不管的。
+   */
+  async taskPointAlertCount(): Promise<number> {
+    const now = this.#clock.now();
+    return taskPointAlertCount(await this.#taskPointCourses(now), now, this.#pointsCfg());
+  }
+
+  /** 任务点提醒参数：默认值 + 用户设置的"每天能投入几小时" */
+  #pointsCfg(): TaskPointReminderConfig {
+    const h = this.#notifyPrefs?.().taskPointDailyHours;
+    return {
+      ...DEFAULT_TASK_POINT_REMINDER,
+      dailyHours: Number.isFinite(h) && (h as number) > 0 ? (h as number) : DEFAULT_TASK_POINT_REMINDER.dailyHours,
+    };
   }
 
   /**
@@ -1871,6 +2347,25 @@ export class SyncEngine {
       updatedAt: this.#clock.now().toISOString(),
     });
     this.#logger.info(muted ? '课程已设为不再同步' : '课程已恢复同步', { accountId, courseId });
+  }
+
+  /**
+   * 显示/隐藏一门课的任务点统计。
+   *
+   * 与 `setCourseMuted` 是两个维度，刻意分开存：
+   *   · 静音 = 这门课**不再同步**（作业考试也不收了）→ 存游标
+   *   · 隐藏 = 同步照旧，只是**任务点不参与统计**（有些课不计入成绩）→ 存课程字段
+   * 混成一个开关会让用户以为"关掉任务点就不同步了"。
+   *
+   * 隐藏的课**仍然会被抓取** —— 数据留着，哪天想看了立刻就有，不用等一轮。
+   */
+  async setTaskPointHidden(accountId: string, courseId: string, hidden: boolean): Promise<boolean> {
+    const courses = await this.#store.listCourses([accountId]);
+    const c = courses.find((x) => x.id === courseId);
+    if (!c) return false;
+    await this.#store.upsertCourses([{ ...c, taskPointHidden: hidden }]);
+    this.#logger.info(hidden ? '任务点已隐藏该课程' : '任务点已恢复显示', { accountId, courseId });
+    return true;
   }
 
   /**
@@ -2113,6 +2608,10 @@ export class SyncEngine {
     platformCourseId: string;
     muted: boolean;
     taskCount: number;
+    /** 这门课抓到过任务点数据吗（决定管理列表里显不显示它） */
+    hasTaskPoints: boolean;
+    /** 用户是否把它从任务点页隐藏了 */
+    taskPointHidden: boolean;
   }[]> {
     const courses = await this.#store.listCourses([accountId]);
     const tasks = await this.#store.listTasks({ accountIds: [accountId], includeDeleted: true });
@@ -2136,6 +2635,8 @@ export class SyncEngine {
         platformCourseId: c.platformCourseId,
         muted: mutedSet.has(c.id),
         taskCount: countByCourse.get(c.id) ?? 0,
+        hasTaskPoints: Boolean(c.taskPoints),
+        taskPointHidden: c.taskPointHidden === true,
       }))
       .sort((a, b) => courseTitle(a).localeCompare(courseTitle(b), 'zh-CN'));
   }

@@ -44,18 +44,36 @@ export function makeCourseId(platformId: string, accountId: string, platformCour
   return `${platformId}:${sha1Hex(accountId).slice(0, 8)}:${platformCourseId}`;
 }
 
+/** 标题结尾的括号备注（NFKC 之后全角括号已折成半角，两类形态都收）。 */
+const TRAILING_NOTE = /[（(【\[]([^）)】\]]{0,12})[）)】\]]$/;
+
+/**
+ * 括号里是**序号**时，它不是"备注"，而是任务身份的一部分。
+ *
+ * 真机事故（2026-11-02）：PTA 的「25级数据结构上机实验（第3次）」被归一化成
+ * 「25级数据结构上机实验」，同一门课每次上机的指纹完全相同 —— merge 于是把
+ * 第 2 次和第 3 次当成同一条记录：标题来自这一轮、进度来自那一轮、跳转地址
+ * 又是另一轮的。用户看到「第3次 · 4/4 已交」，点进去是第2次。
+ *
+ * 判据：这类后缀区分的是**两个不同的作业**，剥掉就等于断言它们是同一个；
+ * 而「已修改」「副本」这类才是同一份作业的编辑痕迹。
+ * 宁可少归一化（最坏是多一条重复待办，看得见、能修），不可多归一化
+ * （最坏是两条作业悄悄互换身份，用户无从发现）。
+ */
+const ORDINAL_NOTE = /第\s*[0-9０-９一二三四五六七八九十百零]+\s*(?:次|讲|周|章|节|课|单元|部分|期)/;
+
 /**
  * 标题归一化：用于生成指纹做去重。
  * 真实场景里同一份作业在两次同步中的标题可能差一个后缀，
  * 不归一化就会重复入库，用户会看到两条一模一样的待办。
  */
 export function normalizeTitle(title: string): string {
-  return title
-    .normalize('NFKC')
-    .replace(/\s+/g, '')
-    .replace(/[（(【\[][^）)】\]]{0,12}[）)】\]]\s*$/, '') // 结尾括号备注
-    .replace(/[·•\-—_]+$/, '')
-    .toLowerCase();
+  // NFKC 顺带把全角括号折成半角，所以 TRAILING_NOTE 只需覆盖半角
+  // （【】 不在 NFKC 覆盖范围，单独列在正则里）。
+  const flat = title.normalize('NFKC').replace(/\s+/g, '');
+  const m = TRAILING_NOTE.exec(flat);
+  const cut = m && !ORDINAL_NOTE.test(m[1] ?? '') ? flat.slice(0, m.index) : flat;
+  return cut.replace(/[·•\-—_]+$/, '').toLowerCase();
 }
 
 /**

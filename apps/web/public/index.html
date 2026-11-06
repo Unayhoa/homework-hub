@@ -9,16 +9,6 @@
 </head>
 <body>
 
-<!-- 图标精灵：圆环箭头只定义一次，顶部按钮与底部同步状态条共用同一份路径
-     （两处各写一遍必然漂移 —— 这个项目已经吃过一次"两份清单"的亏）。
-     stroke 用 currentColor，跟随各自的 color；圆弧中心就是 viewBox 中心 (12,12)，
-     所以静止与旋转两种状态下的圆心都精确落在元素盒中心。 -->
-<svg width="0" height="0" style="position:absolute" aria-hidden="true">
-  <symbol id="i-refresh" viewBox="0 0 24 24">
-    <polyline points="23 4 23 10 17 10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></polyline>
-    <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
-  </symbol>
-</svg>
 <header class="topbar">
   <div class="brand">
     <span class="logo">课</span>
@@ -30,9 +20,13 @@
   <button class="sync-btn" id="syncBtn" aria-label="同步">
     <!-- 用 SVG 而不是文字字符 ⟳：文字字形在盒子里**视觉重心偏高** ——
          行盒按字体度量分配上下空间，而 ⟳ 没有下半部，字墨落在行盒偏上处；
-         旋转时还绕"行盒中心"转，圆心跟着偏。SVG 的圆弧中心正好是盒中心。 -->
+         旋转时还绕"行盒中心"转，圆心跟着偏。SVG 的圆弧中心正好是盒中心。
+         这里直接内联路径（不用 <use href>）：个别 WebView 在"动画作用在带 <use>
+         的 svg 上"时会把内容画到 symbol 的原始位置（页面左上角），看起来像同步
+         动画跑到了 App 图标上。内联后旋转永远发生在按钮自己的盒子里。 -->
     <svg class="sync-icon" id="syncIcon" viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
-      <use href="#i-refresh"></use>
+      <polyline points="23 4 23 10 17 10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></polyline>
+      <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
     </svg>
   </button>
 </header>
@@ -57,6 +51,17 @@
 <main>
   <!-- 待办 -->
   <section id="tab-todo" class="tab-panel active">
+    <!-- 二级切换：作业 / 任务点。
+         任务点不是"待办事项"（没有截止时间，是 18/30 这种累积指标），
+         但它和作业一样属于"这门课我还要做什么"，所以放在同一个一级页签下。
+         初始隐藏用 **class** 而不是 hidden 属性：切换逻辑用的是 classList，
+         两种写法混用会出现"代码里以为显示了、实际被属性按着"的鬼故事
+         （2026-11-02 真机：入口整个消失，而日志里没有任何错误）。 -->
+    <div class="seg-tabs hidden" id="todoSegs">
+      <button data-todo-seg="tasks" class="on">作业</button>
+      <button data-todo-seg="points">任务点 <span class="badge" id="badgePoints"></span></button>
+    </div>
+    <div id="todoTasks">
     <!-- 作业信息发生变更时的提示（截止时间/标题等）——
          放在最上面：漏看一次改期，代价可能是错过作业 -->
     <div id="changeNotice" class="change-notice hidden">
@@ -72,6 +77,14 @@
     <div id="reminderBox" class="reminders hidden">
       <h3>最近提醒</h3>
       <div id="reminderList"></div>
+    </div>
+    </div><!-- /todoTasks -->
+
+    <!-- 任务点：只读统计。徽标不参与「待办」计数 —— 它不是"要做的事"，
+         把它算进去会让「还有 14 件」变成 60+，那个直觉是待办页唯一的价值 -->
+    <div id="todoPoints" class="hidden">
+      <div id="pointsMeta" class="points-meta hidden"></div>
+      <div id="pointsList"></div>
     </div>
   </section>
 
@@ -191,7 +204,8 @@
   <section id="tab-courses" class="tab-panel">
     <p class="muted" style="padding:0 14px">
       勾选 = 参与同步；取消勾选 = 不再请求这门课（<b>已有记录完整保留</b>）。
-      往期课程取消勾选可以明显加快同步速度。
+      往期课程取消勾选可以明显加快同步速度。<br>
+      课程右侧的 <b>✎</b> 可以改显示名（只影响显示，不影响同步；留空恢复平台原名）。
     </p>
     <div id="courseList"></div>
   </section>
@@ -228,6 +242,17 @@
       </summary>
       <div class="set-body">
         <div class="faq">
+          <section class="faq-group">
+            <h4>能力边界与已知不足</h4>
+            <h5>哪些功能已经验证、哪些还需要真实数据检验</h5>
+            <p>这个 App 的平台接口来自真机抓包，不是平台官方 API；平台一改版就可能失效。添加账号时不再标「实验性」，但不代表所有平台/功能成熟度相同 —— 看它有没有被真实数据跑过：</p>
+            <p><b>已经长期使用、相对可靠：</b>账号登录与保活、作业待办抓取、超星任务点抓取、按课程自定义筛选（勾选参与同步）、即将截止的提醒与通知。</p>
+            <p><b>有设计、但还没经过真实数据验证：</b><br>
+              · <b>任务点提醒</b>：任务点数据抓取验证过，但「关闭前提前多久提醒、按每天几小时估算工作量」这套排期还没有真实到期数据检验，可能偏早/偏晚或文案不合适。<br>
+              · <b>考试待办抓取</b>：尤其超星考试，历史上出现过考试列表/时间解析的问题（这正是「有设计 ≠ 已验证」的由来）；看到考试条目不对，先看同步日志。</p>
+            <p>把这些写在最前面不是免责声明，而是提醒：<b>如果你只依赖某个未验证的能力做决定，先核对一下平台原始页面。</b></p>
+          </section>
+
           <section class="faq-group">
             <h4>提醒与通知</h4>
             <h5>提醒有时候不响</h5>
@@ -311,6 +336,18 @@
 <!-- 改课程显示名。
      只改"给人看的那行字"，不动任务上的 courseName —— 后者要和平台比对，
      改了下次同步就被写回去，历史记录也会对不上。 -->
+<div id="pointsSheet" class="sheet hidden">
+  <div class="sheet-head">
+    <button class="mini" id="pointsSheetClose">完成</button>
+    <b>任务点显示哪些课</b>
+    <span style="width:44px"></span>
+  </div>
+  <div class="sheet-body">
+    <div class="hint">有些课的任务点不计入成绩，关掉它就不会出现在任务点页。<br>这些课**照常同步**作业和考试，只是不参与任务点统计。</div>
+    <div id="pointsSheetList"></div>
+  </div>
+</div>
+
 <div id="renameSheet" class="sheet hidden">
   <div class="sheet-head">
     <button class="mini" id="renameCancel">取消</button>

@@ -56,11 +56,14 @@ body {
   /* 图标是 SVG，不再依赖字体度量；flex 居中后圆心即按钮中心 */
   display: flex; align-items: center; justify-content: center;
 }
-.sync-icon { display: block; }
+.sync-icon { display: block; transform-origin: 50% 50%; }
 .sync-btn:active { transform: scale(.94); }
-/* 旋转绕元素自身盒中心（默认 transform-origin: 50% 50%），
-   而 SVG 的圆弧中心就是盒中心 —— 所以转起来圆心不动 */
-.sync-btn.busy .sync-icon { animation: spin 1s linear infinite; }
+/* 让**按钮本身**转（圆形按钮，转起来边框也看不出来），而不是只转里面的 svg。
+   ⚠️ 类名必须用 `.spinning`，不能用 `.busy` —— `.busy` 是全屏遮罩
+   （position:fixed; inset:0），套到按钮上会让它跳到左上角、盖住 logo。
+   这正是 "同步动画跑到课业中枢图标上" 的根因（2026-11-05 复现并修掉）。 */
+.sync-btn.spinning { animation: spin .9s linear infinite; transform-origin: 50% 50%; }
+.sync-btn.spinning .sync-icon { animation: none; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
 /* ---------- 标签 ---------- */
@@ -423,7 +426,11 @@ details summary { cursor: pointer; font-size: 14px; font-weight: 600; }
    用户可以一边同步一边翻列表。 */
 .sync-bar {
   position: fixed;
-  left: 12px; right: 12px; bottom: 16px;
+  left: 12px; right: 12px;
+  /* top:auto 明确把它钉在底部：只写 bottom 时，个别 WebView 在首帧
+     还没算好视口高度，会把 fixed 元素顶到页面左上角。 */
+  top: auto;
+  bottom: calc(16px + env(safe-area-inset-bottom, 0px));
   z-index: 60;
   padding: 11px 14px;
   border-radius: 12px;
@@ -495,6 +502,97 @@ details summary { cursor: pointer; font-size: 14px; font-weight: 600; }
   font-family: inherit; cursor: pointer;
 }
 .seg-tabs button.on { background: var(--surface); color: var(--accent); font-weight: 600; }
+
+/* ---------- 任务点：课程级完成度 ----------
+   一行 = 课程 + 数字 + 进度条。刻意**没有倒计时、没有分组** ——
+   任务点回答「这门课还差多少」，不回答「什么时候之前要做」，
+   把它塞进待办的时间轴会让两边的语义一起糊掉。 */
+.points-meta {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  margin: 14px 14px 0; padding: 0 2px;
+  font-size: 12.5px; color: var(--text-2);
+}
+.points-when { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.points-hint { font-size: 11px; color: var(--text-3); }
+.point-card.clickable { cursor: pointer; }
+.point-card.clickable:active { background: var(--bg); }
+.point-open { flex: none; font-size: 12px; color: var(--accent); opacity: .8; }
+.point-card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 12px 14px; margin: 10px 14px;
+}
+/* 全部完成的降透明度但仍留在列表里 —— 用户需要能确认「这门搞定了」 */
+.point-card.done { opacity: 0.6; }
+.point-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+/* 课程名在任务点卡里只占一行：待办卡那种"58px 宽 + 折三行"的标签在这里
+   会把数字挤出去（真机 430 宽下「2026秋季学期原理课」折成三行，右侧 0/26 被切）。
+   同时去掉标签底色 —— 拉成整行后那层紫底会变成一根横条，看着像第二条进度条。 */
+.point-head .course-tag {
+  flex: 1 1 auto; width: auto; min-width: 0; max-width: 64%;
+  display: block; -webkit-line-clamp: 1;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  background: none; padding: 0; border-radius: 0;
+  font-size: 13.5px; color: var(--text); align-self: center;
+}
+.point-num {
+  font-size: 13.5px; font-weight: 600; color: var(--accent);
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.point-card.done .point-num { color: #00B368; }
+.point-bar { height: 6px; border-radius: 3px; background: var(--border); margin-top: 10px; overflow: hidden; }
+.point-bar i { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
+/* 进度条颜色 = 状态（用户不需要读文字就能扫完一屏）：
+   绿=做完 · 红=错过了 · 灰=现在没得刷 · 主色=正在倒计时 */
+.point-card.done .point-bar i { background: #00B368; }
+.point-card.closed .point-num { color: #d9534f; }
+.point-card.closed .point-bar i { background: #d9534f; }
+.point-card.locked .point-num { color: var(--text-2); }
+.point-card.locked .point-bar i { background: var(--text-2); opacity: 0.45; }
+/* 章节开放期。措辞用「关闭」不用「截止」—— 章节窗口一关就看不了了，
+   写成"截止"会让人以为还能提交东西。 */
+.point-window { margin-top: 8px; font-size: 12px; color: var(--text-2); }
+.point-window.warn { color: var(--warn); }
+.point-window.danger { color: #d9534f; font-weight: 500; }
+.link-btn {
+  border: none; background: transparent; color: var(--accent);
+  font-size: 12.5px; font-family: inherit; cursor: pointer; padding: 0; white-space: nowrap;
+}
+.points-err {
+  margin: 10px 14px; padding: 9px 11px; border-radius: 10px;
+  border: 1px solid var(--warn); background: var(--warn-soft);
+  color: var(--warn); font-size: 12.5px; line-height: 1.5;
+}
+/* 空状态的诊断行：解释"为什么这里是空的"。小一号、不用警告色 ——
+   它是说明，不是错误。 */
+.points-diag {
+  margin-top: 10px; font-size: 11.5px; color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+}
+.points-actions { display: flex; align-items: center; gap: 14px; flex: none; }
+
+/* 任务点分组（逾期 / 已完成）。
+   折叠而不是删掉：用户需要知道"有 2 门逾期"这件事本身，
+   但不需要每次都看见它们的细节。 */
+.points-group { margin: 2px 14px; }
+.points-group > summary {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 2px; font-size: 13px; font-weight: 600; color: var(--text-2);
+  cursor: pointer; list-style: none;
+}
+.points-group > summary::-webkit-details-marker { display: none; }
+/* 折叠指示：没有它这行看起来就是一句普通文字，没人会想到能点开 */
+.points-group > summary::after {
+  content: '\25B8'; font-size: 10px; color: var(--text-3, var(--text-2)); flex: none;
+}
+.points-group[open] > summary::after { content: '\25BE'; }
+.points-group-hint { margin-left: auto; font-weight: 400; font-size: 11.5px; opacity: 0.75; }
+/* 逾期是"错过了"，标题本身就该提醒 —— 折起来不等于可以忘记 */
+.points-group.closed > summary { color: #d9534f; }
+/* 组内的卡片不再带左右外边距：组本身已经有 14px */
+.points-group .point-card { margin: 8px 0; }
+
+/* 管理弹层里的课程行 */
+.points-pick { padding: 11px 14px; border-bottom: 1px solid var(--border); }
 
 /* ---------- 设置页：功能开关为一级目录 ----------
    一级行 = 功能名 + **当前值**，扫一眼就知道有哪些能力、现在各是什么状态；
@@ -689,6 +787,10 @@ details summary { cursor: pointer; font-size: 14px; font-weight: 600; }
 .prog-bar .s-ac { background: var(--ok); }
 .prog-bar .s-sub { background: var(--warn); }
 .prog-bar .s-rest { background: #e5e5ea; }
+/* 逐题着色：每道题一格，颜色对应题号位置。格间加一条极细白线，
+   让"第 3 题是橙的"一眼可数，而不是靠肉眼估比例。 */
+.prog-bar.segmented i { min-width: 2px; }
+.prog-bar.segmented i + i { box-shadow: inset 1px 0 0 rgba(255, 255, 255, .9); }
 .prog-txt {
   flex: none; font-size: 11px; color: var(--text-3);
   font-variant-numeric: tabular-nums;

@@ -22,6 +22,7 @@ import {
   normalizeTitle,
   makeFingerprint,
   mergeTasks,
+  describeUpdates,
   materializeTask,
   planReminders,
   DEFAULT_REMINDER_RULES,
@@ -169,10 +170,33 @@ describe('截止时间归一化', () => {
 // ---------------------------------------------------------------- 指纹与标题
 
 describe('标题归一化与指纹', () => {
-  test('剥离结尾括号备注，让「同一份作业」归一到一起', () => {
-    assert.equal(normalizeTitle('第三章作业'), normalizeTitle('第三章作业（第2次）'));
+  test('剥离「编辑痕迹」类结尾备注，让同一份作业归一到一起', () => {
+    assert.equal(normalizeTitle('第三章作业'), normalizeTitle('第三章作业（已修改）'));
     assert.equal(normalizeTitle('第三章 作业'), normalizeTitle('第三章作业'));
     assert.equal(normalizeTitle('第三章作业【补交】'), normalizeTitle('第三章作业'));
+  });
+
+  /**
+   * 2026-11-02 真机：PTA 把「上机实验（第N次）」全部归一到同一个指纹，
+   * merge 于是把第 2 次和第 3 次融成一条记录 —— 标题、进度、跳转地址各来自不同轮次。
+   * 序号区分的是**两个作业**，不是同一份作业的备注，绝不能剥。
+   */
+  test('序号后缀不剥 —— 「（第2次）」是另一个作业', () => {
+    assert.notEqual(
+      normalizeTitle('25级数据结构上机实验（第3次）'),
+      normalizeTitle('25级数据结构上机实验（第2次）'),
+    );
+    // 全角/半角括号是同一条（NFKC 折成一样），只是显示差异
+    assert.equal(
+      normalizeTitle('25级数据结构上机实验（第3次）'),
+      normalizeTitle('25级数据结构上机实验(第3次)'),
+    );
+    assert.notEqual(normalizeTitle('第三章作业（第1讲）'), normalizeTitle('第三章作业（第2讲）'));
+    // 真机标题（2026-11-02，PTA 实际返回）：括号里带班级范围 + 序号，9 个字符，在 12 字上限内
+    assert.notEqual(
+      normalizeTitle('25级数据结构上机实验（计9-15班第1次）'),
+      normalizeTitle('25级数据结构上机实验（第2次）'),
+    );
   });
 
   test('指纹不包含状态与截止时间 —— 交作业、改期都不应产生新指纹', () => {
@@ -239,6 +263,68 @@ describe('幂等合并', () => {
     assert.equal(plan.created, 0, '换了 ID 也不应新建');
     assert.equal(plan.updated, 0, '内容没变就不算更新');
     assert.equal(plan.unchanged, 1);
+  });
+
+  /**
+   * 2026-11-02 真机事故的回归：PTA 三个「上机实验（第N次）」标题归一化后相同，
+   * 而且**它们各自都有真实 platformTaskId**。旧逻辑让第 3 次靠指纹认领了第 2 次的
+   * 记录，于是「第3次 · 4/4 已交」点进去是第2次，下一轮又反过来。
+   */
+  test('两条都有真实 ID 时，标题相同也必须各自独立', () => {
+    const second = mat(task({ title: '25级数据结构上机实验（第2次）', platformTaskId: 'ps-2' }));
+    const third = mat(task({ title: '25级数据结构上机实验（第3次）', platformTaskId: 'ps-3' }));
+    const first = mergeTasks([], [second]);
+    const plan = mergeTasks(first.writes, [second, third]);
+
+    assert.equal(plan.created, 1, '第 3 次应该是新记录，而不是接管第 2 次');
+    assert.equal(plan.updated, 0, '第 2 次不该被改名');
+    const written = plan.writes.find((t) => t.platformTaskId === 'ps-3');
+    assert.ok(written, '必须有一条 platformTaskId 为 ps-3 的记录');
+    assert.equal(written!.title, '25级数据结构上机实验（第3次）');
+    assert.notEqual(written!.id, first.writes[0]!.id, '两个题目集的主键不能相同');
+  });
+
+  /**
+   * 第二道防线：即便指纹相同（归一化又漏了一种后缀，或平台真的给了两份同名作业），
+   * 两个**有真实 ID** 的任务也不能互相认领。
+   * 判据是"平台给没给同一个 ID"，不是"标题像不像"。
+   */
+  test('两个有稳定 ID 的任务，即便指纹相同也各自独立', () => {
+    const a = mat(task({ title: '实验报告', platformTaskId: 'x-1' }));
+    const b = { ...mat(task({ title: '实验报告', platformTaskId: 'x-2' })), fingerprint: a.fingerprint };
+    const first = mergeTasks([], [a]);
+    const plan = mergeTasks(first.writes, [a, b]);
+
+    assert.equal(plan.created, 1, '第二条必须新建');
+    assert.equal(plan.updated, 0, '第一条不该被第二条覆盖');
+  });
+
+  /**
+   * 「本轮更新 1 条」这种话等于没说：用户看到"有更新"，却不知道该去看哪条。
+   * 真机（2026-11-02）连续三次同步提示的是不同作业，而日志只有数量 —— 无从归因。
+   */
+  test('日志能说出「本轮更新了哪几条」，而不是只报个数', () => {
+    const before = [
+      mat(task({ title: '25级数据结构上机实验（第2次）', platformTaskId: 'ps-2' })),
+      mat(task({ title: '第3章作业', platformTaskId: 'hw-3' })),
+    ];
+    const after = [
+      mat(task({ title: '25级数据结构上机实验（第3次）', platformTaskId: 'ps-2' })),
+      mat(task({ title: '第3章作业', platformTaskId: 'hw-3' })),
+    ];
+    const plan = mergeTasks(before, after);
+    const line = describeUpdates(plan.events);
+
+    assert.ok(line, '有更新就必须有一句话');
+    assert.match(line!, /本轮更新 1 条/);
+    assert.match(line!, /25级数据结构上机实验（第3次）/, '报的是更新后的标题');
+    assert.match(line!, /标题/, '要说清是哪个字段变了');
+    assert.doesNotMatch(line!, /第3章作业/, '没变的任务不该被列进来');
+  });
+
+  test('没有更新时不吐出半句空话', () => {
+    const a = mat(task({ title: 'A', platformTaskId: '1' }));
+    assert.equal(describeUpdates(mergeTasks([a], [a]).events), null);
   });
 
   test('无平台 ID 的任务走指纹主键', () => {

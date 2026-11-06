@@ -25,6 +25,8 @@ export const DEFAULT_NOTIFY_PREFS: Required<NotifyPrefs> = {
   // 用户已经习惯了这个节奏，要改让他自己改。
   task: DEFAULT_REMIND_SPECS.task,
   exam: DEFAULT_REMIND_SPECS.exam,
+  // 6 小时/天：课后时间的一半。调大 = 提醒更贴截止，但假设你能突击得更狠。
+  taskPointDailyHours: 6,
   daily: true,
   dailyHour: 8,
   dailyDays: 7,
@@ -96,6 +98,10 @@ export function normalizeNotifyPrefs(raw: unknown): Required<NotifyPrefs> {
     level,
     task: normalizeSpec(o.task, DEFAULT_NOTIFY_PREFS.task),
     exam: normalizeSpec(o.exam, DEFAULT_NOTIFY_PREFS.exam),
+    taskPointDailyHours: Math.min(
+      Math.max(Math.round(Number(o.taskPointDailyHours) || DEFAULT_NOTIFY_PREFS.taskPointDailyHours), 1),
+      16,
+    ),
     daily: o.daily === undefined ? DEFAULT_NOTIFY_PREFS.daily : Boolean(o.daily),
     dailyHour,
     dailyDays,

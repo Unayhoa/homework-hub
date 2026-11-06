@@ -87,16 +87,15 @@ function showSyncBar(text, kind = 'running', autoHideMs = 0) {
   el.classList.remove('hidden', 'is-done', 'is-error');
   if (kind === 'done') el.classList.add('is-done');
   if (kind === 'error') el.classList.add('is-error');
-  // 旋转的圆环箭头用 SVG（见 index.html 的图标精灵）：
-  // 文字字形 ⟳ 旋转时绕的是"行盒中心"，而字墨不在那里 —— 圆心会跟着偏。
-  const icon =
-    kind === 'running'
-      ? '<svg class="spin" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-refresh"></use></svg>'
-      : kind === 'error'
-        ? '⚠'
-        : '✓';
-  el.innerHTML = `${icon} <span>${escapeHtml(text)}</span>`;
-  $('syncBtn').classList.toggle('busy', kind === 'running');
+  // 运行态的旋转只发生在**右上角那个同步按钮**上。
+  // ⚠️ 这里**不能**用 `busy` 这个类名：它同时也是全屏遮罩 `.busy{position:fixed;inset:0}`
+  // 的类名。以前 `syncBtn.classList.toggle('busy')` 会把按钮变成 position:fixed 的
+  // 左上角元素，动画就"跑到了 logo 上"（2026-11-05 真机 + 无头浏览器都复现）。
+  // 用一个专属类 `spinning`，语义也只对应"按钮在转"。
+  const icon = kind === 'running' ? '' : kind === 'error' ? '⚠ ' : '✓ ';
+  el.innerHTML = `${icon}<span>${escapeHtml(text)}</span>`;
+  $('syncBtn').classList.toggle('spinning', kind === 'running');
+  $('syncBtn').setAttribute('aria-busy', kind === 'running' ? 'true' : 'false');
   if (autoHideMs > 0) syncBarTimer = setTimeout(hideSyncBar, autoHideMs);
 }
 
@@ -104,7 +103,7 @@ function hideSyncBar() {
   clearTimeout(syncBarTimer);
   syncBarKind = 'idle';
   $('syncBar').classList.add('hidden');
-  $('syncBtn').classList.remove('busy');
+  $('syncBtn').classList.remove('spinning');
 }
 
 async function api(path, opts = {}) {
@@ -152,9 +151,17 @@ function fmtDueDate(task) {
   return `${a.at.getMonth() + 1}/${a.at.getDate()} ${String(a.at.getHours()).padStart(2, '0')}:${String(a.at.getMinutes()).padStart(2, '0')}`;
 }
 
-/** 时间前面那个词：考试叫「开考」，作业叫「截止」。 */
+/**
+ * 时间前面那个词。
+ *
+ * 考试有两种时刻，作业只有一种：说错会直接改变用户的行为 ——
+ * 把结束时间写成「截止」，人会以为 11:40 还能进考场（真机 2026-11-02：
+ * 期中考试 10:00 开考、11:40 结束，已完成栏里写着「截止 11:40」）。
+ * 所以考试**没有开考时间时写「结束」**，绝不借用作业的词。
+ */
 function dateLabelOf(task) {
-  return task.kind === 'exam' && task.startsAt ? '开考' : '截止';
+  if (task.kind !== 'exam') return '截止';
+  return task.startsAt ? '开考' : '结束';
 }
 
 function fmtCountdown(task) {
@@ -192,6 +199,17 @@ function fmtLocal(iso) {
 /** 平台短名。取不到时退回 displayName，多一个字也比空着强。 */
 function platformShort(id) {
   const map = { chaoxing: '超星', yuketang: '雨课堂', 'yuketang-changjiang': '长江雨课堂', ismart: 'iSmart', manual: '手动', mock: 'Mock' };
+  return map[id] ?? platforms.find((p) => p.id === id)?.displayName ?? id;
+}
+
+/**
+ * 账号/课程栏里显示的平台名。
+ *
+ * 用户只关心「哪个平台登录了」，不关心登录用的是哪个账号名
+ * （账号名在账号卡片的次要信息里还留着，需要时仍能看到）。
+ */
+function platformDisplayName(id) {
+  const map = { chaoxing: '学习通', yuketang: '雨课堂', 'yuketang-changjiang': '长江雨课堂', ismart: 'iSmart', pintia: 'PTA 拼题A' };
   return map[id] ?? platforms.find((p) => p.id === id)?.displayName ?? id;
 }
 
@@ -311,8 +329,28 @@ function renderProgress(t) {
     p.submitted >= p.total
       ? `${p.total}/${p.total} 已交 · ${p.accepted}/${p.total} AC`
       : `已交 ${p.submitted}/${p.total}${p.accepted > 0 ? ` · AC ${p.accepted}` : ''}`;
+
+  // 每题一个格子，颜色跟着**题目顺序**走，而不是按数量堆成三段。
+  // 按数量堆会把「第 3 题没 AC」画成「最后几题没 AC」—— 绿绿绿橙的真实含义
+  // 是"只有第 3 题没 AC"，堆叠却让人以为第 4 题没过（用户 2026-11-05 反馈）。
+  // 映射：AC → 绿；未提交 → 灰；其余（已交未 AC / 答案错误…）→ 橙。
+  const subtasks = Array.isArray(t.subtasks) ? t.subtasks : null;
+  const perQuestion =
+    subtasks && subtasks.length > 0 && subtasks.length === p.total
+      ? subtasks
+          .map((s) => {
+            const cls =
+              s.status === 'PROBLEM_ACCEPTED' ? 's-ac' : s.status === 'PROBLEM_NO_ANSWER' ? 's-rest' : 's-sub';
+            return `<i class="${cls}" style="width:${100 / p.total}%"></i>`;
+          })
+          .join('')
+      : '';
+  // 拿不到逐题明细时（没开考 / 只给了总题数）退回按数量堆叠的旧画法。
+  const bar = perQuestion
+    ? `<span class="prog-bar segmented">${perQuestion}</span>`
+    : `<span class="prog-bar"><i class="s-ac" style="width:${ac}%"></i><i class="s-sub" style="width:${sub}%"></i><i class="s-rest" style="width:${rest}%"></i></span>`;
   return `<button class="prog" data-detail-task="${escapeHtml(t.id)}" title="点开看每题">
-    <span class="prog-bar"><i class="s-ac" style="width:${ac}%"></i><i class="s-sub" style="width:${sub}%"></i><i class="s-rest" style="width:${rest}%"></i></span>
+    ${bar}
     <span class="prog-txt">${escapeHtml(label)}</span>
   </button>`;
 }
@@ -358,10 +396,10 @@ function openTaskDetail(taskId) {
     })
     .join('');
   $('detailBody').innerHTML = `
-    <div class="detail-meta">${escapeHtml(t.courseName)}${due ? ` · 截止 ${due}` : ''}</div>
+    <div class="detail-meta">${escapeHtml(t.courseName)}${due ? ` · ${dateLabelOf(t)} ${due}` : ''}</div>
     ${p && p.total > 0 ? `<div class="detail-sum">共 ${p.total} 题 · 已交 <b>${p.submitted}</b> · 通过 <b>${p.accepted}</b></div>` : ''}
     <div class="subtask-list">${rows || '<div class="muted">这个平台没有提供每题明细</div>'}</div>
-    ${t.url ? `<a class="detail-link" href="${escapeHtml(t.url)}">去平台做题 ↗</a>` : ''}
+    ${t.url ? `<a class="detail-link" href="${escapeHtml(t.url)}" data-open-url="${escapeHtml(t.url)}" data-task-id="${escapeHtml(t.id)}">去平台做题 ↗</a>` : ''}
   `;
   openOverlay($('taskDetail'));
 }
@@ -384,6 +422,71 @@ function openTaskExternally(url) {
   }
   // 桌面/浏览器：退回普通新标签页
   window.open(url, '_blank', 'noopener');
+}
+
+/**
+ * 点作业名：**先让后端现算一次地址**，算不出来再退回任务自带地址。
+ *
+ * 为什么必须现算：超星作业的 `enc` 是点击那一刻列表页签发的，存下来的会过期
+ * （真机表现：跳过去「无效的参数」）。后端重抓一次列表只需 1–3 个请求，
+ * 换来的是"点得开"；这是用户在点击，等一两秒比跳错页可接受。
+ */
+async function openResolvedTask(taskId, fallbackUrl) {
+  // 只有超星的链接需要"点击时现取 enc"；其余平台直接打开，避免多一次本地请求和提示。
+  if (!taskId || !/chaoxing\.com/i.test(fallbackUrl || '')) {
+    openTaskExternally(fallbackUrl);
+    return;
+  }
+  toast('正在定位作业…', 2500);
+  try {
+    const r = await api(`/api/task/url?taskId=${encodeURIComponent(taskId)}`);
+    if (r?.url) {
+      openTaskExternally(r.url);
+      // 后端退回「我的课程」页 = 这一条没定位到，明确告诉用户，不要装作成功了
+      if (/visit\/interaction/.test(r.url)) {
+        toast(
+          `没定位到具体作业，已打开「我的课程」页${r.debug ? `（${String(r.debug).slice(0, 140)}）` : ''}`,
+          9000,
+        );
+      }
+      return;
+    }
+  } catch {
+    // 解析失败不是错误：退回任务自带地址
+  }
+  openTaskExternally(fallbackUrl);
+}
+
+/** 点任务点卡片：同样先现算课程页地址，失败再退回卡片自带地址。 */
+async function openResolvedCourse(accountId, courseId, fallbackUrl) {
+  if (!accountId || !courseId) {
+    openTaskExternally(fallbackUrl);
+    return;
+  }
+  // 其它平台如果有现成地址就直开；没有（空）才走解析，留给适配器决定。
+  if (fallbackUrl && !/chaoxing\.com/i.test(fallbackUrl)) {
+    openTaskExternally(fallbackUrl);
+    return;
+  }
+  toast('正在定位课程…', 2500);
+  try {
+    const r = await api(
+      `/api/course/url?accountId=${encodeURIComponent(accountId)}&courseId=${encodeURIComponent(courseId)}`,
+    );
+    if (r?.url) {
+      openTaskExternally(r.url);
+      if (/visit\/interaction/.test(r.url)) {
+        toast(
+          `没定位到具体课程，已打开「我的课程」页${r.debug ? `（${String(r.debug).slice(0, 140)}）` : ''}`,
+          9000,
+        );
+      }
+      return;
+    }
+  } catch {
+    // 同上
+  }
+  openTaskExternally(fallbackUrl);
 }
 
 /**
@@ -436,7 +539,7 @@ function renderTodo(state) {
         ? `<span class="manual-hint" title="你在本机标过已完成，但平台明确显示未完成；按「平台优先」以平台为准">已标过 · 平台称未完成</span>`
         : '';
       const link = t.url
-        ? `<a href="${escapeHtml(t.url)}" data-open-url="${escapeHtml(t.url)}" class="task-title" style="color:inherit;text-decoration:none">${escapeHtml(t.title)} ↗</a>`
+        ? `<a href="${escapeHtml(t.url)}" data-open-url="${escapeHtml(t.url)}" data-task-id="${escapeHtml(t.id)}" class="task-title" style="color:inherit;text-decoration:none">${escapeHtml(t.title)} ↗</a>`
         : `<div class="task-title">${escapeHtml(t.title)}</div>`;
       // 「已交完但没全 AC」：留在原位（人正在做这门课，不该被挪到看不见的角落），
       // 但左侧换绿条、整体降透明度，并且排在同组末尾（顺序在 core 里定）。
@@ -507,6 +610,512 @@ function renderTodo(state) {
     .map((r) => `<div class="reminder"><b>${escapeHtml(r.title)}</b><div class="muted">${escapeHtml(r.body)}</div></div>`)
     .join('');
 }
+
+/* ──────────────────────────────── 任务点（课程级完成度）
+ *
+ * 和待办的差别不只是"内容不同"，是**判据不同**：
+ *   待办回答「什么时候之前要做」→ 按时间分组、按 deadline 提醒
+ *   任务点回答「这门课还差多少」→ 18/30 这种累积指标，没有时间轴
+ * 所以它是同一个一级页签下的**第二个视图**，而不是待办列表里的另一类条目。
+ *
+ * 数据来自平台的任务点页（超星一门课一个请求），因此：
+ *   · 默认只读缓存，不主动抓
+ *   · 进入这个视图时才检查是否过期（>24h），过期才抓
+ *   · 抓取期间显示进度提示 —— 32 门课要十几秒，静默等待会被当成卡死
+ */
+
+/**
+ * 上次停在哪个二级页签。
+ *
+ * 记住它是因为这个人每天要看任务点，每次都要多点一下很烦。
+ * 但**数据为空时不恢复**（见启动块）：把人直接扔在一个空白页上，
+ * 比多点一次糟得多 —— 他会以为功能坏了。
+ */
+const TODO_SEG_KEY = 'hh.todoSeg';
+let todoSeg = localStorage.getItem(TODO_SEG_KEY) === 'points' ? 'points' : 'tasks';
+let taskPointsCache = null;
+let taskPointsLoading = false;
+/** 上次抓取失败的时刻。用来给自动重试踩刹车 —— 登录失效时不加这个会变成死循环请求 */
+let taskPointsFailAt = 0;
+
+const POINTS_TTL_MS = 24 * 60 * 60 * 1000;
+const POINTS_FAIL_COOLDOWN_MS = 5 * 60 * 1000;
+
+/**
+ * 这批数据是什么时候抓的（多账号取最新）。
+ *
+ * 优先看**课程自己记录的 fetchedAt**，游标只当兜底 ——
+ * 游标可能丢（数据目录迁移、早期版本没写），而课程数据还在。
+ * 只看游标的话，界面会对着一堆真实数据说"还没有读取过"，
+ * 用户再点一次「读取」才恢复，而他不一定愿意花那十几秒。
+ */
+function pointsFetchedAt(data) {
+  const groups = data?.groups ?? [];
+  const stamps = [
+    ...groups.map((g) => g.fetchedAt),
+    ...groups.flatMap((g) => (g.courses ?? []).map((c) => c.fetchedAt)),
+  ].filter(Boolean);
+  return stamps.sort().pop();
+}
+
+function switchTodoSeg(name) {
+  todoSeg = name;
+  try {
+    localStorage.setItem(TODO_SEG_KEY, name);
+  } catch {
+    // 隐私模式下写不了 localStorage：记不住就记不住，不能因此报错
+  }
+  document.querySelectorAll('button[data-todo-seg]').forEach((b) => b.classList.toggle('on', b.dataset.todoSeg === name));
+  $('todoTasks').classList.toggle('hidden', name !== 'tasks');
+  $('todoPoints').classList.toggle('hidden', name !== 'points');
+  if (name === 'points') ensureTaskPoints().catch((e) => toast(e.message));
+}
+
+async function loadTaskPoints(doRefresh) {
+  if (taskPointsLoading) return;
+  taskPointsLoading = true;
+  if (doRefresh) {
+    $('pointsMeta').textContent = '正在读取…每门课一个请求，课程或账号多的时候要等一会儿';
+    $('pointsMeta').classList.remove('hidden');
+  }
+  try {
+    // 带时间戳防缓存：这个端点的结果时时刻刻在变，被 WebView 缓存住会显示旧数字
+    const data = await api(`/api/taskpoints?_=${Date.now()}${doRefresh ? '&refresh=1' : ''}`);
+    taskPointsCache = data;
+    renderTaskPoints(data);
+    // 抓取失败（未登录 / 平台异常）也记一笔冷却时间：
+    // 否则每次切进这个页签都会把 32 个请求重打一遍，而失败原因一个字都不会变。
+    const bad = (data.groups ?? []).some(
+      (g) => g.refresh && !['ok', 'unsupported', 'busy'].includes(g.refresh.status),
+    );
+    taskPointsFailAt = bad ? Date.now() : 0;
+  } catch (e) {
+    taskPointsFailAt = Date.now();
+    throw e;
+  } finally {
+    taskPointsLoading = false;
+  }
+}
+
+/** 进入视图时决定要不要真的去抓。判据只有一条：数据过期了才抓。 */
+async function ensureTaskPoints() {
+  if (!taskPointsCache) {
+    // 没有缓存：读一次（loadTaskPoints 内部会渲染）
+    await loadTaskPoints(false);
+    return;
+  }
+
+  // ⚠️ **先无条件渲染一次现有数据**。
+  //
+  // 这里踩过一个很隐蔽的坑（2026-11-03 真机：任务点页整片空白，连"还没有读取过"
+  // 都没有）：这个函数原先只负责"要不要去抓"，默认调用方已经渲染过了。
+  // 而唯一的渲染点在 refreshTaskPointsBar 里，条件是 `todoSeg === 'points'` ——
+  // 用户从「作业」切过来时那一瞬间它还是 tasks，于是两边都不画：
+  //   · 切页签时 refresh 早就跑完了（那时没渲染）
+  //   · 数据新鲜 → 这里直接 return（不抓也不渲染）
+  // 结果就是一个**空容器**，而且日志干干净净。
+  // 教训：负责"决定要不要取数据"的函数，也必须保证"已经有数据就画出来"，
+  // 否则它的 return 就等于把界面留白。
+  renderTaskPoints(taskPointsCache);
+
+  const supported = (taskPointsCache.groups ?? []).filter((g) => g.supported);
+  if (supported.length === 0) return;
+
+  // 记录的「形状版本」落后 → 必须重抓。
+  // 不加这条判断的话，新增的字段要等 24h TTL 过期才会出现，
+  // 用户看到的是"新功能没生效"，而代码怎么读都是对的（真机 2026-11-02 撞过）。
+  const outdated = supported.some((g) =>
+    (g.courses ?? []).some((c) => (c.schema ?? 1) < (g.schema ?? 1)),
+  );
+
+  const last = pointsFetchedAt(taskPointsCache);
+  const stale = !last || Date.now() - new Date(last).getTime() > POINTS_TTL_MS;
+  const hasAny = supported.some((g) => (g.courses ?? []).some((c) => c.total > 0));
+  // 从没抓过（stale）、抓到的是空（hasAny=false，可能上次失败）、或数据形状过旧 → 抓一次
+  if (!stale && hasAny && !outdated) return;
+  // 刚失败过就先不试：失败原因通常不会在五分钟内自己好
+  if (Date.now() - taskPointsFailAt < POINTS_FAIL_COOLDOWN_MS) return;
+  await loadTaskPoints(true);
+}
+
+/**
+ * 刷新「任务点」页签是否该出现。
+ *
+ * 判据只有一条：**有账号**。
+ * 不按"平台是否声明了任务点能力"来隐藏入口 —— 那样一旦能力探测出错
+ * （适配器没注册上、版本不对、接口报错），入口会**凭空消失**，
+ * 而用户既看不到原因也找不到反馈的由头。2026-11-02 真机就撞上了：
+ * 页签没了，日志干干净净，只能靠猜。
+ * 宁愿让没有任务点的平台用户多看到一个空页签（里面会说明原因），
+ * 也不要让"功能不见了"变成一种静默失败。
+ */
+async function refreshTaskPointsBar() {
+  try {
+    const data = await api('/api/taskpoints');
+    taskPointsCache = data;
+    // 角标：进入"该催"窗口的课程数。用感叹号而不是数字 ——
+    // 用户要的是"有没有事"，不是"有几件"（几件已经在页签里面了）。
+    setPointsBadge(data.alert ?? 0);
+    const groups = data.groups ?? [];
+    // 两道保险：任务点端点返回空 **或** 它自己出错，都不该让入口消失。
+    // 只要 /api/state 里还有账号，就把入口放出来 —— 用户有账号却看不到功能，
+    // 唯一能反馈的信息就是"它不见了"，这种故障没有任何可诊断性。
+    const hasAccounts = (currentState?.accounts ?? []).length > 0;
+    $('todoSegs').classList.toggle('hidden', groups.length === 0 && !hasAccounts);
+    if (todoSeg === 'points') renderTaskPoints(data);
+  } catch (e) {
+    // 拿不到就把入口放出来并留下原因：这是唯一能让用户看见"出事了"的通道
+    $('todoSegs').classList.remove('hidden');
+    const meta = $('pointsMeta');
+    meta.textContent = `任务点读取失败：${e.message ?? e}`;
+    meta.classList.remove('hidden');
+  }
+}
+
+function renderTaskPoints(data) {
+  const allGroups = data.groups ?? [];
+  // 有账号、却没有一个平台声明「任务点」能力 → 说清楚是平台不支持。
+  // 这时候显示"还没有读取过"是在撒谎，用户会一直点「读取」而永远没有结果。
+  if (allGroups.length > 0 && allGroups.every((g) => !g.supported)) {
+    $('pointsList').innerHTML = `<div class="empty">当前账号的平台没有「任务点」<div class="muted">${escapeHtml(
+      [...new Set(allGroups.map((g) => g.platformId))].join('、'),
+    )}</div></div>`;
+    $('pointsMeta').classList.add('hidden');
+    return;
+  }
+
+  const groups = allGroups.filter((g) => g.supported);
+  const rows = [];
+
+  // 空状态必须能解释"为什么空"：没抓过 / 抓到了 0 / 课程被隐藏，三种原因
+  // 在界面上长得一模一样，没有这行数字用户连反馈都无从说起。
+  const stats = allGroups.reduce(
+    (acc, g) => {
+      const s = g.stats ?? {};
+      acc.courses += s.courses ?? 0;
+      acc.hidden += s.hidden ?? 0;
+      acc.hiddenPoints += s.hiddenPoints ?? 0;
+      acc.withData += s.withData ?? 0;
+      acc.zeroed += s.zeroed ?? 0;
+      return acc;
+    },
+    { courses: 0, hidden: 0, hiddenPoints: 0, withData: 0, zeroed: 0 },
+  );
+  const diag =
+    `课程 ${stats.courses} 门` +
+    (stats.hidden > 0 ? ` · 不同步 ${stats.hidden} 门` : '') +
+    (stats.hiddenPoints > 0 ? ` · 手动隐藏 ${stats.hiddenPoints} 门` : '') +
+    ` · 有任务点数据 ${stats.withData} 门` +
+    (stats.zeroed > 0 ? ` · 其中 ${stats.zeroed} 门读到 0 个` : '');
+
+  const bad = allGroups
+    // busy = 另一份正在读，不是错误（后端有并发锁，后来的直接返回 busy）
+    .filter((g) => g.refresh && !['ok', 'unsupported', 'busy'].includes(g.refresh.status))
+    .map((g) => `${g.label}：${g.refresh.message ?? g.refresh.status}`);
+  const badLine = bad.length ? `<div class="points-err">上次读取没完成 —— ${escapeHtml(bad.join('；'))}</div>` : '';
+
+  for (const g of groups) {
+    for (const c of g.courses ?? []) {
+      if (!c.total) continue;
+      rows.push({ ...c, accountLabel: platformDisplayName(g.platformId) });
+    }
+  }
+
+  const last = pointsFetchedAt(data);
+  const meta = $('pointsMeta');
+
+  if (!last) {
+    // 从没读过：说清楚代价再让用户决定，而不是自动开跑
+    $('pointsList').innerHTML = `
+      <div class="empty">还没有读取过任务点
+        <div class="muted">从学习通读取每门课的「已完成任务点 X/Y」。<br>一门课一个请求，课程多的话要十几秒。</div>
+        <div class="points-diag">${escapeHtml(diag)}</div>
+        <button class="primary" id="pointsRefresh" style="margin-top:12px">读取任务点</button>
+      </div>`;
+    meta.classList.add('hidden');
+    return;
+  }
+
+  meta.innerHTML =
+    `<span class="points-when">上次读取：${escapeHtml(fmtLocal(last))}（${escapeHtml(fmtAge(last))}）` +
+    `<span class="points-hint">同步时每天自动更新一次；点「强制刷新」可立即重抓（每门课一个请求）</span></span>` +
+    `<span class="points-actions">` +
+    `<button class="link-btn" id="pointsManage">管理</button>` +
+    `<button class="link-btn" id="pointsRefresh" title="跳过每天一次的限制，立即重新抓取所有课程的任务点（每门课一个请求）">强制刷新</button>` +
+    `</span>`;
+  meta.classList.remove('hidden');
+
+  if (rows.length === 0) {
+    $('pointsList').innerHTML =
+      badLine ||
+      `<div class="empty">这些课程都没有任务点
+        <div class="muted">只有设了任务点的课才会出现在这里</div>
+        <div class="points-diag">${escapeHtml(diag)}</div>
+      </div>`;
+    return;
+  }
+
+  // 分三堆：逾期 / 进行中 / 已完成。
+  // 逾期和已完成各自折起来 —— 前者已经无法改变，后者不需要再看，
+  // 一直铺在首屏只会把"还能做什么"挤下去（用户原话：多门逾期一定有收纳需求）。
+  const buckets = { closed: [], active: [], done: [] };
+  for (const c of rows) {
+    const k = pointsStatus(c).kind;
+    (k === 'closed' ? buckets.closed : k === 'done' ? buckets.done : buckets.active).push(c);
+  }
+  const byName = (a, b) =>
+    String(a.displayName || a.name).localeCompare(String(b.displayName || b.name), 'zh-CN');
+  buckets.closed.sort(byName);
+  buckets.done.sort(byName);
+  // 进行中：现在能刷的在前，还没开放的在后；同级按课程名
+  const ACTIVE_RANK = { open: 0, locked: 1, free: 2 };
+  buckets.active.sort((a, b) => {
+    const ra = ACTIVE_RANK[pointsStatus(a).kind] ?? 9;
+    const rb = ACTIVE_RANK[pointsStatus(b).kind] ?? 9;
+    return ra !== rb ? ra - rb : byName(a, b);
+  });
+
+  const card = (c) => {
+    const pct = c.total > 0 ? Math.round((c.done / c.total) * 100) : 0;
+    const st = pointsStatus(c);
+    // 有 courseUrl 或能按课程解析，就能点卡片去平台（超星：这门课的课程页）。
+    const open =
+      c.courseUrl || c.accountId
+        ? ` clickable" data-points-url="${escapeHtml(c.courseUrl ?? '')}" data-course-id="${escapeHtml(c.id)}" data-account-id="${escapeHtml(c.accountId ?? '')}`
+        : '';
+    return `
+      <div class="point-card ${st.kind}${open}">
+        <div class="point-head">
+          <span class="course-tag" title="${escapeHtml(c.accountLabel ?? '')}">${escapeHtml(c.displayName || c.name)}</span>
+          <span class="point-num">${c.done}/${c.total} · ${pct}%</span>
+          ${c.courseUrl || c.accountId ? '<span class="point-open" title="去平台这门课继续做">↗</span>' : ''}
+        </div>
+        <div class="point-bar"><i style="width:${pct}%"></i></div>
+        ${st.text ? `<div class="point-window ${st.cls}">${escapeHtml(st.text)}</div>` : ''}
+      </div>`;
+  };
+
+  // 顺序：**能做的在最上面**，逾期折起来放它下面，已完成沉底。
+  // 逾期曾经排在第一位 —— 那是把"已经无法改变的事"放在用户每天第一眼的位置，
+  // 而它恰恰是唯一不需要现在动手的一类（用户 2026-11-03 提出）。
+  let html = badLine;
+  html += buckets.active.map(card).join('');
+  if (buckets.closed.length > 0) {
+    // 默认收起：知道"有 2 门逾期"就够，细节想看再点开
+    html += `<details class="points-group closed"><summary>逾期 ${buckets.closed.length} 门<span class="points-group-hint">已无法补做</span></summary>${buckets.closed
+      .map(card)
+      .join('')}</details>`;
+  }
+  if (buckets.done.length > 0) {
+    html += `<details class="points-group done"><summary>已完成 ${buckets.done.length} 门<span class="points-group-hint"></span></summary>${buckets.done
+      .map(card)
+      .join('')}</details>`;
+  }
+  $('pointsList').innerHTML = html;
+}
+
+/**
+ * 一门课的任务点该怎么说、进度条该是什么颜色。
+ *
+ * 判据只有一条：**用户现在能不能做，以及错过没**。四种情况行动完全不同：
+ *
+ *   已全部完成  → 只剩确认，收进"已完成"
+ *   还差 + 章节已关 → **错过**，收进"逾期"（红）
+ *   还差 + 现在能刷 → 去刷，期限逼近时变黄/红（紫）
+ *   还差 + 全都没开 → 去也白去，只需知道哪天开（灰）
+ *
+ * 两条刻意的省略：
+ *   ① **不显示"还差 N 个"**——标题行已经有 `24/50 · 48%`，再说一遍是重复。
+ *      但「现在可做 N 个」要说：`还差` 是全课程累计差（含着还没开放 / 已关闭的章节），
+ *      而这两个数在分阶段开放的课里**根本不是一回事** —— 用户要的是"现在点进去能做几条"。
+ *   ② **不显示章节名**——它对"要刷多少 / 什么时候截止"没有任何帮助，
+ *      而且本身不稳定（选的是最快关闭的窗口，同时间时取页面上第一个）。
+ */
+function pointsStatus(c, now = Date.now()) {
+  const md = (t) => {
+    const d = new Date(t);
+    return `${d.getMonth() + 1}/${d.getDate()}`;
+  };
+  const ms = (iso) => {
+    const n = new Date(iso).getTime();
+    return Number.isFinite(n) ? n : NaN;
+  };
+
+  if (c.total > 0 && c.done >= c.total) return { kind: 'done', text: '已全部完成', cls: '' };
+
+  const w = c.nextWindow;
+  const closes = w ? ms(w.closesAt) : NaN;
+  const opens = w ? ms(w.opensAt) : NaN;
+
+  // ① 现在能刷。
+  if (c.hasOpenNow) {
+    // 同时还有没开放的章节 → 提一句，否则用户会以为剩下的一直刷不完是自己的问题
+    const upcoming = Number.isFinite(opens) && opens > now ? ` · ${md(opens)} 开新章` : '';
+    // 「现在可做 N 个」：只算此刻已经开放、且还有未完成点的章节。
+    // 取不到这个数（老数据 / 页面认不出章节）时退回旧文案，绝不编一个数。
+    const avail = Number.isFinite(c.availableNow) ? `现在可做 ${c.availableNow} 个` : '';
+
+    // 只有当某个窗口**此刻真的开着**，那个关闭时间才属于"你现在要做的事"。
+    // 若"能做"来自没设时间限制的章节（超星给「N个待完成任务点」那种），
+    // 窗口里那个日期其实是别的章节的，拿它当期限就是在编造。
+    const windowActive =
+      Number.isFinite(opens) && Number.isFinite(closes) && opens <= now && now < closes;
+    if (windowActive) {
+      const days = Math.ceil((closes - now) / 86400000);
+      const tail = days <= 7 ? ` · 剩 ${days} 天` : '';
+      return {
+        kind: 'open',
+        text: `${avail ? `${avail} · ` : ''}${md(closes)} 关闭${tail}${upcoming}`,
+        cls: days <= 3 ? 'danger' : days <= 7 ? 'warn' : '',
+      };
+    }
+    // 能做但没有正在开的窗口（没设时间限制）→ 只说"能做"，不编日期
+    return { kind: 'open', text: avail ? `${avail}${upcoming}` : `还有可做的${upcoming}`, cls: '' };
+  }
+
+  // ② 一章都没开：去也白去，只需知道哪天开。
+  // 这句话必须包含"剩下的"——只写"11/23 开放"会被读成"现在什么都没有"，
+  // 而出问题时用户会以为是自己没做完。
+  if (Number.isFinite(opens) && opens > now) {
+    return { kind: 'locked', text: `剩下的等 ${md(opens)} 开放`, cls: '' };
+  }
+
+  // ③ 没有未来窗口、但有已关闭的窗口 → **错过了**
+  const closedAt = c.lastClosedAt ? ms(c.lastClosedAt) : NaN;
+  if (Number.isFinite(closedAt)) {
+    return { kind: 'closed', text: `已关闭 · ${md(closedAt)}`, cls: 'danger' };
+  }
+
+  // ④ 完全没设时间限制：标题行已经说明还差多少，这里不再重复
+  return { kind: 'free', text: '', cls: '' };
+}
+
+/** 「3 天前」这种人话。超过一天就不用小时数了 —— 精度本身就是噪音。 */
+function fmtAge(iso) {
+  const t = new Date(iso).getTime();
+  if (!Number.isFinite(t)) return '';
+  const min = Math.floor((Date.now() - t) / 60000);
+  if (min < 1) return '刚刚';
+  if (min < 60) return `${min} 分钟前`;
+  const hour = Math.floor(min / 60);
+  if (hour < 24) return `${hour} 小时前`;
+  return `${Math.floor(hour / 24)} 天前`;
+}
+
+/**
+ * 任务点页签角标。
+ *
+ * 只在"已经进入该催的窗口"时亮，包括已经来不及的那种 ——
+ * 那正是弹窗不覆盖的部分（弹窗只在提醒点之前排，过了就交给角标）。
+ */
+function setPointsBadge(n) {
+  const el = $('badgePoints');
+  if (!el) return;
+  el.textContent = n > 0 ? '!' : '';
+  el.title = n > 0 ? `${n} 门课的任务点快关了` : '';
+}
+
+$('todoSegs').addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-todo-seg]');
+  if (btn) switchTodoSeg(btn.dataset.todoSeg);
+});
+
+$('pointsList').addEventListener('click', (e) => {
+  if (e.target.closest('#pointsRefresh')) {
+    loadTaskPoints(true).catch((err) => toast(err.message));
+    return;
+  }
+  // 点课程卡 → 去平台这门课继续做（优先现算课程页地址，失败退回卡片自带地址）
+  const card = e.target.closest('[data-points-url]');
+  if (card) {
+    openResolvedCourse(card.dataset.accountId, card.dataset.courseId, card.dataset.pointsUrl);
+  }
+});
+
+$('pointsMeta').addEventListener('click', (e) => {
+  if (e.target.closest('#pointsRefresh')) loadTaskPoints(true).catch((err) => toast(err.message));
+  if (e.target.closest('#pointsManage')) openPointsManager().catch((err) => toast(err.message));
+});
+
+// 题目详情里的「去平台做题」也走点击时解析（和列表里的作业名同一套逻辑）
+$('taskDetail').addEventListener('click', (e) => {
+  const a = e.target.closest('a[data-open-url]');
+  if (!a) return;
+  e.preventDefault();
+  openResolvedTask(a.dataset.taskId, a.dataset.openUrl);
+});
+
+/**
+ * 任务点管理：选择哪些课参与统计。
+ *
+ * 为什么这个开关不放在课程页：「不再同步」和「不统计任务点」是两个维度，
+ * 混在同一行会让人以为关掉任务点就不同步了。而选择的时机也很明确 ——
+ * 用户是在看到某门课的任务点之后才决定"这个不用管"。
+ *
+ * 默认全选（显示）：漏掉一门要刷的课代价是挂科，多显示一门只是列表长一点。
+ */
+async function openPointsManager() {
+  const box = $('pointsSheetList');
+  box.innerHTML = '<div class="muted" style="padding:12px">加载中…</div>';
+  openOverlay($('pointsSheet'));
+  try {
+    const r = await api('/api/courses');
+    const rows = [];
+    for (const g of r.groups ?? []) {
+      for (const c of g.courses ?? []) {
+        // 没有任务点数据的课列出来也没意义 —— 那只是"这门课没有任务点"
+        if (!c.hasTaskPoints) continue;
+        // 课程栏已经取消勾选（不再同步）的课不列出来：
+        // 那个勾代表用户对**整门课**的态度，这边再问一次"要不要统计任务点"
+        // 等于把同一个决定问两遍，而且答案还可能相反（用户 2026-11-03 提出）。
+        if (c.muted) continue;
+        // accountId 在**组**上，课程对象里没有 —— 之前忘了带，勾选时报"缺少参数"。
+        // 这类字段一路从接口传到 DOM 的 data-* 上，中途少一个就只有到后端才炸。
+        rows.push({ ...c, accountId: g.accountId, accountLabel: g.label });
+      }
+    }
+    if (rows.length === 0) {
+      box.innerHTML = '<div class="muted" style="padding:12px">还没有抓到任何任务点数据，先回上一页读一次。</div>';
+      return;
+    }
+    rows.sort((a, b) => String(a.displayName || a.name).localeCompare(String(b.displayName || b.name), 'zh-CN'));
+    box.innerHTML = rows
+      .map(
+        (c) => `
+      <label class="course-row-pick points-pick">
+        <input type="checkbox" data-points-course="${escapeHtml(c.id)}" data-points-account="${escapeHtml(c.accountId)}"${c.taskPointHidden ? '' : ' checked'}>
+        <span class="course-row-name">${escapeHtml(c.displayName || c.name)}</span>
+      </label>`,
+      )
+      .join('');
+  } catch (e) {
+    box.innerHTML = `<div class="muted" style="padding:12px">加载失败：${escapeHtml(e.message)}</div>`;
+  }
+}
+
+$('pointsSheetList').addEventListener('change', async (e) => {
+  const cb = e.target.closest('input[data-points-course]');
+  if (!cb) return;
+  const hidden = !cb.checked;
+  try {
+    await api('/api/course/taskpoint', {
+      method: 'POST',
+      body: JSON.stringify({
+        accountId: cb.dataset.pointsAccount,
+        courseId: cb.dataset.pointsCourse,
+        hidden,
+      }),
+    });
+    // 列表立刻跟着变，不用等关弹层 —— 让用户当场看到结果
+    await refreshTaskPointsBar();
+  } catch (err) {
+    // 失败要把开关拨回去，否则界面在说谎
+    cb.checked = !cb.checked;
+    toast(err.message);
+  }
+});
+
+$('pointsSheetClose').addEventListener('click', () => closeOverlay($('pointsSheet')));
 
 /**
  * 截止提醒的排期状态。
@@ -579,11 +1188,11 @@ function renderDone(state) {
           <div class="task-body">
             ${
               t.url
-                ? `<a href="${escapeHtml(t.url)}" data-open-url="${escapeHtml(t.url)}" class="task-title" style="color:inherit;text-decoration:none">${escapeHtml(t.title)} ↗</a>`
+                ? `<a href="${escapeHtml(t.url)}" data-open-url="${escapeHtml(t.url)}" data-task-id="${escapeHtml(t.id)}" class="task-title" style="color:inherit;text-decoration:none">${escapeHtml(t.title)} ↗</a>`
                 : `<div class="task-title">${escapeHtml(t.title)}</div>`
             }
             <div class="task-meta"><span class="kind">${KIND[t.kind] ?? t.kind}</span><span class="plat">${escapeHtml(taskPlatform(t))}</span> · ${escapeHtml(status)}</div>
-            ${due ? `<div class="countdown normal">截止 ${due}</div>` : ''}
+            ${due ? `<div class="countdown normal">${dateLabelOf(t)} ${due}</div>` : ''}
             ${renderProgress(t)}
           </div>
           ${origin}
@@ -696,8 +1305,8 @@ function renderAccounts(state) {
       return `
         <div class="account">
           <div>
-            <div class="name"><span class="dot ${cls}"></span>${escapeHtml(a.label)} ${cred}</div>
-            <div class="meta">${escapeHtml(a.platformId)} · ${last}</div>
+            <div class="name"><span class="dot ${cls}"></span>${escapeHtml(platformDisplayName(a.platformId))} ${cred}</div>
+            <div class="meta">${escapeHtml(a.label)} · ${last}</div>
             ${msg}
           </div>
           <div style="display:flex;gap:6px;align-items:center">${sampleBtn}
@@ -732,7 +1341,7 @@ async function renderCourses() {
       .map(
         (g) => `
       <div class="card">
-        <h3>${escapeHtml(g.label)} <span class="muted" style="font-weight:400">· ${g.courses.length} 门</span></h3>
+        <h3>${escapeHtml(platformDisplayName(g.platformId))} <span class="muted" style="font-weight:400">· ${g.courses.length} 门</span></h3>
         ${
           g.courses.length === 0
             ? '<div class="muted">这个账号下还没有课程（先同步一次）</div>'
@@ -798,7 +1407,7 @@ async function saveRename() {
 
 function renderPlatformOptions() {
   const options = platforms
-    .map((p) => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.displayName)}${p.experimental ? '（实验性）' : ''}</option>`)
+    .map((p) => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.displayName)}</option>`)
     .join('');
   for (const id of ['harPlatform', 'attachPlatform']) {
     $(id).innerHTML = options;
@@ -1382,6 +1991,9 @@ async function renderSettings() {
   const minGap = Number(data.minGapHours ?? 1);
   const opened = (k) => (setOpen.has(k) ? ' open' : '');
   const dailyOn = s.daily !== false;
+  // 任务点提醒：每天能投入几小时。默认 6，和 core 里的默认值一致。
+  const pointsHours = Number(s.taskPointDailyHours) > 0 ? Number(s.taskPointDailyHours) : 6;
+  const pointsLeadDays = (25 / pointsHours).toFixed(1);
   const quietOn = s.quietEnabled !== false;
   presetCache = presets;
 
@@ -1400,11 +2012,11 @@ async function renderSettings() {
   host.innerHTML = `
     <details class="set-item" data-set="level"${opened('level')}>
       <summary>
-        <span class="set-name">提醒密度</span>
+        <span class="set-name">作业 / 考试提醒</span>
         <span class="set-now">作业 ${fmtHours(task.firstHours)}起 · ${task.times} 次</span>
       </summary>
       <div class="set-body">
-        <p class="muted">从什么时候开始提醒、到什么时候结束，中间提醒几次。改完立刻重新排期。</p>
+        <p class="muted">只作用于作业和考试；任务点提醒在下面单独设置。从什么时候开始提醒、到什么时候结束，中间提醒几次。改完立刻重新排期。</p>
 
         <div class="seg">
           ${Object.keys(presets)
@@ -1443,6 +2055,27 @@ async function renderSettings() {
         </p>
         <p class="muted">上限 3 次不是为了省电 —— 手机系统会按"你多久打开一次 App"限制提醒次数
           （最严时每天只允许 1 条）。给一个系统做不到的密度等于给一个假承诺。</p>
+      </div>
+    </details>
+
+    <details class="set-item" data-set="points"${opened('points')}>
+      <summary>
+        <span class="set-name">任务点提醒</span>
+        <span class="set-now">每天 ${pointsHours} 小时</span>
+      </summary>
+      <div class="set-body">
+        <p class="muted">任务点和作业不是一回事：作业是"在某个时刻前交上去"，
+          任务是"要花掉多少时间"。所以它的提醒时机按<b>还差多少活</b>倒推 ——
+          提前 24 小时提醒一门还剩 30 小时视频的课，等于通知你已经来不及了。</p>
+        <label class="set-row">每天大概能投入
+          <select id="setPointsHours">
+            ${[2, 3, 4, 5, 6, 8, 10, 12]
+              .map((v) => `<option value="${v}"${v === pointsHours ? ' selected' : ''}>${v} 小时</option>`)
+              .join('')}
+          </select>
+        </label>
+        <p class="muted">按这个速度：还差 100 个任务点（约 25 小时）→ 提前 <b>${pointsLeadDays}</b> 天提醒。<br>
+          调大会让提醒更贴截止，但也同时假设你能突击得更狠 —— 那几天正好有课，就等于没提醒。</p>
       </div>
     </details>
 
@@ -2001,7 +2634,8 @@ $('settingsList').addEventListener('click', (e) => {
 });
 $('settingsList').addEventListener('change', (e) => {
   const id = e.target.id;
-  if (id === 'setDailyOn') saveSettings({ daily: e.target.checked });
+  if (id === 'setPointsHours') saveSettings({ taskPointDailyHours: Number(e.target.value) });
+  else if (id === 'setDailyOn') saveSettings({ daily: e.target.checked });
   else if (id === 'setDailyHour') saveSettings({ dailyHour: Number(e.target.value) });
   else if (id === 'setDailyDays') saveSettings({ dailyDays: Number(e.target.value) });
   else if (id === 'setQuietOn') saveSettings({ quietEnabled: e.target.checked });
@@ -2095,26 +2729,27 @@ async function refresh() {
   currentState = state;
   platforms = state.platforms ?? [];
 
-  const counts = state.counts ?? {};
   const syncing = state.syncing === true;
   // 刻意不在 refresh 里弹全屏遮罩 —— 后台同步（自动触发 / 原生返回触发）
   // 不该打断用户，他照常看列表就行。遮罩只由「用户主动点同步」负责显示。
-  // 同步状态改在标题栏用一行小字表达。
-  // 副标题里的「待办 N」只数还没交完的；已交完的单独报一个数，
-  // 否则两个人群看到的是同一个会撒谎的数字。
-  const pendingAcN = counts.pendingAc ?? 0;
-  const todoN = Math.max(0, (counts.total ?? 0) - pendingAcN);
-  const countSuffix = pendingAcN > 0 ? ` · 待办 ${todoN} · 已交 ${pendingAcN}` : ` · 待办 ${todoN}`;
+  //
+  // 副标题只报「上次同步时间」。
+  // **不再报「待办 N · 已交 M」**：待办数在一级页签的角标上已经有了（更显眼），
+  // 而这里的「已交」其实是 pendingAc（全交完但没全 AC 的条数），
+  // 它既不是"已交作业数"，也和角标口径不一致 —— 两个数放在一起只会互相打架。
   $('subtitle').textContent = syncing
     ? '正在更新…'
     : state.lastSyncAt
-      ? `上次同步 ${fmtLocal(state.lastSyncAt)}${countSuffix}`
+      ? `上次同步 ${fmtLocal(state.lastSyncAt)}`
       : '尚未同步 · 先添加账号';
 
   renderTodo(state);
   renderDone(state);
   renderAccounts(state);
   renderPlatformOptions();
+  // 任务点入口只在"有平台支持"时出现 —— 不用超星的人看到的界面必须和以前一模一样。
+  // 这个请求只读本地缓存、不碰平台，所以每次刷新都问一遍是安全的。
+  refreshTaskPointsBar();
 
   // 与后端状态对齐：别处触发的同步（例如原生侧调 syncNow）也要能看到进度；
   // 它结束了就把状态条收起来。本地同步进行中时不动它（由 doSync 负责收尾）。
@@ -2211,6 +2846,26 @@ async function doSync() {
     clearInterval(tick);
     syncing = false;
     await refresh();
+    // 任务点是"同步的一部分，但按天在后台刷新"（见 api.ts 的 refreshTaskPointsQuietly）。
+    // 它不会拖慢同步，所以这里轻量轮询几次：数据真的变了就提示一句，
+    // 让用户看到"顶部同步确实也会更新任务点"，而不是以为那是另一套系统。
+    const beforePoints = pointsFetchedAt(taskPointsCache);
+    let tries = 0;
+    const watch = setInterval(async () => {
+      tries += 1;
+      try {
+        await refreshTaskPointsBar();
+      } catch {
+        // 读缓存失败不影响同步结果
+      }
+      const afterPoints = pointsFetchedAt(taskPointsCache);
+      if (beforePoints && afterPoints && afterPoints !== beforePoints) {
+        clearInterval(watch);
+        toast('任务点已在后台更新', 3500);
+      } else if (tries >= 5) {
+        clearInterval(watch);
+      }
+    }, 6000);
   }
 }
 
@@ -2405,7 +3060,7 @@ $('todoList').addEventListener('click', async (e) => {
   const openLink = e.target.closest('a[data-open-url]');
   if (openLink) {
     e.preventDefault();
-    openTaskExternally(openLink.dataset.openUrl);
+    openResolvedTask(openLink.dataset.taskId, openLink.dataset.openUrl);
     return;
   }
   const tag = e.target.closest('.course-tag');
@@ -2435,7 +3090,7 @@ $('doneList').addEventListener('click', (e) => {
   const openLink = e.target.closest('a[data-open-url]');
   if (openLink) {
     e.preventDefault();
-    openTaskExternally(openLink.dataset.openUrl);
+    openResolvedTask(openLink.dataset.taskId, openLink.dataset.openUrl);
     return;
   }
   const tag = e.target.closest('.course-tag');
@@ -3063,5 +3718,18 @@ function renderAppVersion() {
       $('subtitle').textContent = '连接失败';
       toast(e.message, 5000);
     }
+  }
+  // 兜底：任务点入口不能因为上面任何一步抛错而消失。
+  // refresh() 里已经调过一次，这里是**独立的一次** —— 重复调用只多一个本地读库请求，
+  // 但换来的是"入口永远由它自己决定"，而不是由别人是否成功决定。
+  await refreshTaskPointsBar();
+  // 恢复上次停的二级页签。只在"确实有数据"时恢复：
+  // 数据空的时候把人直接扔进一个空白页，他会以为功能坏了。
+  if (todoSeg === 'points') {
+    const hasRows = (taskPointsCache?.groups ?? []).some(
+      (g) => g.supported && (g.courses ?? []).some((c) => c.total > 0),
+    );
+    if (hasRows) switchTodoSeg('points');
+    else todoSeg = 'tasks';
   }
 })();

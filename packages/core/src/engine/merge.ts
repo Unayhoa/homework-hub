@@ -341,6 +341,53 @@ export const DEFAULT_MERGE_OPTIONS: MergeOptions = {
 };
 
 /**
+ * 变更字段的中文名 —— 只用于同步日志里那句「本轮更新：某某（标题、截止时间）」。
+ *
+ * ⚠️ 这是**第二份**字段名映射：面向界面渲染的那份在 `apps/web/public/app.js`
+ * 的 `CHANGE_FIELD`（它还要按字段类型格式化值）。两份必然漂移，所以这里刻意
+ * **只用于日志文本、不用于渲染**；新增 `ChangeField` 时两处都要改。
+ * 为什么不合并：web 是静态页面，import 不到 core 的常量，
+ * 而把渲染逻辑挪进 core 会让引擎依赖展示层 —— 那个代价更大。
+ */
+const CHANGE_FIELD_LABEL: Record<string, string> = {
+  created: '新增',
+  title: '标题',
+  deadline: '截止时间',
+  status: '状态',
+  score: '成绩',
+  course: '课程',
+  kind: '类型',
+};
+
+/**
+ * 把本轮的「更新」事件压成一行人话，给同步日志用。
+ *
+ * 只报「更新 N」的时候，用户看到「有更新」却不知道该去看哪条，还得另点一页。
+ * 真机（2026-11-02）：连续同步三次、每次提示的是**不同**作业，而日志里只有「更新 1」——
+ * 那正是两条记录互相顶替的时期，靠"哪个平台 + 几条"根本归不了因。
+ *
+ * 只写**任务名 + 字段名**，不写值：值的完整翻译在「变更历史」那一页
+ * （那里按字段类型格式化了时间和状态）。两处都写等于再分裂一份映射。
+ */
+export function describeUpdates(events: TaskEvent[], limit = 5): string | null {
+  const brief: string[] = [];
+  let total = 0;
+  for (const ev of events) {
+    if (ev.type !== 'updated') continue;
+    total += 1;
+    if (brief.length < limit) {
+      const fields = [...new Set(ev.changes.map((c) => CHANGE_FIELD_LABEL[c.field] ?? c.field))].join('、');
+      brief.push(`${ev.task.title}（${fields}）`);
+    }
+  }
+  if (total === 0) return null;
+  return (
+    `本轮更新 ${total} 条：${brief.join('；')}` +
+    (total > brief.length ? `；另有 ${total - brief.length} 条未列出` : '')
+  );
+}
+
+/**
  * 纯函数合并：输入「库里已有的任务」+「本轮拉到的任务」，输出写入计划。
  * 不碰数据库、不碰网络、不碰时钟 —— 所以可以完整单元测试。
  */
@@ -378,6 +425,16 @@ export function keepKnownFields(prev: UnifiedTask, next: UnifiedTask): UnifiedTa
   return out;
 }
 
+/**
+ * 平台有没有给出稳定 ID。
+ *
+ * materializeTask 在 platformTaskId 缺失时用 `fp_<指纹>` 兜底，
+ * 所以前缀就是这个判据的唯一真源（不要在别处另写一份规则）。
+ */
+function lacksStableId(t: { platformTaskId: string }): boolean {
+  return t.platformTaskId.startsWith('fp_');
+}
+
 export function mergeTasks(
   existing: UnifiedTask[],
   incoming: UnifiedTask[],
@@ -398,10 +455,38 @@ export function mergeTasks(
   let updated = 0;
   let unchanged = 0;
 
+  /**
+   * 本轮出现过的主键。
+   *
+   * 一条老记录只要还在被**自己的 ID** 认领（本轮 incoming 里就有它），
+   * 就不许别的任务靠指纹抢走 —— 否则两条 incoming 会写同一个 prev，
+   * 后写的覆盖前写的，记录在两条任务之间来回易主。
+   */
+  const presentIds = new Set(incoming.map((t) => t.id));
+
   for (const incomingTask of incoming) {
-    const prev =
-      byId.get(incomingTask.id) ??
-      byFingerprint.get(`${incomingTask.accountId}|${incomingTask.courseId}|${incomingTask.fingerprint}`);
+    let prev = byId.get(incomingTask.id);
+    if (!prev) {
+      const cand = byFingerprint.get(
+        `${incomingTask.accountId}|${incomingTask.courseId}|${incomingTask.fingerprint}`,
+      );
+      // 指纹是**兜底**，不是第二条匹配路径。允许它认领的条件，逐条都有具体事故：
+      //
+      // ① 至少一方没有稳定 ID —— 平台本来就没给主键，指纹是唯一线索。
+      // ② 老记录本轮没有出现 —— 「ID 变了 + 指纹相同」最合理的解释就是平台换了主键
+      //    （merge 文件头坑 1 描述的那类平台）。
+      //
+      // 真机事故（2026-11-02）：PTA 的「25级数据结构上机实验（第2次）/（第3次）」
+      // 归一化后指纹相同，两条各自带着真实 platformTaskId 的任务因此被融进同一条
+      // 记录，标题/进度/跳转地址各来自不同轮次。用户看到「第3次 · 4/4 已交」，
+      // 点进去却是第2次 —— 这种错乱靠看界面根本无法归因。
+      //
+      // 判据：两个任务能不能是同一个，取决于**平台给没给同一个 ID**，
+      // 不取决于我们猜"标题像不像"。所以①②都不成立时，标题再像也各自独立。
+      if (cand && (lacksStableId(incomingTask) || lacksStableId(cand) || !presentIds.has(cand.id))) {
+        prev = cand;
+      }
+    }
 
     // 缺信息不覆盖已知信息 —— 只在能对上旧记录时才有意义（见 keepKnownFields）
     const next = prev ? keepKnownFields(prev, incomingTask) : incomingTask;

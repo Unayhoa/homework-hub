@@ -35,6 +35,17 @@ function run(cmd, args, cwd) {
 
 // ---------------------------------------------------------------- 1. 前端资源
 
+/**
+ * `--user-build`：产出面向用户的包（隐藏「添加自定义平台」入口）。
+ *
+ * **必须透传给 build-android.mjs**：这个脚本自己会重跑一遍资源构建，
+ * 不传就等于"要用户版、却打包出自用版"。2026-11-02 踩过 ——
+ * 两个 APK 的 md5 完全一致，而日志里还写着"用户版：已隐藏自定义平台"，
+ * 因为那行是**前一次**独立调用的输出。产物的真相只能看字节。
+ */
+const USER_BUILD = process.argv.includes('--user-build');
+const userArgs = USER_BUILD ? ['--user-build'] : [];
+
 if (run('node', ['scripts/clean-android.mjs'], ROOT) !== 0) fail('清理失败');
 
 const tsc = join(ROOT, 'node_modules/.bin/tsc');
@@ -45,12 +56,12 @@ if (!existsSync(tsc)) {
 // 真正的问题由 build-android.mjs 校验（node: 引用扫描 + 导入目标校验）。
 run('node', [join('node_modules', 'typescript', 'bin', 'tsc'), '-p', 'tsconfig.android.json',
   '>', '.tsc-android.log', '2>&1'], ROOT);
-if (run('node', ['scripts/build-android.mjs'], ROOT) !== 0) fail('前端资源构建失败');
+if (run('node', ['scripts/build-android.mjs', ...userArgs], ROOT) !== 0) fail('前端资源构建失败');
 
 // 打包前**再校验一次**产物：上游通过不代表此刻的产物干净。
 // 踩过：在这两步之间又跑了一次 tsc（顺手做类型检查），把改写覆盖回去，
 // 产出的 APK 装上去一直卡「加载中…」—— 界面看起来正常，是最难发现的那类坏。
-if (run('node', ['scripts/build-android.mjs', '--verify-only'], ROOT) !== 0) {
+if (run('node', ['scripts/build-android.mjs', '--verify-only', ...userArgs], ROOT) !== 0) {
   fail(
     '前端产物校验失败（原因见上）。\n' +
       '  只做类型检查请用 npm run android:typecheck（--noEmit，不写产物）。',

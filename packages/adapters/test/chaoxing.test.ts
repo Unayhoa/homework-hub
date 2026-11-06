@@ -145,6 +145,25 @@ describe('chaoxing · 适配器装配', () => {
       true,
     );
   });
+
+  it('课程页地址带齐 courseid/clazzid/cpi/enc —— 不再退到 i.chaoxing 账号页', () => {
+    const a = new ChaoxingAdapter();
+    const url = a.buildCourseUrl({
+      platformCourseId: '216084776',
+      raw: { classId: '152036569', cpi: '487116507', enc: 'abc123' },
+    } as never)!;
+    assert.match(url, /^https:\/\/mooc2-ans\.chaoxing\.com\/mooc2-ans\/mycourse\/stu\?/);
+    assert.match(url, /courseid=216084776/);
+    assert.match(url, /clazzid=152036569/);
+    assert.match(url, /cpi=487116507/);
+    assert.match(url, /enc=abc123/);
+    assert.notEqual(url, 'https://i.chaoxing.com', '账号页不是"这门课"，等于没跳');
+  });
+
+  it('缺 classId 时不给课程页地址（宁可不给，也不给一个打不开的）', () => {
+    const a = new ChaoxingAdapter();
+    assert.equal(a.buildCourseUrl({ platformCourseId: '1', raw: {} } as never), undefined);
+  });
 });
 
 describe('chaoxing · 考试列表（2026-11-01 之前的接口是死路径）', () => {

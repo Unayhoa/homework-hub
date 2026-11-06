@@ -262,6 +262,27 @@ export type ApiHandler = (req: ApiRequest) => Promise<ApiResponse>;
 export function createApiHandler(deps: ApiDeps): ApiHandler {
   let inFlight: Promise<SyncReport> | undefined;
 
+  /**
+   * 同步之后顺手更新任务点：**不 await、不报错**。
+   *
+   * 为什么不在同一轮里做：作业是分钟级、任务点是天级，成本差 32 倍
+   * （每门课一个请求）。跟着每次同步抓等于把分钟级动作塞进天级成本
+   * （一天同步 8 次 = 256 个请求），超星风控吃不消。
+   *
+   * 折中：同步结束时**只检查是否过期**（24h），过期才在后台抓一次 ——
+   * 效果就是"每天最多真的抓一次"，用户看到的同步速度完全不变。
+   * 抓完写库，他下次进任务点页看到的就是新的；不进去也不影响。
+   */
+  const refreshTaskPointsQuietly = async (): Promise<void> => {
+    try {
+      for (const a of await deps.engine.listAccounts()) {
+        await deps.engine.refreshCourseProgressIfStale(a.id);
+      }
+    } catch {
+      // 后台动作，静默失败。任务点下次进页面还会重试，不该拖累同步结果。
+    }
+  };
+
   /** 没注入时的兜底：内存版（桌面 / 测试）。读写都过归一化，不抛。 */
   const prefsOf = () =>
     deps.notifyPrefs ?? {
@@ -550,6 +571,50 @@ export function createApiHandler(deps: ApiDeps): ApiHandler {
           });
         }
         return { status: 200, body: { groups } };
+      }
+
+      // 点击作业名时：让适配器现算最终地址（超星要现取新鲜 enc）。
+      // 解析失败返回 null，前端退回任务自带的 sourceUrl。
+      if (method === 'GET' && path === '/api/task/url') {
+        const taskId = search.get('taskId') ?? '';
+        const r = taskId ? await deps.engine.resolveTaskUrl(taskId) : {};
+        return { status: 200, body: { url: r.url ?? null, debug: r.debug ?? null } };
+      }
+
+      // 点击任务点卡片时：同理，现算课程页地址。
+      if (method === 'GET' && path === '/api/course/url') {
+        const accountId = search.get('accountId') ?? '';
+        const courseId = search.get('courseId') ?? '';
+        const r = accountId && courseId ? await deps.engine.resolveCourseUrl(accountId, courseId) : {};
+        return { status: 200, body: { url: r.url ?? null, debug: r.debug ?? null } };
+      }
+
+      if (method === 'GET' && path === '/api/taskpoints') {
+        // 任务点：默认**只读缓存**。`refresh=1` 才真的去抓 —— 超星是一门课一个请求，
+        // 32 门课 = 32 个请求。"打开了页面"和"要花 32 个请求"必须是两件事，
+        // 否则每次点开这个页签都在替用户做决定。
+        const refresh = search.get('refresh') === '1';
+        const accounts = await deps.engine.listAccounts();
+        const groups: unknown[] = [];
+        for (const a of accounts) {
+          let report: unknown;
+          if (refresh) {
+            // 内部已经吞掉异常（返回状态而不是抛出），所以不需要 try
+            report = await deps.engine.refreshCourseProgress(a.id);
+          }
+          const view = await deps.engine.listTaskPointProgress(a.id);
+          groups.push({
+            accountId: a.id,
+            label: a.label,
+            platformId: a.platformId,
+            ...view,
+            ...(report ? { refresh: report } : {}),
+          });
+        }
+        // 角标：有几门课已经进入"该催"的窗口（含来不及的）。
+        // 它和系统弹窗互补 —— 弹窗只排未来的，过了提醒点的不补发，角标一直显示。
+        const alert = await deps.engine.taskPointAlertCount();
+        return { status: 200, body: { groups, alert } };
       }
 
       // 把一份「接入配置」启用成真正的平台：注册适配器 + 建账号。
@@ -1006,6 +1071,8 @@ export function createApiHandler(deps: ApiDeps): ApiHandler {
       if (method === 'POST' && path === '/api/sync') {
         const body = parseBody();
         const report = await runSync({ allowRelogin: body.allowRelogin !== false });
+        // 不 await：同步该多快还多快，任务点在后台补（过期才抓）
+        void refreshTaskPointsQuietly();
         return { status: 200, body: summarize(report) };
       }
 
@@ -1211,6 +1278,19 @@ export function createApiHandler(deps: ApiDeps): ApiHandler {
         const muted = body.muted !== false;
         if (!accountId || !courseId) throw new Error('缺少 accountId / courseId');
         await deps.engine.setCourseMuted(accountId, courseId, muted);
+        return { status: 200, body: { ok: true } };
+      }
+
+      // 任务点页显示/隐藏某门课。**只影响统计展示**，不影响同步 ——
+      // 有些课的任务点不计入成绩，摆在那里只是噪音。
+      if (method === 'POST' && path === '/api/course/taskpoint') {
+        const body = parseBody();
+        const accountId = String(body.accountId ?? '');
+        const courseId = String(body.courseId ?? '');
+        const hidden = body.hidden !== false;
+        if (!accountId || !courseId) throw new Error('缺少 accountId / courseId');
+        const ok = await deps.engine.setTaskPointHidden(accountId, courseId, hidden);
+        if (!ok) throw new Error('找不到这门课（可能已经不同步了）');
         return { status: 200, body: { ok: true } };
       }
 

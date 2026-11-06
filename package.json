@@ -1,6 +1,6 @@
 {
   "name": "homework-hub",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
   "description": "HomeworkHub · 课业中枢 —— 跨平台汇总学习通 / 雨课堂 / iSmart 等平台的作业与考试信息",
@@ -23,6 +23,7 @@
     "android:compile": "node scripts/clean-android.mjs && tsc -p tsconfig.android.json > .tsc-android.log 2>&1 || true",
     "android:sync": "npm run android:compile && node scripts/build-android.mjs",
     "android:apk": "npm run android:sync && node scripts/build-apk.mjs",
+    "android:apk:user": "node scripts/build-apk.mjs --user-build",
     "test": "node --test \"packages/*/test/*.test.ts\"",
     "typecheck": "tsc --noEmit",
     "android:typecheck": "tsc -p tsconfig.android.json --noEmit",

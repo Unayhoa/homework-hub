@@ -42,8 +42,8 @@ export interface ScheduledNotification {
   key: string;
   /** 关联任务；每日汇总不对应任何任务，为 undefined */
   taskId?: string;
-  /** 'task' = 某条任务的截止提醒；'daily' = 每日汇总 */
-  kind?: 'task' | 'daily';
+  /** 'task' = 某条任务的截止提醒；'daily' = 每日汇总；'points' = 课程任务点 */
+  kind?: 'task' | 'daily' | 'points';
   title: string;
   body: string;
   /** 期望触发时刻（ISO） */
@@ -171,6 +171,13 @@ export interface NotifyPrefs {
   exam?: RemindSpec;
   /** 旧字段：没有 task/exam 时用来回落预设 */
   level?: NotifyLevel;
+  /**
+   * 任务点提醒：每天大概能投入几小时（默认 6）。
+   *
+   * 用来把"还差多少活的净小时数"换算成"要占用多少天"，从而倒推提醒时机。
+   * 作业那边没有这个参数 —— 作业是"在某个时刻前交上去"，任务点是"要花掉多少时间"。
+   */
+  taskPointDailyHours?: number;
   /** 每日汇总开关，默认开 */
   daily?: boolean;
   /** 夜间静默顺延开关（默认开）。关掉后提醒按原时间弹，哪怕在深夜 */
@@ -192,6 +199,13 @@ export interface NotifyScheduleOptions {
   quietToHour?: number;
   /** 关闭静默顺延（测试用） */
   quiet?: boolean;
+  /**
+   * 给每日汇总追加一段（任务点用）。
+   *
+   * 用回调而不是直接传数据：`task-point-reminder` 已经 import 了本文件的
+   * `ScheduledNotification`，反向依赖会成环。这里只要求"给一天，还一句文案"。
+   */
+  extraLine?: (day: Date) => string | undefined;
   /** 用户偏好（密度档位 / 每日汇总）。缺省 = standard 档 + 每日汇总开 */
   prefs?: NotifyPrefs;
 }
@@ -314,6 +328,7 @@ function buildDailyDigest(
   now: Date,
   quietTo: number,
   prefs: NotifyPrefs,
+  extraLine?: (day: Date) => string | undefined,
 ): ScheduledNotification[] {
   if (prefs.daily === false) return [];
   const hour = prefs.dailyHour ?? quietTo;
@@ -359,6 +374,11 @@ function buildDailyDigest(
         `数据截至 ${md(now)}（${i} 天前）· 点开同步看最新` +
         (next ? `；最近一条 ${md(next.due)}` : '');
     }
+
+    // 任务点那一段接在最后（用户 2026-11-04：不新增通知，塞进每日汇总）。
+    // 它可能返回 undefined —— 那天没有进入紧急期的课，就什么都不加。
+    const extra = extraLine?.(fire);
+    if (extra) body = `${body}\n${extra}`;
 
     out.push({
       key: `daily|${dayKey(fire)}|v1`,
@@ -429,7 +449,7 @@ export function buildNotificationSchedule(
   }
 
   // 每日汇总（每天固定一条）—— 与上面的截止提醒并列，不相干
-  out.push(...buildDailyDigest(tasks, now, quietTo, prefs));
+  out.push(...buildDailyDigest(tasks, now, quietTo, prefs, opts.extraLine));
 
   out.sort((a, b) => new Date(a.fireAt).getTime() - new Date(b.fireAt).getTime());
   return out;

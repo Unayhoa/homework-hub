@@ -121,7 +121,7 @@ export type {
   ReminderSink,
 } from './engine/sync-engine.ts';
 
-export { mergeTasks, materializeTask, diffTask, DEFAULT_MERGE_OPTIONS } from './engine/merge.ts';
+export { mergeTasks, materializeTask, diffTask, describeUpdates, DEFAULT_MERGE_OPTIONS } from './engine/merge.ts';
 export { ADAPTER_PROMPT, ADAPTER_PITFALLS, buildEvidencePack, drillPack } from './engine/adapter-authoring.ts';
 export { DeclarativeAdapter, DomAdapter, validateConfig, normalizeAdapterConfig, setDomExtractor, hasDomExtractor, getByPath, mapStatus } from './engine/declarative-adapter.ts';
 export { resolveCapabilities, courseKeyOf, courseIndexOf } from './engine/declarative-adapter.ts';

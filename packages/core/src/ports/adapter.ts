@@ -130,6 +130,45 @@ export interface FetchCoursesRequest {
   cursor?: string;
 }
 
+/** 一门课的任务点完成情况（平台原样，不含内部 ID）。 */
+export interface CourseProgressItem {
+  platformCourseId: string;
+  /** 任务点总数。0 表示这门课没有任务点 */
+  total: number;
+  /** 已完成数 */
+  done: number;
+  /**
+   * 最近一个还没结束的章节开放期。
+   *
+   * 这是**开放窗口**，不是作业截止时间：超星的原话是
+   * 「开放时间：2026-11-08 23:00 至 2026-11-29 23:00」，窗口一关就看不了了。
+   * 已全部过期的课不要给这个字段 —— 那门课已经没有"要做的事"了。
+   */
+  nextWindow?: { chapter: string; opensAt: string; closesAt: string };
+  /**
+   * 最近一个**已经关闭**的窗口的关闭时刻。
+   *
+   * 用途只有一个：当"任务点没做完、又没有未来窗口"时，说明这门课的窗口已经关了 ——
+   * 那是「逾期」，必须说出来。没有这个值时界面只能显示"还差 N 个"，
+   * 而用户看不出这 N 个是还能做还是已经做不了了（真机 2026-11-02：形势与政策）。
+   */
+  lastClosedAt?: string;
+  /**
+   * 此刻有没有「开放中」的章节（opensAt ≤ now < closesAt）。
+   *
+   * 为什么要单独给：只有 `nextWindow` 时无法区分「现在能做，11/29 关」和
+   * 「现在一章都没开，11/8 才开」。两者的行动完全不同 ——
+   * 前者该去刷，后者去也白去（真机 2026-11-02：原理课 0/26，全部章节 11/8 才开放）。
+   */
+  hasOpenNow?: boolean;
+  /**
+   * 此刻还能做的任务点条数（只算已开放、且还有未完成点的章节）。
+   * 算不出来 / 无法归属到章节时不写这个键 —— 宁可让界面退回"还有可做的"，
+   * 也不要给一个错的数字（分阶段开放的课里，把未开放章节也算进来就是错的）。
+   */
+  availableNow?: number;
+}
+
 export interface FetchTasksRequest {
   cursor?: string;
   /** 已缓存的课程列表，省一次请求 */
@@ -155,6 +194,23 @@ export interface FetchTasksRequest {
    * 注意：作业本身查不查仍由 courses / cursor 决定，这里只影响额外探测。
    */
   quietCourseIds?: string[];
+
+  /**
+   * 库里**已经知道**的「开考时刻」：平台任务 ID → ISO 时间。
+   *
+   * 为什么需要这条通道：某些平台的开考时间只写在详情页里（超星就是这样），
+   * 而详情页是「一个考试一个请求」。适配器自己记不住上一轮抓过没有（它每轮都是
+   * 新的调用），于是只有两条路：要么每轮都抓（请求量翻倍），要么只抓"还没结束"的
+   * （已结束的永远没有开考时间，已完成列表里只能显示结束时间 —— 用户看到的是
+   * 「10:00 开考」被写成「截止 11:40」）。
+   *
+   * 引擎知道库里有什么，所以由它把已知值传下来：适配器可以据此
+   *   ① 跳过重复抓取（省请求）；② 放心去补抓缺失的那些（因为抓过的不会再抓）。
+   *
+   * 语义是"已知"，不是"权威"：适配器如果发现平台上的值变了（改期），
+   * 以本次抓到的为准。
+   */
+  knownStartsAt?: Record<string, string>;
 }
 
 export interface PlatformAdapter {
@@ -250,8 +306,69 @@ export interface PlatformAdapter {
 
   fetchTasks(ctx: AdapterContext, session: Session, req: FetchTasksRequest): Promise<Page<PlatformTask>>;
 
+  /**
+   * 抓「课程级任务点进度」。**可选能力** —— 不实现 = 该平台没有这个概念。
+   *
+   * 为什么独立于 fetchTasks，而不是塞进它的返回里：
+   *   ① 刷新节奏不同。任务点是慢变量（天级），作业是分钟级；混在一起会让每轮
+   *      同步都背上「每门课 +1 请求」（超星 32 门课 = +63% 请求量）。
+   *   ② 失败语义不同。任务点抓不到不该让整轮作业同步标记为「部分完成」。
+   *   ③ 它不是 task。没有 deadline，进不了待办的「逾期 / 三天内」这套轴。
+   *
+   * 调用方（引擎）负责节流：只在用户打开任务点页、或数据过期时才叫它。
+   * 所以实现方可以假定"这次调用是值得的"，但仍要控制并发（平台风控）。
+   *
+   * `courses` 由引擎传入（已缓存的课程表），实现方不该为此再发一次课程请求。
+   */
+  fetchCourseProgress?(
+    ctx: AdapterContext,
+    session: Session,
+    courses: UnifiedCourse[],
+    req?: FetchCourseProgressRequest,
+  ): Promise<Page<CourseProgressItem>>;
+
   /** 构造任务深链，UI 里点一下就能跳到平台对应页面 */
   buildTaskUrl?(courseId: string, task: PlatformTask): string | undefined;
+
+  /**
+   * 构造「这门课在平台上的页面」地址（可选）。
+   *
+   * 用途：任务点卡片点一下能去平台继续做；同时当任务深链不可用时，
+   * 作业名至少能落到**这门课**而不是平台首页/账号页。
+   * 返回 undefined = 该平台没有可用的课程级页面。
+   */
+  buildCourseUrl?(course: UnifiedCourse): string | undefined;
+
+  /**
+   * **点击时**解析这门课的可用页面地址（可选）。
+   *
+   * 为什么不能只靠 `buildCourseUrl`：超星的课程页/作业页都要带**当下签发**的
+   * `enc`（部分还带 `t`），同步时存下来的那份点的时候可能已经失效（真机表现：
+   * 「无效的参数」）。实现方可以在用户点击这一刻重新请求一次课程列表/课程页，
+   * 取到新鲜链接。失败返回 undefined，调用方会退回 `buildCourseUrl`。
+   */
+  resolveCourseUrl?(ctx: AdapterContext, session: Session, course: UnifiedCourse): Promise<string | undefined>;
+
+  /**
+   * **点击时**解析某条任务的最终地址（可选）。
+   *
+   * 超星作业列表里的每条作业都带一个服务端签发的 `enc`（页面 `data="…work/task?…&enc=…"`），
+   * 且 `work/task` 会再跳到 `dowork` 生成 `standardEnc`。同步时存下来的 href 会过期，
+   * 所以只能在点击瞬间重新抓一次列表、拿到新鲜 href。
+   */
+  resolveTaskUrl?(
+    ctx: AdapterContext,
+    session: Session,
+    req: { course: UnifiedCourse; platformTaskId: string; kind: PlatformTask['kind'] },
+  ): Promise<string | undefined>;
+
+  /** 最近一次 `resolveTaskUrl` / `resolveCourseUrl` 的失败定位轨迹（只用于诊断展示）。 */
+  resolveDebug?(): string[];
+}
+
+export interface FetchCourseProgressRequest {
+  /** 只抓这几门（平台课程 ID）。不给 = 抓传入的全部 */
+  courseIds?: string[];
 }
 
 /** 适配器元信息，用于「支持的平台」列表页展示（不需要实例化适配器）。 */
