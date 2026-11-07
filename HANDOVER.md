@@ -1,4 +1,4 @@
-﻿# 维护者交接说明（HANDOVER）
+# 维护者交接说明（HANDOVER）
 
 > 面向**接手维护这个项目的开发者（或 AI 助手）**，不是终端用户文档。
 > **动代码前先读完这一页** —— 下面每一条「红线」都是踩过坑之后才定下来的；
@@ -51,8 +51,12 @@
 `hike-teaching.zhihuishu.com/educational/platform/getStudentCourseList` 取课程 →
 `hiexam-server.zhihuishu.com/zhsathome/homeworkUser/List?completeTab=0` 取作业。
 作业 `status`：1 未提交、2 被打回、3 待批阅/批阅中、4 已批阅、5 已出分；截止时间用 `endTime`（epoch 毫秒）。
-**共享课**（如“大学生心理健康”）走 `student/course/share/queryShareCourseInfo`，请求体的 `secretStr`
-由页面 `window.yxyz()` + RSA/AES 动态生成，服务端适配器无法安全复现 —— 首批**未覆盖**，不要用猜的 secret 去试。
+**共享课**（如“大学生心理健康”）走 `student/course/share/queryShareCourseInfo`：请求体的 `secretStr`
+由页面 `window.yxyz()` + RSA/AES 生成，但 HAR 证实「同一组 status/page 查询」的密文是**确定性**的，
+所以适配器内置了未完成/已完成两份密文（见 `SHARED_COURSE_SECRETS`）。共享课的视频任务点与
+成绩摘要（平时分/期末/总评/学习习惯）走 `stuonline/stuLearnReportNew/*` 的免加密接口，已实现。
+**仍缺**：作业/章节测验/期末考试列表（`studentexam-api` 的 secretStr 带课程/招生维度），没有硬编码到开源版。
+**注意**：课程列表有 12h TTL；新开课/共享课要用课程页「刷新课程列表」强制拉一次。
 **任务点/考试没做不是遗漏，是首批范围**；也没有把 uuid 当长期凭据（每次同步现取）。
 
 **刻意如此，不是 bug**
