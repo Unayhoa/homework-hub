@@ -238,6 +238,7 @@ export class ZhihuishuAdapter implements PlatformAdapter {
     const uuid = await this.#uuid(http, ctx);
     const items: PlatformTask[] = [];
     const failures: string[] = [];
+    const sharedErrors: string[] = [];
 
     for (const course of req.courses) {
       // 共享课的作业/考试在大类上走 studentexam-api（secretStr 带课程/招生维度），
@@ -247,8 +248,9 @@ export class ZhihuishuAdapter implements PlatformAdapter {
       if ((course.raw as { recruitId?: unknown } | undefined)?.recruitId !== undefined) {
         try {
           items.push(...(await this.#listSharedTasks(http, course)));
-        } catch {
-          // 共享课作业/考试首批不完整；失败不拖垮整轮同步
+        } catch (e) {
+          // 共享课作业/考试首批不完整；失败不拖垮整轮同步，但要在日志里留下原因
+          sharedErrors.push(`${course.name}/共享课章节测验: ${(e as Error).message}`);
         }
         continue;
       }
@@ -267,7 +269,7 @@ export class ZhihuishuAdapter implements PlatformAdapter {
         requiresUserAction: authLike,
       });
     }
-    return { items, hasMore: false };
+    return { items, hasMore: false, ...(sharedErrors.length ? { details: sharedErrors } : {}) };
   }
 
   /**
@@ -285,6 +287,7 @@ export class ZhihuishuAdapter implements PlatformAdapter {
     const list = want.size > 0 ? courses.filter((c) => want.has(c.platformCourseId)) : courses;
     const http = new SessionHttpClient(ctx, session);
     const items: CourseProgressItem[] = [];
+    const errors: string[] = [];
     for (const c of list) {
       const raw = (c.raw ?? {}) as { recruitId?: string | number };
       if (raw.recruitId === undefined || raw.recruitId === null || raw.recruitId === '') continue;
@@ -308,11 +311,12 @@ export class ZhihuishuAdapter implements PlatformAdapter {
           ...(remain > 0 ? { availableNow: remain } : {}),
           ...(grade ? { grade } : {}),
         });
-      } catch {
-        // 共享课进度是附加能力；单门失败不拖垮整批
+      } catch (e) {
+        // 共享课进度是附加能力；单门失败不拖垮整批，但留下可排查原因
+        errors.push(`${c.name}: ${(e as Error).message}`);
       }
     }
-    return { items, hasMore: false, declaredTotal: items.length };
+    return { items, hasMore: false, declaredTotal: items.length, ...(errors.length ? { details: errors } : {}) };
   }
 
   /** 平时分/总评/学习习惯/互动分：四个免加密接口，一个失败不影响其他。 */
@@ -412,6 +416,26 @@ export class ZhihuishuAdapter implements PlatformAdapter {
     });
     const sldList = Array.isArray(scoreRes.body.sldList) ? (scoreRes.body.sldList as unknown[]) : [];
     const out: PlatformTask[] = [];
+    // 某些版本的 loadExamAndScore 对该课程返回空 sldList；此时仍把章节测验条目
+    // 从 loadStuLearingTab 的章节树里落出来，不能把“有章节测验但没分数”吞成 0 条。
+    if (sldList.length === 0) {
+      for (const ch of chapters) {
+        if (typeof ch !== 'object' || ch === null) continue;
+        const c = ch as { chapterId?: unknown; chapterName?: unknown; examName?: unknown; addScoreStatus?: unknown };
+        if (c.chapterId === undefined || c.chapterId === null) continue;
+        const name = typeof c.chapterName === 'string' ? c.chapterName : String(c.chapterId);
+        out.push({
+          platformTaskId: `chapter-quiz-${String(c.chapterId)}`,
+          courseId: course.platformCourseId,
+          courseName: course.name,
+          kind: 'quiz',
+          title: `章节测验 · ${typeof c.examName === 'string' && c.examName ? c.examName : name}`,
+          status: Number(c.addScoreStatus) === 1 ? 'graded' : 'pending',
+          raw: c,
+        });
+      }
+      return out;
+    }
     for (const row of sldList) {
       if (typeof row !== 'object' || row === null) continue;
       const r = row as Record<string, unknown>;
