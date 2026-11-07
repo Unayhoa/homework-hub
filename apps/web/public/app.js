@@ -883,6 +883,12 @@ function renderTaskPoints(data) {
       c.courseUrl || c.accountId
         ? ` clickable" data-points-url="${escapeHtml(c.courseUrl ?? '')}" data-course-id="${escapeHtml(c.id)}" data-account-id="${escapeHtml(c.accountId ?? '')}`
         : '';
+    const g = c.grade ?? {};
+    const gradeParts = [];
+    if (Number.isFinite(g.usualScore)) gradeParts.push(`平时分 ${g.usualScore}`);
+    if (Number.isFinite(g.finalScore)) gradeParts.push(`期末 ${g.finalScore}`);
+    if (Number.isFinite(g.totalScore)) gradeParts.push(`总评 ${g.totalScore}`);
+    if (Number.isFinite(g.habitScore)) gradeParts.push(`学习习惯 ${g.habitScore}/${g.habitTotal ?? '?'}`);
     return `
       <div class="point-card ${st.kind}${open}">
         <div class="point-head">
@@ -892,6 +898,7 @@ function renderTaskPoints(data) {
         </div>
         <div class="point-bar"><i style="width:${pct}%"></i></div>
         ${st.text ? `<div class="point-window ${st.cls}">${escapeHtml(st.text)}</div>` : ''}
+        ${gradeParts.length ? `<div class="point-window">${escapeHtml(gradeParts.join(' · '))}</div>` : ''}
       </div>`;
   };
 

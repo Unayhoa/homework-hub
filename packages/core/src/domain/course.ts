@@ -33,6 +33,26 @@
  */
 export const TASK_POINT_SCHEMA = 6;
 
+/**
+ * 课程级成绩摘要（共享课/成绩分析页提供）。
+ *
+ * 只保存**平台返回的分数**，不做加权推算 —— 各平台权重规则不同，
+ * 自己算会把"平台显示 99"变成"我们算 96"的假精确。
+ */
+export interface CourseGradeSummary {
+  totalScore?: number;
+  usualScore?: number;
+  finalScore?: number;
+  examScore?: number;
+  meetScore?: number;
+  /** 学习习惯分（如心理健康课的 25 分钟/天规则） */
+  habitScore?: number;
+  habitTotal?: number;
+  /** 互动分 */
+  interactionScore?: number;
+  interactionTotal?: number;
+}
+
 export interface CourseTaskPointProgress {
   /** 数据形状版本，见 `TASK_POINT_SCHEMA`。缺失视为 1 */
   schema?: number;
@@ -122,6 +142,8 @@ export interface UnifiedCourse {
    * **拼 mapped 时绝不能写 `taskPoints: undefined`** —— 那会把上一轮抓到的进度抹掉。
    */
   taskPoints?: CourseTaskPointProgress;
+  /** 课程级成绩摘要（可选）。目前用于共享课成绩分析页。 */
+  grade?: CourseGradeSummary;
   /**
    * 用户不想在任务点页看到这门课（任务点不计入成绩时）。
    *

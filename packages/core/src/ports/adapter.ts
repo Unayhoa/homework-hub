@@ -14,7 +14,7 @@
  *      这样多账号并存、会话持久化、过期探测才有落点。
  */
 import type { Clock } from '../domain/time.ts';
-import type { PlatformCourse, UnifiedCourse } from '../domain/course.ts';
+import type { PlatformCourse, UnifiedCourse, CourseGradeSummary } from '../domain/course.ts';
 import type { PlatformTask } from '../domain/task.ts';
 import type { HttpClient } from './http.ts';
 import type { Limiter } from './limiter.ts';
@@ -167,6 +167,8 @@ export interface CourseProgressItem {
    * 也不要给一个错的数字（分阶段开放的课里，把未开放章节也算进来就是错的）。
    */
   availableNow?: number;
+  /** 课程级成绩摘要（共享课成绩分析页提供；没有就不写） */
+  grade?: CourseGradeSummary;
 }
 
 export interface FetchTasksRequest {

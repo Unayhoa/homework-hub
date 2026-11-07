@@ -13,6 +13,7 @@ import {
   ZhihuishuAdapter,
   parseZhihuishuCourses,
   parseZhihuishuHomeworks,
+  parseZhihuishuSharedCourses,
   mapZhihuishuStatus,
 } from '../zhihuishu/src/index.ts';
 import { createSilentLogger, systemClock, TokenBucket, UnavailableSigner } from '../../core/src/index.ts';
@@ -119,6 +120,24 @@ describe('智慧树 · 纯解析', () => {
     assert.equal(t.deadline, new Date(HOMEWORK_PENDING.endTime).toISOString());
     assert.equal(items[1]!.score, 92);
   });
+
+  it('解析共享课（心理健康在“已完成”栏，带 recruitId/secret）', () => {
+    const shared = parseZhihuishuSharedCourses([
+      {
+        courseId: 1000006248,
+        courseName: '大学生心理健康',
+        teacherName: '杨振斌',
+        progress: '100.0%',
+        recruitId: 368799,
+        secret: '495e515f4c504859454a585958435b4750',
+        courseStatus: 2,
+      },
+    ]);
+    assert.equal(shared.length, 1);
+    assert.equal(shared[0]!.platformCourseId, '1000006248');
+    assert.equal(shared[0]!.name, '大学生心理健康');
+    assert.equal((shared[0]!.raw as { recruitId: number }).recruitId, 368799);
+  });
 });
 
 describe('智慧树 · 抓取链路（HAR 结构）', () => {
@@ -150,6 +169,65 @@ describe('智慧树 · 抓取链路（HAR 结构）', () => {
     const ctx = makeCtx(() => ({ body: JSON.stringify({ code: 302, result: null }) }));
     const adapter = new ZhihuishuAdapter();
     await assert.rejects(() => adapter.fetchCourses(ctx, SESSION), /会话已失效|AUTH/);
+  });
+
+  it('共享课列表与学习进度（免加密接口）能算出视频任务点', async () => {
+    const ctx = makeCtx((url) => {
+      if (url.includes('getLoginUserInfo')) return { body: JSON.stringify({ code: 200, result: { uuid: 'u' } }) };
+      if (url.includes('getStudentCourseList')) {
+        return { body: JSON.stringify({ status: 200, rt: { studyCourses: [], archiveCourses: [] } }) };
+      }
+      if (url.includes('queryShareCourseInfo')) {
+        return {
+          body: JSON.stringify({
+            result: {
+              courseOpenDtos: [
+                {
+                  courseId: 1000006248,
+                  courseName: '大学生心理健康',
+                  teacherName: '杨振斌',
+                  recruitId: 368799,
+                  secret: '495e515f4c504859454a585958435b4750',
+                  courseStatus: 2,
+                },
+              ],
+            },
+          }),
+        };
+      }
+      if (url.includes('loadStuLearingTab')) {
+        return {
+          body: JSON.stringify({
+            chapterOrLesson: {
+              clList: [
+                {
+                  lessonTempDtos: [
+                    { videoId: 1, watchStatus: 1, lessonVideoTempDtos: [] },
+                    { videoId: 2, watchStatus: 0, lessonVideoTempDtos: [] },
+                  ],
+                },
+              ],
+            },
+          }),
+        };
+      }
+      return { body: '{}', status: 404 };
+    });
+    const adapter = new ZhihuishuAdapter();
+    const courses = await adapter.fetchCourses(ctx, SESSION);
+    assert.equal(courses.items.length, 1, '共享课要合并进课程列表');
+    const course = courses.items[0]!;
+    assert.equal(course.platformCourseId, '1000006248');
+    const progress = await adapter.fetchCourseProgress(ctx, SESSION, [
+      { ...course, id: 'c1', accountId: 'u1', platformId: 'zhihuishu', lastSeenAt: '' } as never,
+    ]);
+    assert.deepEqual(progress.items[0], {
+      platformCourseId: '1000006248',
+      total: 2,
+      done: 1,
+      hasOpenNow: true,
+      availableNow: 1,
+    });
   });
 });
 

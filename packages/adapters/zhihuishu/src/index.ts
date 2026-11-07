@@ -23,12 +23,14 @@ import type {
   AdapterCapabilities,
   AdapterContext,
   AuthMethod,
+  CourseProgressItem,
+  FetchCourseProgressRequest,
   FetchCoursesRequest,
   FetchTasksRequest,
   Page,
   PlatformAdapter,
 } from '#core/ports/adapter.ts';
-import type { PlatformCourse } from '#core/domain/course.ts';
+import type { PlatformCourse, UnifiedCourse, CourseGradeSummary } from '#core/domain/course.ts';
 import type { PlatformTask, TaskStatus } from '#core/domain/task.ts';
 import type { Credentials, Session } from '#core/ports/vault.ts';
 import type { ReadOnlyPolicy } from '#core/ports/read-only.ts';
@@ -44,6 +46,18 @@ export interface ZhihuishuEndpointMap {
   homeworkList: string;
   /** 作业列表页面（buildTaskUrl 兜底，不是具体作业）。 */
   homeworkPage: string;
+  /** 共享课列表。POST（secretStr 是页面加密结果）。 */
+  shareCourses: string;
+  /** 共享课学习页。 */
+  sharedCoursePage: string;
+  /** 共享课「学习进度」页数据（按章节/视频）。 */
+  stuLearn: string;
+  /** 共享课成绩摘要（平时分/期末/总评）。 */
+  stuReport: string;
+  /** 共享课学习习惯分。 */
+  stuHabit: string;
+  /** 共享课互动分。 */
+  stuForum: string;
 }
 
 export const ZhihuishuEndpoints: ZhihuishuEndpointMap = {
@@ -51,7 +65,29 @@ export const ZhihuishuEndpoints: ZhihuishuEndpointMap = {
   courseList: 'https://hike-teaching.zhihuishu.com/educational/platform/getStudentCourseList',
   homeworkList: 'https://hiexam-server.zhihuishu.com/zhsathome/homeworkUser/List',
   homeworkPage: 'https://wenda.zhihuishu.com/stu/courseInfo/homeworkExam/',
+  /** 「共享课」列表：请求体 secretStr 是页面加密后的固定查询（status/page）。 */
+  shareCourses: 'https://onlineservice-api.zhihuishu.com/gateway/t/v1/student/course/share/queryShareCourseInfo',
+  /** 共享课学习页（截图实证：recruitAndCourseId 就是列表返回的 secret）。 */
+  sharedCoursePage: 'https://studyvideoh5.zhihuishu.com/stuStudy',
+  /** 共享课成绩分析页的学习进度接口（免加密，form 传 courseId/recruitId）。 */
+  stuLearn: 'https://stuonline.zhihuishu.com/stuonline/json/stuLearnReportNew/loadStuLearingTab/',
+  stuReport: 'https://stuonline.zhihuishu.com/stuonline/json/stuLearnReportNew/loadStuLearnReport/',
+  stuHabit: 'https://stuonline.zhihuishu.com/stuonline/json/stuLearnReportNew/loadStuHabit/',
+  stuForum: 'https://stuonline.zhihuishu.com/stuonline/json/stuLearnReportNew/loadCourseForum/',
 };
+
+/**
+ * HAR 里抓到的两个固定查询密文（2026-11-07）。
+ *
+ * `queryShareCourseInfo` 的请求参数被页面 `window.yxyz()` 用 RSA/AES 加密，
+ * 但同一组查询参数（status=1 / status=2，pageNo=1，pageSize=5）的密文在两次 HAR
+ * 里完全一致 —— 它是**确定性加密**，不是一次性 token。这里把两份密文固定下来，
+ * 分别覆盖「未完成 / 已完成」两个共享课标签；平台改版/轮换密钥时需从新 HAR 更新。
+ */
+const SHARED_COURSE_SECRETS = [
+  'NEuH3llD9woD4DQgu0k6Uvp5yyo8WT84Dq5lU2iPwvgKNatePzJ+vu/4PRaNYy+K',
+  'WfBsR9nN4rmJr8WYuVEa7gS3yO+TJHUNeLBjW3EEIZiRPdqZbDjacXj0jGbYkFAq',
+];
 
 export interface ZhihuishuAdapterOptions {
   endpoints?: Partial<ZhihuishuEndpointMap>;
@@ -89,6 +125,7 @@ export class ZhihuishuAdapter implements PlatformAdapter {
 
   readonly readOnlyPolicy: ReadOnlyPolicy = {
     allowMethods: ['GET', 'HEAD'],
+    allowPost: [{ pattern: /student\/course\/share\/queryShareCourseInfo/, why: '查询共享课列表（只读，POST 只为传加密参数）' }],
   };
 
   readonly sessionExpiryCauses = [
@@ -157,7 +194,35 @@ export class ZhihuishuAdapter implements PlatformAdapter {
     }
     const rt = body.rt as { studyCourses?: unknown[]; archiveCourses?: unknown[] };
     const courses = [...(Array.isArray(rt.studyCourses) ? rt.studyCourses : []), ...(Array.isArray(rt.archiveCourses) ? rt.archiveCourses : [])];
-    return { items: parseZhihuishuCourses(courses), hasMore: false };
+    const items = parseZhihuishuCourses(courses);
+
+    // 「共享课」（如“大学生心理健康”）不在 getStudentCourseList 里，走
+    // queryShareCourseInfo。密文是页面加密后的固定查询，见 SHARED_COURSE_SECRETS 注释。
+    for (const secret of SHARED_COURSE_SECRETS) {
+      try {
+        const res = await http.request({
+          url: this.#ep.shareCourses,
+          method: 'POST',
+          form: { secretStr: secret, date: String(ctx.clock.nowMs()) },
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
+        });
+        if (res.status >= 400) continue;
+        const text = await res.text();
+        if (!text.trim().startsWith('{')) continue;
+        const parsed = JSON.parse(text) as { result?: { courseOpenDtos?: unknown[] } };
+        const list = parsed.result?.courseOpenDtos;
+        if (Array.isArray(list)) {
+          const known = new Set(items.map((c) => c.platformCourseId));
+          for (const c of parseZhihuishuSharedCourses(list)) {
+            if (!known.has(c.platformCourseId)) items.push(c);
+          }
+        }
+      } catch {
+        // 共享课是附加能力；失败不影响普通课程列表
+      }
+    }
+
+    return { items, hasMore: false };
   }
 
   async fetchTasks(ctx: AdapterContext, session: Session, req: FetchTasksRequest): Promise<Page<PlatformTask>> {
@@ -190,9 +255,106 @@ export class ZhihuishuAdapter implements PlatformAdapter {
     return { items, hasMore: false };
   }
 
+  /**
+   * 共享课的任务点：走成绩分析页的「学习进度」接口（免加密，form 传 courseId/recruitId）。
+   * 这里统计**视频任务点**（有子视频按子视频算，单视频按 lesson.videoId 算）；
+   * 章节测验、期末考试、平时分属于另外的 Tab，后续单独接。
+   */
+  async fetchCourseProgress(
+    ctx: AdapterContext,
+    session: Session,
+    courses: UnifiedCourse[],
+    req?: FetchCourseProgressRequest,
+  ): Promise<Page<CourseProgressItem>> {
+    const want = new Set(req?.courseIds ?? []);
+    const list = want.size > 0 ? courses.filter((c) => want.has(c.platformCourseId)) : courses;
+    const http = new SessionHttpClient(ctx, session);
+    const items: CourseProgressItem[] = [];
+    for (const c of list) {
+      const raw = (c.raw ?? {}) as { recruitId?: string | number };
+      if (raw.recruitId === undefined || raw.recruitId === null || raw.recruitId === '') continue;
+      try {
+        const res = await http.postForm<Record<string, unknown>>(this.#ep.stuLearn, {
+          courseId: c.platformCourseId,
+          recruitId: String(raw.recruitId),
+          type: 'l',
+          courseTypeEs: '1',
+        });
+        const chapter = (res.body.chapterOrLesson ?? null) as { clList?: unknown[] } | null;
+        const counts = countVideos(chapter);
+        if (counts.total <= 0) continue;
+        const remain = Math.max(0, counts.total - counts.done);
+        const grade = await this.#fetchGrade(http, c);
+        items.push({
+          platformCourseId: c.platformCourseId,
+          total: counts.total,
+          done: counts.done,
+          hasOpenNow: remain > 0,
+          ...(remain > 0 ? { availableNow: remain } : {}),
+          ...(grade ? { grade } : {}),
+        });
+      } catch {
+        // 共享课进度是附加能力；单门失败不拖垮整批
+      }
+    }
+    return { items, hasMore: false, declaredTotal: items.length };
+  }
+
+  /** 平时分/总评/学习习惯/互动分：四个免加密接口，一个失败不影响其他。 */
+  async #fetchGrade(http: SessionHttpClient, c: UnifiedCourse): Promise<CourseGradeSummary | undefined> {
+    const raw = (c.raw ?? {}) as { recruitId?: string | number };
+    if (raw.recruitId === undefined || raw.recruitId === null) return undefined;
+    const base = { courseId: c.platformCourseId, recruitId: String(raw.recruitId), type: 'l', courseTypeEs: '1' };
+    const safe = async (url: string, form: Record<string, string>) => {
+      try {
+        const r = await http.postForm<Record<string, unknown>>(url, form);
+        return r.body ?? {};
+      } catch {
+        return {} as Record<string, unknown>;
+      }
+    };
+    const [report, habit, forum] = await Promise.all([
+      safe(this.#ep.stuReport, { courseId: base.courseId, recruitId: base.recruitId, stuRankType: 'classRank' }),
+      safe(this.#ep.stuHabit, base),
+      safe(this.#ep.stuForum, base),
+    ]);
+    const ssd = (report.ssd ?? {}) as Record<string, unknown>;
+    const grade: CourseGradeSummary = {
+      ...(numeric(ssd.totalScore) !== undefined ? { totalScore: numeric(ssd.totalScore) } : {}),
+      ...(numeric(ssd.usualScore) !== undefined ? { usualScore: numeric(ssd.usualScore) } : {}),
+      ...(numeric(ssd.finalScore) !== undefined ? { finalScore: numeric(ssd.finalScore) } : {}),
+      ...(numeric(ssd.examScore) !== undefined ? { examScore: numeric(ssd.examScore) } : {}),
+      ...(numeric(ssd.meetScore) !== undefined ? { meetScore: numeric(ssd.meetScore) } : {}),
+      ...(numeric(habit.learnedHabitScore) !== undefined ? { habitScore: numeric(habit.learnedHabitScore) } : {}),
+      ...(numeric(habit.learnedHabitTotalScore) !== undefined
+        ? { habitTotal: numeric(habit.learnedHabitTotalScore) }
+        : {}),
+      ...(numeric(forum.learnedInteractiveScore) !== undefined
+        ? { interactionScore: numeric(forum.learnedInteractiveScore) }
+        : {}),
+      ...(numeric(forum.learnedInteractiveTotalScore) !== undefined
+        ? { interactionTotal: numeric(forum.learnedInteractiveTotalScore) }
+        : {}),
+    };
+    return Object.keys(grade).length > 0 ? grade : undefined;
+  }
+
   /** 作业列表页；点作业名先落到这门课的作业列表（具体作业的直达 URL 需要页面状态，先不猜）。 */
   buildTaskUrl(courseId: string, _task: PlatformTask): string | undefined {
     return `${this.#ep.homeworkPage}?courseId=${encodeURIComponent(courseId)}`;
+  }
+
+  /**
+   * 课程页：共享课（有 `raw.secret`/`recruitId`）走 `studyvideoh5` 学习页；
+   * 普通课用 `raw.homepage`；都没有就落到作业列表页。
+   */
+  buildCourseUrl(course: UnifiedCourse): string | undefined {
+    const raw = (course.raw ?? {}) as { secret?: string; recruitId?: string | number; homepage?: string };
+    if (raw.secret && raw.recruitId !== undefined) {
+      return `${this.#ep.sharedCoursePage}?recruitAndCourseId=${encodeURIComponent(String(raw.secret))}&studyStatus=1`;
+    }
+    if (raw.homepage && /^https?:\/\//i.test(raw.homepage)) return raw.homepage;
+    return undefined;
   }
 
   /** 取登录用户 uuid。失败一律明确报 AUTH_REQUIRED，不能静默空列表。 */
@@ -280,6 +442,25 @@ export function parseZhihuishuCourses(list: unknown[]): PlatformCourse[] {
   return out;
 }
 
+/** 解析共享课列表（courseOpenDtos；字段来自 2026-11-07 HAR）。 */
+export function parseZhihuishuSharedCourses(list: unknown[]): PlatformCourse[] {
+  const out: PlatformCourse[] = [];
+  for (const row of list) {
+    if (typeof row !== 'object' || row === null) continue;
+    const r = row as Record<string, unknown>;
+    const id = r.courseId;
+    const name = r.courseName;
+    if (id === undefined || id === null || typeof name !== 'string' || !name.trim()) continue;
+    out.push({
+      platformCourseId: String(id),
+      name: name.trim(),
+      teacher: typeof r.teacherName === 'string' ? r.teacherName : undefined,
+      raw: r,
+    });
+  }
+  return out;
+}
+
 /** 解析智慧树作业列表（字段名来自 2026-11-07 HAR）。 */
 export function parseZhihuishuHomeworks(list: unknown[], courseId: string, courseName: string): PlatformTask[] {
   const out: PlatformTask[] = [];
@@ -353,4 +534,36 @@ function numeric(v: unknown): number | undefined {
   if (v === undefined || v === null || v === '') return undefined;
   const n = Number(v);
   return Number.isFinite(n) ? n : undefined;
+}
+
+/** 统计共享课「学习进度」里的视频任务点（只看 watchStatus==1 记为已完成）。 */
+function countVideos(chapter: { clList?: unknown[] } | null): { total: number; done: number } {
+  let total = 0;
+  let done = 0;
+  const chapters = Array.isArray(chapter?.clList) ? chapter!.clList : [];
+  for (const ch of chapters) {
+    if (typeof ch !== 'object' || ch === null) continue;
+    const lessons = (ch as { lessonTempDtos?: unknown[] }).lessonTempDtos;
+    if (!Array.isArray(lessons)) continue;
+    for (const lesson of lessons) {
+      if (typeof lesson !== 'object' || lesson === null) continue;
+      const l = lesson as {
+        videoId?: unknown;
+        watchStatus?: unknown;
+        lessonVideoTempDtos?: unknown[];
+      };
+      const videos = Array.isArray(l.lessonVideoTempDtos) ? l.lessonVideoTempDtos : [];
+      if (videos.length > 0) {
+        for (const v of videos) {
+          if (typeof v !== 'object' || v === null) continue;
+          total += 1;
+          if (Number((v as { watchStatus?: unknown }).watchStatus) === 1) done += 1;
+        }
+      } else if (Number(l.videoId) > 0) {
+        total += 1;
+        if (Number(l.watchStatus) === 1) done += 1;
+      }
+    }
+  }
+  return { total, done };
 }

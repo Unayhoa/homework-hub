@@ -15,7 +15,7 @@ import type { HttpClient } from '../ports/http.ts';
 import type { Limiter, LimiterOptions } from '../ports/limiter.ts';
 import type { Logger } from '../ports/logger.ts';
 import type { Clock } from '../domain/time.ts';
-import type { PlatformAccount, UnifiedCourse } from '../domain/course.ts';
+import type { PlatformAccount, UnifiedCourse, CourseGradeSummary } from '../domain/course.ts';
 import type { TaskKind, UnifiedTask } from '../domain/task.ts';
 import { completionOrigin, effectiveStatus, hasPendingAc, isTerminalStatus } from '../domain/task.ts';
 import { makeCourseId } from '../domain/ids.ts';
@@ -742,6 +742,7 @@ export class SyncEngine {
 
       patches.push({
         ...c,
+        ...(item.grade ? { grade: item.grade } : {}),
         taskPoints: {
           // 版本号必须跟着写：前端靠它判断"这条记录是不是旧形状、要不要强制重抓"
           schema: TASK_POINT_SCHEMA,
@@ -882,6 +883,8 @@ export class SyncEngine {
       availableNow?: number;
       /** 这门课在平台上的页面地址（可选）。任务点卡片点一下就能去平台继续做 */
       courseUrl?: string;
+      /** 课程级成绩摘要（共享课成绩分析页提供） */
+      grade?: CourseGradeSummary;
     }>;
   }> {
     const account = await this.#store.getAccount(accountId);
@@ -934,6 +937,7 @@ export class SyncEngine {
           ...(tp.lastClosedAt ? { lastClosedAt: tp.lastClosedAt } : {}),
           hasOpenNow: tp.hasOpenNow === true,
           ...(typeof tp.availableNow === 'number' ? { availableNow: tp.availableNow } : {}),
+          ...(c.grade ? { grade: c.grade } : {}),
           ...(courseUrl ? { courseUrl } : {}),
         };
       }),
