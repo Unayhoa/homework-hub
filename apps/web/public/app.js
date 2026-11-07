@@ -3297,16 +3297,17 @@ $('changeNoticeHead').addEventListener('click', () => {
 // 课程行的两个小按钮：改名 / 把同名手工任务归并进来。
 // 放在 change 事件之前用 click 拦，避免和勾选（label）冲突。
 $('courseRefresh')?.addEventListener('click', async () => {
-  busy(true);
+  // 和同步动作一致：底部常驻状态条 + 右上角按钮旋转，不用全屏遮罩。
+  showSyncBar('正在刷新课程列表…');
   try {
     await api('/api/sync', { method: 'POST', body: JSON.stringify({ refreshCourses: true }) });
-    toast('课程列表已刷新');
     await refresh();
     await renderCourses();
+    showSyncBar('课程列表已刷新，正在更新任务点…', 'running');
+    await loadTaskPoints(true).catch(() => {});
+    showSyncBar('课程列表和任务点已刷新', 'done', 3500);
   } catch (e) {
-    toast(`刷新课程失败：${e.message}`, 5000);
-  } finally {
-    busy(false);
+    showSyncBar(`刷新课程失败：${e.message}`, 'error', 9000);
   }
 });
 

@@ -237,6 +237,13 @@ export class ZhihuishuAdapter implements PlatformAdapter {
     const failures: string[] = [];
 
     for (const course of req.courses) {
+      // 共享课的作业/考试在大类上走 studentexam-api（secretStr 带课程/招生维度），
+      // 不能用普通课的 homeworkUser/List —— 那个接口对共享课只返回
+      // {currentTime,msg,status}，没有 rt。先跳过，避免把整轮同步判成失败；
+      // 共享课的视频任务点和成绩摘要已由 fetchCourseProgress 单独抓取。
+      if ((course.raw as { recruitId?: unknown } | undefined)?.recruitId !== undefined) {
+        continue;
+      }
       try {
         const all = await this.#listHomeworks(http, ctx, uuid, course.platformCourseId);
         items.push(...parseZhihuishuHomeworks(all, course.platformCourseId, course.name));
