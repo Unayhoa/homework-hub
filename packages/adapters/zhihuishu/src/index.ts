@@ -50,8 +50,10 @@ export interface ZhihuishuEndpointMap {
   shareCourses: string;
   /** 共享课学习页。 */
   sharedCoursePage: string;
-  /** 共享课「学习进度」页数据（按章节/视频）。 */
+  /** 共享课学习进度/成绩摘要。 */
   stuLearn: string;
+  /** 共享课章节测验成绩。 */
+  stuExamScore: string;
   /** 共享课成绩摘要（平时分/期末/总评）。 */
   stuReport: string;
   /** 共享课学习习惯分。 */
@@ -71,6 +73,7 @@ export const ZhihuishuEndpoints: ZhihuishuEndpointMap = {
   sharedCoursePage: 'https://studyvideoh5.zhihuishu.com/stuStudy',
   /** 共享课成绩分析页的学习进度接口（免加密，form 传 courseId/recruitId）。 */
   stuLearn: 'https://stuonline.zhihuishu.com/stuonline/json/stuLearnReportNew/loadStuLearingTab/',
+  stuExamScore: 'https://stuonline.zhihuishu.com/stuonline/json/stuLearnReportNew/loadExamAndScore/',
   stuReport: 'https://stuonline.zhihuishu.com/stuonline/json/stuLearnReportNew/loadStuLearnReport/',
   stuHabit: 'https://stuonline.zhihuishu.com/stuonline/json/stuLearnReportNew/loadStuHabit/',
   stuForum: 'https://stuonline.zhihuishu.com/stuonline/json/stuLearnReportNew/loadCourseForum/',
@@ -242,6 +245,11 @@ export class ZhihuishuAdapter implements PlatformAdapter {
       // {currentTime,msg,status}，没有 rt。先跳过，避免把整轮同步判成失败；
       // 共享课的视频任务点和成绩摘要已由 fetchCourseProgress 单独抓取。
       if ((course.raw as { recruitId?: unknown } | undefined)?.recruitId !== undefined) {
+        try {
+          items.push(...(await this.#listSharedTasks(http, course)));
+        } catch {
+          // 共享课作业/考试首批不完整；失败不拖垮整轮同步
+        }
         continue;
       }
       try {
@@ -375,6 +383,55 @@ export class ZhihuishuAdapter implements PlatformAdapter {
       });
     }
     return uuid;
+  }
+
+  /** 共享课的章节测验：从成绩分析页「学习进度/章节测验」接口拿 chapterName + state。 */
+  async #listSharedTasks(http: SessionHttpClient, course: UnifiedCourse): Promise<PlatformTask[]> {
+    const raw = (course.raw ?? {}) as { recruitId?: string | number };
+    if (raw.recruitId === undefined || raw.recruitId === null) return [];
+    const base = { courseId: course.platformCourseId, recruitId: String(raw.recruitId), type: 'l', courseTypeEs: '1' };
+    const learn = await http.postForm<Record<string, unknown>>(this.#ep.stuLearn, base);
+    const chapter = (learn.body.chapterOrLesson ?? null) as { clList?: unknown[] } | null;
+    const chapters = Array.isArray(chapter?.clList) ? chapter!.clList : [];
+    const nameById = new Map<string, string>();
+    const ids: string[] = [];
+    for (const ch of chapters) {
+      if (typeof ch !== 'object' || ch === null) continue;
+      const c = ch as { chapterId?: unknown; chapterName?: unknown };
+      if (c.chapterId === undefined || c.chapterId === null) continue;
+      const id = String(c.chapterId);
+      ids.push(id);
+      nameById.set(id, typeof c.chapterName === 'string' ? c.chapterName : `章节 ${ids.length}`);
+    }
+    if (ids.length === 0) return [];
+    const scoreRes = await http.postForm<Record<string, unknown>>(this.#ep.stuExamScore, {
+      recruitId: String(raw.recruitId),
+      chapterIds: ids.join(','),
+      lessonIds: '',
+      lessonType: '',
+    });
+    const sldList = Array.isArray(scoreRes.body.sldList) ? (scoreRes.body.sldList as unknown[]) : [];
+    const out: PlatformTask[] = [];
+    for (const row of sldList) {
+      if (typeof row !== 'object' || row === null) continue;
+      const r = row as Record<string, unknown>;
+      const chapterId = r.chapterId === undefined || r.chapterId === null ? '' : String(r.chapterId);
+      if (!chapterId) continue;
+      const state = Number(r.state);
+      const score = numeric(r.stuScore);
+      out.push({
+        platformTaskId: `chapter-quiz-${chapterId}`,
+        courseId: course.platformCourseId,
+        courseName: course.name,
+        kind: 'quiz',
+        title: `章节测验 · ${nameById.get(chapterId) ?? chapterId}`,
+        status: state === 4 ? 'graded' : 'pending',
+        ...(score !== undefined ? { score } : {}),
+        ...(numeric(r.examScore) !== undefined ? { totalScore: numeric(r.examScore) } : {}),
+        raw: r,
+      });
+    }
+    return out;
   }
 
   async #listHomeworks(
