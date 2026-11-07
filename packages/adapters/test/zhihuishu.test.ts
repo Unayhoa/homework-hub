@@ -171,6 +171,15 @@ describe('智慧树 · 抓取链路（HAR 结构）', () => {
     await assert.rejects(() => adapter.fetchCourses(ctx, SESSION), /会话已失效|AUTH/);
   });
 
+  it('保活探测指向登录用户信息接口，且间隔不短于 15 分钟', () => {
+    const p = new ZhihuishuAdapter().keepAliveProbe;
+    assert.match(p.url, /getLoginUserInfo/);
+    assert.equal(p.method, 'GET');
+    assert.ok(p.intervalMs >= 15 * 60 * 1000);
+    assert.equal(new RegExp(p.alivePattern).test('{"code":200,"result":{"uuid":"x"}}'), true);
+    assert.equal(new RegExp(p.alivePattern).test('<html>login</html>'), false);
+  });
+
   it('共享课列表与学习进度（免加密接口）能算出视频任务点', async () => {
     const ctx = makeCtx((url) => {
       if (url.includes('getLoginUserInfo')) return { body: JSON.stringify({ code: 200, result: { uuid: 'u' } }) };

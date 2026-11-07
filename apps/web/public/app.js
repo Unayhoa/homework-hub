@@ -115,7 +115,14 @@ async function api(path, opts = {}) {
   // 只在「HTTP 层错误」或「服务端显式给了 error」时抛异常。
   // /api/sync 的应答里 ok:false 只表示「有账号没同步成功」，body 本身是完整有效的结果
   // —— 之前把它当接口失败抛出，弹出了莫名其妙的「同步失败：HTTP 200」。
-  if (!res.ok || (body.ok === false && body.error)) throw new Error(body.error ?? `HTTP ${res.status}`);
+  if (!res.ok || (body.ok === false && body.error)) {
+    // 服务端异常栈可能极长；直接 new Error(超长字符串) 在 V8 会抛
+    // "Invalid string length"，把真正的错误盖掉。这里先截断再做 Error。
+    let detail = body.error;
+    if (typeof detail !== 'string' || !detail) detail = `HTTP ${res.status}`;
+    if (detail.length > 2000) detail = `${detail.slice(0, 2000)}…`;
+    throw new Error(detail);
+  }
   return body;
 }
 

@@ -128,7 +128,26 @@ export class ZhihuishuAdapter implements PlatformAdapter {
 
   readonly readOnlyPolicy: ReadOnlyPolicy = {
     allowMethods: ['GET', 'HEAD'],
-    allowPost: [{ pattern: /student\/course\/share\/queryShareCourseInfo/, why: '查询共享课列表（只读，POST 只为传加密参数）' }],
+    allowPost: [
+      { pattern: /student\/course\/share\/queryShareCourseInfo/, why: '查询共享课列表（只读，POST 只为传加密参数）' },
+      {
+        pattern: /stuonline\.zhihuishu\.com\/stuonline\/json\/stuLearnReportNew\//,
+        why: '查询共享课学习进度/成绩（只读，POST 只为传 courseId/recruitId）',
+      },
+    ],
+  };
+
+  /**
+   * 智慧树的保活探测：用最便宜的「登录用户信息」接口。
+   * 它只回答「cookie 还能不能用」，不拉课程/作业；间隔 20 分钟，
+   * 比 iSmart 的 ticket 换票机制更简单 —— 智慧树是 cookie-only，没有
+   * 可自动续期的 ticket，能做的只是尽量在会话闲置过期前轻触一下。
+   */
+  readonly keepAliveProbe = {
+    url: 'https://onlineservice-api.zhihuishu.com/gateway/f/v1/login/getLoginUserInfo',
+    method: 'GET' as const,
+    alivePattern: '"uuid"',
+    intervalMs: 20 * 60 * 1000,
   };
 
   readonly sessionExpiryCauses = [
