@@ -294,10 +294,13 @@ export function createApiHandler(deps: ApiDeps): ApiHandler {
    * 同步必须串行。不只是省资源：两个并发同步会在合并阶段互相干扰
    * 「消失/恢复」的判定。所以复用进行中的同步，而不是排队两个。
    */
-  function runSync(opts: { allowRelogin?: boolean } = {}): Promise<SyncReport> {
+  function runSync(opts: { allowRelogin?: boolean; refreshCourses?: boolean } = {}): Promise<SyncReport> {
     if (inFlight) return inFlight;
     inFlight = deps.engine
-      .syncAll({ allowRelogin: opts.allowRelogin !== false })
+      .syncAll({
+        allowRelogin: opts.allowRelogin !== false,
+        ...(opts.refreshCourses ? { refreshCourses: 'always' as const } : {}),
+      })
       .finally(() => {
         inFlight = undefined;
       });
@@ -1070,7 +1073,10 @@ export function createApiHandler(deps: ApiDeps): ApiHandler {
       // ---- 写 ----
       if (method === 'POST' && path === '/api/sync') {
         const body = parseBody();
-        const report = await runSync({ allowRelogin: body.allowRelogin !== false });
+        const report = await runSync({
+          allowRelogin: body.allowRelogin !== false,
+          refreshCourses: body.refreshCourses === true,
+        });
         // 不 await：同步该多快还多快，任务点在后台补（过期才抓）
         void refreshTaskPointsQuietly();
         return { status: 200, body: summarize(report) };

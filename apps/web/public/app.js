@@ -3296,6 +3296,20 @@ $('changeNoticeHead').addEventListener('click', () => {
 });
 // 课程行的两个小按钮：改名 / 把同名手工任务归并进来。
 // 放在 change 事件之前用 click 拦，避免和勾选（label）冲突。
+$('courseRefresh')?.addEventListener('click', async () => {
+  busy(true);
+  try {
+    await api('/api/sync', { method: 'POST', body: JSON.stringify({ refreshCourses: true }) });
+    toast('课程列表已刷新');
+    await refresh();
+    await renderCourses();
+  } catch (e) {
+    toast(`刷新课程失败：${e.message}`, 5000);
+  } finally {
+    busy(false);
+  }
+});
+
 $('courseList').addEventListener('click', (e) => {
   const ren = e.target.closest('button[data-rename-course]');
   if (ren) {
@@ -3740,3 +3754,4 @@ function renderAppVersion() {
     else todoSeg = 'tasks';
   }
 })();
+
