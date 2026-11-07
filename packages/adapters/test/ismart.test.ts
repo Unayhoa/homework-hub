@@ -1,11 +1,11 @@
-/**
+﻿/**
  * iSmart 适配器解析测试 —— 夹具直接取自 2026-09-27 的真实抓包（HAR）。
  * 平台字段若再变版，用新抓包替换这里的 JSON 即可定位差异。
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { parseSmartCourses, parseSmartTests, IsmartAdapter } from '../ismart/src/index.ts';
+import { parseSmartCourses, parseSmartTests, parseSmartActivities, IsmartAdapter } from '../ismart/src/index.ts';
 
 // ---- 真实抓包片段（school.ismartlearning.cn/client/course/list-of-student）----
 const COURSE_LIST = [
@@ -96,6 +96,30 @@ describe('ismart · parseSmartTests（真实抓包夹具）', () => {
   });
 });
 
+describe('ismart · parseSmartActivities（活动）', () => {
+  it('activityId/activityName/status 1→pending、2→submitted，类型 2 是投票', () => {
+    const items = parseSmartActivities(
+      [
+        { activityId: 1001, activityName: '本周作业：Test yourself 1 听力部分', activityType: 1, status: 1, endTime: Date.now() + 86_400_000 },
+        { activityId: 1002, activityName: '课堂投票', activityType: 2, status: 2 },
+      ],
+      '124039',
+      '学术英语',
+    );
+    assert.equal(items.length, 2);
+    assert.equal(items[0]!.kind, 'activity');
+    assert.equal(items[0]!.status, 'pending');
+    assert.ok(items[0]!.deadline, '有未来截止时间时应生成 deadline');
+    assert.match(items[1]!.sourceUrl ?? '', /voteDetail\.html/);
+    assert.equal(items[1]!.status, 'submitted');
+  });
+
+  it('活动没有时间字段 → 不编截止时间', () => {
+    const items = parseSmartActivities([{ activityId: 1, activityName: '无期限活动', status: 1 }], '1', 'x');
+    assert.equal(items[0]!.deadline, undefined);
+  });
+});
+
 describe('ismart · 适配器装配', () => {
   it('签名声明已按抓包结论关闭，能力与只读策略正确', () => {
     const a = new IsmartAdapter();
@@ -128,6 +152,7 @@ describe('ismart · 适配器装配', () => {
     const cases = [
       'https://school.ismartlearning.cn/client/course/list-of-student?status=1',
       'https://school.ismartlearning.cn/client/homework/tests/list-of-student',
+      'https://school.ismartlearning.cn/client/activity/list-of-studentv10',
       'https://school.ismartlearning.cn/client/user/currentuser',
     ];
     for (const url of cases) {
@@ -264,3 +289,4 @@ describe('ismart · 保活探测声明', () => {
     assert.match(causes[causes.length - 1]!, /别处登录/);
   });
 });
+

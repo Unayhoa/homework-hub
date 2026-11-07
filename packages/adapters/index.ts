@@ -14,6 +14,7 @@ import { MockAdapter } from './mock/src/index.ts';
 import { ChaoxingAdapter } from './chaoxing/src/index.ts';
 import { YuketangAdapter } from './yuketang/src/index.ts';
 import { IsmartAdapter } from './ismart/src/index.ts';
+import { ZhihuishuAdapter } from './zhihuishu/src/index.ts';
 import { MockPlatform, createFixtures } from './mock/src/index.ts';
 
 export {
@@ -21,6 +22,7 @@ export {
   ChaoxingAdapter,
   YuketangAdapter,
   IsmartAdapter,
+  ZhihuishuAdapter,
   MockAdapter,
   MockPlatform,
   createFixtures,
@@ -31,6 +33,8 @@ export { YuketangEndpoints } from './yuketang/src/index.ts';
 export type { YuketangEndpointMap } from './yuketang/src/index.ts';
 export { SmartEndpoints } from './ismart/src/index.ts';
 export type { SmartEndpointMap } from './ismart/src/index.ts';
+export { ZhihuishuEndpoints } from './zhihuishu/src/index.ts';
+export type { ZhihuishuEndpointMap } from './zhihuishu/src/index.ts';
 export type {
   MockMode,
   MockTask,

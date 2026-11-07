@@ -12,6 +12,7 @@ import { ChaoxingAdapter } from './chaoxing/src/index.ts';
 import { YuketangAdapter } from './yuketang/src/index.ts';
 import { IsmartAdapter } from './ismart/src/index.ts';
 import { PintiaAdapter } from './pintia/src/index.ts';
+import { ZhihuishuAdapter } from './zhihuishu/src/index.ts';
 
 /**
  * 注册所有真实平台适配器。
@@ -32,5 +33,7 @@ export function createProductionRegistry(): AdapterRegistry {
   registry.register(new IsmartAdapter());
   // PTA（拼题A）：字段与状态判定来自 2026-10-22 真机抓包，见适配器文件头
   registry.register(new PintiaAdapter());
+  // 智慧树：账号登录 + 作业待办（2026-11-07 真机 HAR）；任务点/考试暂不做
+  registry.register(new ZhihuishuAdapter());
   return registry;
 }

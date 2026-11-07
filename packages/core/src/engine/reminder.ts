@@ -51,7 +51,7 @@ export const DEFAULT_REMINDER_RULES: ReminderRule[] = [
   {
     id: 'homework',
     label: '作业提醒',
-    kinds: ['homework', 'quiz'],
+    kinds: ['homework', 'quiz', 'activity'],
     offsets: [
       { value: 2, ...DAY },
       { value: 1, ...DAY },
@@ -199,6 +199,8 @@ function kindLabel(kind: TaskKind): string {
       return '任务点';
     case 'discussion':
       return '讨论';
+    case 'activity':
+      return '活动';
     default:
       return '待办';
   }

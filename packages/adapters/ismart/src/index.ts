@@ -44,6 +44,8 @@ export interface SmartEndpointMap {
   courseList: string;
   /** 作业（测验）列表。POST，表单 courseId / testStatus(0=进行中,1=已结束) / pager.*。 */
   homeworkTests: string;
+  /** 活动列表。POST，表单 courseId / activityStatus(1=当前活动,2=已结束) / pager.*。 */
+  activityList: string;
   /** 账号密码登录。POST，表单 username / password / captcha。 */
   ssoLogin: string;
   /** 图形验证码图片（与会话 cookie 绑定，登录页 changeCode() 的真实地址）。 */
@@ -65,6 +67,7 @@ export const SmartEndpoints: SmartEndpointMap = {
   currentUser: '/client/user/currentuser',
   courseList: '/client/course/list-of-student',
   homeworkTests: '/client/homework/tests/list-of-student',
+  activityList: '/client/activity/list-of-studentv10',
   ssoLogin: '/v2/tickets-v3',
   captcha: '/captcha.html',
   ssoServiceTicket: '/v1/serviceTicket',
@@ -218,6 +221,7 @@ export class IsmartAdapter implements PlatformAdapter {
       { pattern: /\/client\/user\/currentuser/, why: '会话探测（只读）' },
       { pattern: /\/client\/course\/list-of-student/, why: '查询课程列表（只读）' },
       { pattern: /\/client\/homework\/tests\/list-of-student/, why: '查询作业列表（只读）' },
+      { pattern: /\/client\/activity\/list-of-studentv10/, why: '查询活动列表（只读）' },
       { pattern: /\/v2\/tickets-v3/, why: '账号密码登录（SSO）' },
       { pattern: /\/front\/authlog\/check/, why: '登录后会话自检（只读）' },
       { pattern: /\/v1\/serviceTicket/, why: '用 SSO 总票据换访问票据（只读）' },
@@ -563,6 +567,26 @@ export class IsmartAdapter implements PlatformAdapter {
           failures.push(`${course.name}/testStatus=${testStatus}: ${(e as Error).message}`);
         }
       }
+
+      // 「活动」tab：展示/投票等活动也要进待办（2026-11-07 用户反馈只抓测验不够）。
+      // activityStatus 1=当前活动、2=已结束的活动；两个都要，已完成栏才完整。
+      for (const activityStatus of [1, 2] as const) {
+        try {
+          const body = await this.#post(http, this.#ep.activityList, {
+            courseId: course.platformCourseId,
+            activityStatus,
+            'pager.currentPage': 1,
+            'pager.pageSize': 100,
+          });
+          const list = (body.data as { list?: unknown[] } | undefined)?.list;
+          if (!Array.isArray(list)) {
+            throw schemaDrift(this.id, `活动列表缺少 data.list（响应键：${Object.keys(body).join(',')}）`);
+          }
+          items.push(...parseSmartActivities(list, course.platformCourseId, course.name));
+        } catch (e) {
+          failures.push(`${course.name}/activityStatus=${activityStatus}: ${(e as Error).message}`);
+        }
+      }
     }
 
     if (items.length === 0 && failures.length > 0 && failures.length >= (req.courses?.length ?? 1)) {
@@ -600,7 +624,11 @@ export class IsmartAdapter implements PlatformAdapter {
     return { code, data: body.data, raw: body };
   }
 
-  buildTaskUrl(courseId: string, _task: PlatformTask): string | undefined {
+  buildTaskUrl(courseId: string, task: PlatformTask): string | undefined {
+    if (task.kind === 'activity') {
+      // 活动详情链接由 parseSmartActivities 写进 sourceUrl；这里只给活动列表页兜底
+      return `${this.#webBase}/center/student/course/activitys.html?courseId=${encodeURIComponent(courseId)}`;
+    }
     // 作业列表页（测验 tab），从 HAR 里的真实 URL 形态取的
     return `${this.#webBase}/center/student/course/tests.html?courseId=${encodeURIComponent(courseId)}&status=1`;
   }
@@ -670,6 +698,59 @@ function toNumber(v: unknown): number | undefined {
   if (v === undefined || v === null || v === '') return undefined;
   const n = Number(v);
   return Number.isFinite(n) ? n : undefined;
+}
+
+/**
+ * 解析「活动」列表。
+ *
+ * 字段名来自 2026-11-07 iSmart 活动页模板（activity0/1Template）：
+ *   activityId / activityName / activityType(1展示,2投票) / status(1未提交,2已提交) / desc
+ * 时间字段在活动列表模板里没显示，但接口可能带 beginTime/endTime；这里做兼容，
+ * 没有时间就按「截止未知」处理，不能编一个假截止。
+ */
+export function parseSmartActivities(list: unknown[], courseId: string, courseName: string): PlatformTask[] {
+  const out: PlatformTask[] = [];
+  for (const row of list) {
+    if (typeof row !== 'object' || row === null) continue;
+    const r = row as Record<string, unknown>;
+    const id = r.activityId ?? r.id;
+    const title = r.activityName ?? r.name ?? r.title;
+    if (id === undefined || id === null || typeof title !== 'string' || !title.trim()) continue;
+
+    const statusNum = Number(r.status);
+    const endMs = toNumber(r.endTime ?? r.end_time ?? r.activityEndTime ?? r.endDate);
+    const startMs = toNumber(r.beginTime ?? r.startTime ?? r.createTime);
+    const deadline =
+      endMs !== undefined && endMs > 0
+        ? new Date(endMs < 1e12 ? endMs * 1000 : endMs).toISOString()
+        : undefined;
+    const ended = deadline !== undefined && new Date(deadline).getTime() < Date.now();
+    let status: TaskStatus;
+    if (statusNum === 2) status = 'submitted';
+    else if (statusNum === 1) status = ended ? 'expired' : 'pending';
+    else status = ended ? 'expired' : 'pending';
+
+    const type = Number(r.activityType ?? r.type);
+    const detailPage = type === 2 ? 'voteDetail.html' : 'showDetail.html';
+
+    out.push({
+      platformTaskId: String(id),
+      courseId,
+      courseName,
+      kind: 'activity',
+      title: title.trim(),
+      status,
+      ...(deadline ? { deadline } : {}),
+      ...(startMs !== undefined && startMs > 0
+        ? { publishedAt: new Date(startMs < 1e12 ? startMs * 1000 : startMs).toISOString() }
+        : {}),
+      ...(toNumber(r.score ?? r.answerScore) !== undefined ? { score: toNumber(r.score ?? r.answerScore) } : {}),
+      ...(toNumber(r.totalScore ?? r.activityScore) !== undefined ? { totalScore: toNumber(r.totalScore ?? r.activityScore) } : {}),
+      sourceUrl: `https://me.ismartlearning.cn/center/student/course/${detailPage}?activityId=${encodeURIComponent(String(id))}&courseId=${encodeURIComponent(courseId)}`,
+      raw: r,
+    });
+  }
+  return out;
 }
 
 function parseCookieString(input: string): Record<string, string> {

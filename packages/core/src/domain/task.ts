@@ -16,6 +16,7 @@ export type TaskKind =
   | 'quiz' // 章节测验 / 随堂小测
   | 'task-point' // 超星特有的「任务点」：看视频、读文档
   | 'discussion' // 讨论区发帖
+  | 'activity' // 活动（展示/投票等，iSmart 的「活动」tab）
   | 'other';
 
 export type TaskStatus =

@@ -2,7 +2,7 @@
 'use strict';
 
 const $ = (id) => document.getElementById(id);
-const KIND = { homework: '作业', exam: '考试', quiz: '测验', 'task-point': '任务点', discussion: '讨论', other: '其他' };
+const KIND = { homework: '作业', exam: '考试', quiz: '测验', 'task-point': '任务点', discussion: '讨论', activity: '活动', other: '其他' };
 const STATUS = {
   pending: '待完成',
   submitted: '已提交',
@@ -198,7 +198,7 @@ function fmtLocal(iso) {
 
 /** 平台短名。取不到时退回 displayName，多一个字也比空着强。 */
 function platformShort(id) {
-  const map = { chaoxing: '超星', yuketang: '雨课堂', 'yuketang-changjiang': '长江雨课堂', ismart: 'iSmart', manual: '手动', mock: 'Mock' };
+  const map = { chaoxing: '超星', yuketang: '雨课堂', 'yuketang-changjiang': '长江雨课堂', ismart: 'iSmart', pintia: 'PTA', zhihuishu: '智慧树', manual: '手动', mock: 'Mock' };
   return map[id] ?? platforms.find((p) => p.id === id)?.displayName ?? id;
 }
 
@@ -209,7 +209,7 @@ function platformShort(id) {
  * （账号名在账号卡片的次要信息里还留着，需要时仍能看到）。
  */
 function platformDisplayName(id) {
-  const map = { chaoxing: '学习通', yuketang: '雨课堂', 'yuketang-changjiang': '长江雨课堂', ismart: 'iSmart', pintia: 'PTA 拼题A' };
+  const map = { chaoxing: '学习通', yuketang: '雨课堂', 'yuketang-changjiang': '长江雨课堂', ismart: 'iSmart', pintia: 'PTA 拼题A', zhihuishu: '智慧树' };
   return map[id] ?? platforms.find((p) => p.id === id)?.displayName ?? id;
 }
 
