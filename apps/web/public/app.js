@@ -3310,9 +3310,9 @@ $('courseRefresh')?.addEventListener('click', async () => {
     await api('/api/sync', { method: 'POST', body: JSON.stringify({ refreshCourses: true }) });
     await refresh();
     await renderCourses();
-    showSyncBar('课程列表已刷新，正在更新任务点…', 'running');
-    await loadTaskPoints(true).catch(() => {});
-    showSyncBar('课程列表和任务点已刷新', 'done', 3500);
+    // 这里不再一次性刷新所有账号的任务点：那会把超星 32 门课一起拉，
+    // 既慢又容易把大响应/异常放大。任务点页自己会在进入时按需刷新。
+    showSyncBar('课程列表已刷新；任务点可进页后点「强制刷新」', 'done', 4500);
   } catch (e) {
     showSyncBar(`刷新课程失败：${e.message}`, 'error', 9000);
   }
