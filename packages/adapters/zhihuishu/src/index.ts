@@ -11,6 +11,10 @@
  *
  * 注意：
  *   - 智慧树的接口全部要求 `uuid` + `dateFormate`；uuid 每次同步现取，不缓存。
+ *   - 「共享课」（如“大学生心理健康”）不在首批：它走
+ *     `student/course/share/queryShareCourseInfo`，请求体里的 `secretStr` 由页面
+ *     `window.yxyz()` + RSA/AES 动态生成（HAR 实证）；服务端适配器无法安全复现，
+ *     需要后续用 WebView 采集页面状态再补。首批只覆盖普通学习课/翻转课。
  *   - `status` 是提交状态：1=未提交、2=被打回、3=待批阅/批阅中、4=已批阅、5=已出分。
  *   - 截止时间用 `endTime`（epoch 毫秒），`homeworkEndDate` 作为兜底。
  *   - 这是一个 **cookie-only** 平台：应用内登录后由原生 CookieManager 保管会话。

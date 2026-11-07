@@ -51,6 +51,8 @@
 `hike-teaching.zhihuishu.com/educational/platform/getStudentCourseList` 取课程 →
 `hiexam-server.zhihuishu.com/zhsathome/homeworkUser/List?completeTab=0` 取作业。
 作业 `status`：1 未提交、2 被打回、3 待批阅/批阅中、4 已批阅、5 已出分；截止时间用 `endTime`（epoch 毫秒）。
+**共享课**（如“大学生心理健康”）走 `student/course/share/queryShareCourseInfo`，请求体的 `secretStr`
+由页面 `window.yxyz()` + RSA/AES 动态生成，服务端适配器无法安全复现 —— 首批**未覆盖**，不要用猜的 secret 去试。
 **任务点/考试没做不是遗漏，是首批范围**；也没有把 uuid 当长期凭据（每次同步现取）。
 
 **刻意如此，不是 bug**
