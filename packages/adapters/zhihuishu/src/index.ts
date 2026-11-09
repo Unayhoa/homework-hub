@@ -323,7 +323,10 @@ export class ZhihuishuAdapter implements PlatformAdapter {
         // 有些账号的章节树只回进度百分比、不回逐视频 watchStatus；此时不要显示 0/78。
         // avgStudiedProcess 是平台自己给的整体观看进度，作为只在 done=0 时的兜底。
         if (counts.done === 0) {
-          const studied = parsePercent((res.body as { avgStudiedProcess?: unknown }).avgStudiedProcess);
+          const studied = parsePercent(
+            (res.body as { avgStudiedProcess?: unknown; learnProgress?: unknown }).avgStudiedProcess ??
+              (res.body as { learnProgress?: unknown }).learnProgress,
+          );
           if (studied !== undefined && studied > 0) counts.done = Math.round((counts.total * studied) / 100);
         }
         const remain = Math.max(0, counts.total - counts.done);
