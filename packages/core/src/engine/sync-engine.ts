@@ -139,6 +139,14 @@ export interface AccountSyncReport {
   label: string;
   status: SyncLogEntry['status'];
   message?: string;
+  /**
+   * 「密码自动重登成功、但会话仍未建立」时置真：UI 应直接打开平台官方登录页，
+   * 让用户完成一次安全验证（滑块/验证码），回来后归到同一个账号。
+   *
+   * 为什么用结构化字段而不是让 UI 读 message 猜文案：文案一改就静默失效，
+   * 而这条判据决定"要不要自动弹登录页"——猜错的代价是用户被卡在 403 里无路可走。
+   */
+  needBrowserLogin?: boolean;
   courses: number;
   fetched: number;
   created: number;
@@ -758,11 +766,20 @@ export class SyncEngine {
       if (retryReport.status === 'auth-required') {
         const why =
           '自动重新登录接口返回成功，但随后拉取仍被判定为会话失效（登录成功 ≠ 会话已建立，' +
-          '常见于平台要求验证码/二次校验，或原生未采纳登录下发的 cookie）。' +
-          '请在「账号」页用「应用内登录」在该平台的官方页面重新登录一次。';
+          '常见于平台要求验证码/二次滑块校验，或原生未采纳登录下发的 cookie）。' +
+          '需要你在平台官方页面完成一次安全验证。';
         this.#logger.warn('自动重新登录后会话仍无效', { platformId: account.platformId });
         await this.#markAccount(account, 'auth-required', why, 'AUTH_REQUIRED').catch(() => {});
-        const enriched = { ...retryReport, message: why, detail: (retryReport.detail ?? '') || why };
+        const enriched: AccountSyncReport = {
+          ...retryReport,
+          message: why,
+          detail: (retryReport.detail ?? '') || why,
+          // 【关键】把「需要用户去官方页完成验证」作为结构化字段带出去，让 UI 能直接
+          // 弹出官方登录页（而不是让用户自己去账号页摸索）。
+          // 2026-11-10 用户方案：密码重登被验证码挡下时直接弹官方页拖一次滑块，
+          // 回来后归到同一个账号（不新建、不丢课程勾选）。
+          needBrowserLogin: true,
+        };
         await this.#recordLog(enriched).catch(() => {});
         return enriched;
       }

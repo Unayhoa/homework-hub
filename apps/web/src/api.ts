@@ -334,6 +334,8 @@ export function createApiHandler(deps: ApiDeps): ApiHandler {
         removed: x.removed,
         readOnlyBlocked: x.readOnly.blocked,
         sessionOrigin: x.sessionOrigin,
+        // 密码重登成功但会话没建立 → UI 直接弹官方登录页让用户完成安全验证
+        ...(x.needBrowserLogin ? { needBrowserLogin: true } : {}),
       })),
     };
   }

@@ -1525,6 +1525,13 @@ async function returnedFromLogin(platformId, storageJson, nativeAccountId) {
     const acc = (r.accounts ?? []).find((x) => x.platformId === id);
     if (acc && acc.status === 'ok') {
       showSyncBar(`${acc.label}：抓取成功，拉到 ${acc.fetched} 条（新增 ${acc.created}）`, 'done', 4000);
+    } else if (acc && acc.needBrowserLogin) {
+      // 刚验证完仍然要求验证 → 不自动再弹（会形成死循环），说清楚下一步
+      showSyncBar(
+        `${acc.label}：安全验证已提交，但会话仍未建立。请确认页面上确实显示"已登录"，再点一次同步。`,
+        'error',
+        12000,
+      );
     } else if (acc) {
       showSyncBar(`${acc.label}：抓取失败 —— ${String(acc.message ?? '原因未知').slice(0, 300)}`, 'error', 9000);
     } else {
@@ -2887,6 +2894,17 @@ async function doSync() {
       const notice = $('changeNotice');
       if (notice && !notice.classList.contains('hidden')) {
         toast(`${notice.dataset.count ?? ''} 条作业信息有更新（截止时间/标题等）—— 待办页顶部可展开`, 9000);
+      }
+    }
+    // 「密码重登成功但会话没建立」→ 自动弹官方登录页完成安全验证（用户方案）。
+    // 只对**需要验证**的那一个账号弹，且带上它的 accountId：回来时归到原账号、不丢课程选择。
+    const needLogin = (r.accounts ?? []).find((a) => a.needBrowserLogin === true);
+    if (needLogin) {
+      const pid = needLogin.platformId;
+      const loginUrl = platforms.find((p) => p.id === pid)?.authMethods?.find((m) => m.kind === 'in-app')?.loginUrl ?? '';
+      if (loginUrl && window.Android?.openLoginWithAccount) {
+        toast(`${needLogin.label}：需要在官方页面完成一次安全验证，完成后会自动继续`, 7000);
+        openPlatformLogin(pid, loginUrl, needLogin.accountId);
       }
     }
     // 返回报告：调用方（例如「刚启用一个平台」）要据此判断首同步是否真的成功。
