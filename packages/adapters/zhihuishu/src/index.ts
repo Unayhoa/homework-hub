@@ -269,7 +269,7 @@ export class ZhihuishuAdapter implements PlatformAdapter {
           items.push(...(await this.#listSharedTasks(http, course)));
         } catch (e) {
           // 共享课作业/考试首批不完整；失败不拖垮整轮同步，但要在日志里留下原因
-          sharedErrors.push(`${course.name}/共享课章节测验: ${(e as Error).message}`);
+          sharedErrors.push(`${course.name}/共享课章节测验: ${String((e as Error).message ?? e).slice(0, 300)}`);
         }
         continue;
       }
@@ -341,7 +341,7 @@ export class ZhihuishuAdapter implements PlatformAdapter {
         });
       } catch (e) {
         // 共享课进度是附加能力；单门失败不拖垮整批，但留下可排查原因
-        errors.push(`${c.name}: ${(e as Error).message}`);
+        errors.push(`${c.name}: ${String((e as Error).message ?? e).slice(0, 300)}`);
       }
     }
     return { items, hasMore: false, declaredTotal: items.length, ...(errors.length ? { details: errors } : {}) };

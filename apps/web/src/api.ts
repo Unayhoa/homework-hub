@@ -325,7 +325,9 @@ export function createApiHandler(deps: ApiDeps): ApiHandler {
         platformId: x.platformId,
         accountId: x.accountId,
         status: x.status,
-        message: x.message ?? null,
+        // 上游/适配器有时会把很长的响应片段塞进 message；服务端响应一旦过大，
+        // WebView 的 JSON 解析会报 "Invalid string length"，反而看不到真正原因。
+        message: x.message ? x.message.slice(0, 2000) : null,
         fetched: x.fetched,
         created: x.created,
         updated: x.updated,
@@ -1337,8 +1339,9 @@ export function createApiHandler(deps: ApiDeps): ApiHandler {
 
       return { status: 404, body: { ok: false, error: `未知接口 ${method} ${path}` } };
     } catch (e) {
-      const msg = e instanceof HubError ? `[${e.code}] ${e.message}` : ((e as Error).message ?? String(e));
-      return { status: 400, body: { ok: false, error: msg } };
+      const rawMsg = e instanceof HubError ? `[${e.code}] ${e.message}` : ((e as Error).message ?? String(e));
+      // 同 summarize：错误文本过长时不能原样回给 WebView，否则解析先炸掉
+      return { status: 400, body: { ok: false, error: String(rawMsg).slice(0, 2000) } };
     }
   }
 

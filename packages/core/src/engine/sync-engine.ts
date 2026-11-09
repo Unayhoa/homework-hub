@@ -712,7 +712,7 @@ export class SyncEngine {
     } catch (e) {
       const err = toHubError(e, account.platformId);
       this.#logger.warn('任务点抓取失败', { platformId: account.platformId, error: describe(e) });
-      return { ...base, status: 'failed', updated: 0, message: err.message };
+      return { ...base, status: 'failed', updated: 0, message: String(err.message ?? '').slice(0, 2000) };
     }
 
     // 写回课程。**只覆盖本轮真的拿到的那些**：某一门失败就保留它上次的数值 ——
@@ -776,12 +776,13 @@ export class SyncEngine {
       );
     }
     if (page.details?.length) detailParts.push(...page.details);
+    const detail = detailParts.join('；').slice(0, 2000);
 
     return {
       ...base,
       status: 'ok',
       updated: patches.length,
-      ...(detailParts.length ? { detail: detailParts.join('；') } : {}),
+      ...(detail ? { detail } : {}),
       ...(page.notes?.length ? { notes: page.notes } : {}),
     };
   }
