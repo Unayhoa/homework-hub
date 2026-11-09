@@ -328,6 +328,13 @@ export class ZhihuishuAdapter implements PlatformAdapter {
               (res.body as { learnProgress?: unknown }).learnProgress,
           );
           if (studied !== undefined && studied > 0) counts.done = Math.round((counts.total * studied) / 100);
+          // 最后一道兜底：章节树全部显示 addScoreStatus=1 时，视为整门课已完成。
+          // 这是平台自己的章节完成标记；只在逐视频/百分比都缺失时使用。
+          const chapters = Array.isArray(chapter?.clList) ? chapter!.clList : [];
+          const allScored =
+            chapters.length > 0 &&
+            chapters.every((ch) => typeof ch === 'object' && ch !== null && Number((ch as { addScoreStatus?: unknown }).addScoreStatus) === 1);
+          if (counts.done === 0 && allScored) counts.done = counts.total;
         }
         const remain = Math.max(0, counts.total - counts.done);
         const grade = await this.#fetchGrade(http, c);
