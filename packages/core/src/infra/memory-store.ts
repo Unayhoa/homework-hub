@@ -68,12 +68,23 @@ export class MemoryStore implements HubStore {
       }
       return { ...x, raw: kept };
     };
+    // 游标也可能是被污染的巨型字符串（真机 2026-11-09：旧版本把超大内容写进了
+    // course-crawl 游标，导致后续 JSON.stringify(crawlMap) 抛 Invalid string length）。
+    // 这里对游标值做长度上限，超限的直接丢弃 —— 游标丢了最坏只是多爬一轮，无副作用。
+    const CURSOR_MAX = 8192;
+    const safeCursor = (c: { cursor?: string }): { cursor: string } | { cursor: undefined } => {
+      const v = c.cursor;
+      if (typeof v === 'string' && v.length > CURSOR_MAX) return { cursor: undefined };
+      return { cursor: v };
+    };
     return {
       version: 1,
       accounts: [...this.#accounts.values()],
       courses: [...this.#courses.values()].map(slim),
       tasks: [...this.#tasks.values()].map(slim),
-      cursors: [...this.#cursors.values()],
+      cursors: [...this.#cursors.values()]
+        .map((c) => ({ ...c, ...safeCursor(c) }))
+        .filter((c) => c.cursor !== undefined) as MemoryStoreSnapshot['cursors'],
       reminders: [...this.#reminders.values()],
       syncLog: this.#syncLog.slice(-500),
     };

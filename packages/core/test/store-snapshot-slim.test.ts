@@ -34,4 +34,19 @@ describe('存储快照裁剪 raw', () => {
     const c = (await restored.listCourses())[0]!;
     assert.equal((c.raw as { recruitId?: number }).recruitId, 368799, 'restore 后 recruitId 仍在');
   });
+
+  it('被污染的巨型游标不进 snapshot（避免后续 JSON.stringify 抛 Invalid string length）', async () => {
+    const store = new MemoryStore();
+    await store.init();
+    // 模拟旧版本把 ~200KB 内容写进 course-crawl 游标
+    await store.setCursor({ accountId: 'a', kind: 'course-crawl', cursor: JSON.stringify({ x: 'y'.repeat(200_000) }), updatedAt: 't' });
+    // 保留一条正常的小游标
+    await store.setCursor({ accountId: 'a', kind: 'course-progress', cursor: '2026-11-09T00:00:00.000Z', updatedAt: 't' });
+    const snap = store.snapshot();
+    const kinds = snap.cursors.map((c) => c.kind);
+    assert.ok(!kinds.includes('course-crawl'), '巨型游标应被丢弃');
+    assert.ok(kinds.includes('course-progress'), '正常游标应保留');
+    // snapshot 必须可安全序列化
+    assert.ok(JSON.stringify(snap).length < 100_000);
+  });
 });

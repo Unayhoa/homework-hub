@@ -1258,7 +1258,17 @@ export class SyncEngine {
     let crawlMap: Record<string, string> = {};
     try {
       const c = await this.#store.getCursor(account.id, 'course-crawl');
-      if (c?.cursor) crawlMap = JSON.parse(c.cursor) as Record<string, string>;
+      if (c?.cursor) {
+        const parsed = JSON.parse(c.cursor) as unknown;
+        // 【防御】只接受 {string: string} 形态；老版本/异常写入可能塞进非字符串或巨型值，
+        // 那样后面的 JSON.stringify(crawlMap) 会在落盘时抛 Invalid string length
+        // （真机 2026-11-09：错误栈明确指向这一行的 JSON.stringify）。
+        if (parsed && typeof parsed === 'object') {
+          for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+            if (typeof v === 'string' && v.length <= 64) crawlMap[k] = v;
+          }
+        }
+      }
     } catch {
       // 游标损坏就当作没有 —— 顶多多爬一轮
     }
@@ -1537,7 +1547,12 @@ export class SyncEngine {
     if (skippedCourseCount > 0) complete = false;
     if (!opts.dryRun && complete && crawlableCourses.length > 0 && !pageError) {
       const at = now.toISOString();
-      for (const c of crawlableCourses) crawlMap[c.platformCourseId] = at;
+      for (const c of crawlableCourses) {
+        // 只写字符串 ID → ISO 时间，确保对象永远可安全序列化
+        if (typeof c.platformCourseId === 'string' && c.platformCourseId.length <= 128) {
+          crawlMap[c.platformCourseId] = at;
+        }
+      }
       await this.#store.setCursor({
         accountId: account.id,
         kind: 'course-crawl',
