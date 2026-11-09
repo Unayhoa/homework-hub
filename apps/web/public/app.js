@@ -1470,7 +1470,10 @@ function openPlatformLogin(platformId, url, targetAccountId) {
   pendingPlatformId = platformId;
   // 「一键重登」场景：记住要归到哪个已有账号，回来后 preserving 课程选择登记回去。
   pendingReloginAccountId = targetAccountId || null;
-  if (window.Android?.openLogin) {
+  if (window.Android?.openLoginWithAccount && targetAccountId) {
+    // 走原生侧携带 accountId 的入口（能跨 WebView 重载存活）
+    window.Android.openLoginWithAccount(url, platformId, targetAccountId);
+  } else if (window.Android?.openLogin) {
     window.Android.openLogin(url, platformId);
   } else {
     // 桌面端浏览器里跑时，退化成新开标签页
@@ -1483,9 +1486,10 @@ function openPlatformLogin(platformId, url, targetAccountId) {
  * 第二个参数是平台网页 localStorage 的快照（JSON 串）——
  * 雨课堂等平台的 API token 存在那里而不是 cookie，必须带回注入会话。
  */
-async function returnedFromLogin(platformId, storageJson) {
+async function returnedFromLogin(platformId, storageJson, nativeAccountId) {
   const id = platformId || pendingPlatformId;
-  const targetAccountId = pendingReloginAccountId;
+  // 优先用原生传回的目标账号（跨 WebView 重载存活）；JS 全局只作兜底。
+  const targetAccountId = nativeAccountId || pendingReloginAccountId;
   pendingPlatformId = null;
   pendingReloginAccountId = null;
   if (!id) return;

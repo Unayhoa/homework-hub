@@ -54,6 +54,11 @@ public class MainActivity extends Activity {
     /** 当前 WebView 里显示的是哪个平台（null = 应用自身的界面）。 */
     private String activePlatformId;
     /**
+     * 「一键重登」目标账号：登录页返回时把会话归到这个已有账号（保留课程勾选/改名）。
+     * 存在原生侧而不是 JS 全局，因为切到官方登录页再回来时 WebView 可能重载、JS 全局丢失。
+     */
+    private String activeLoginAccountId;
+    /**
      * 「只是去看看」模式：从待办点进平台页面。
      *
      * 与 activePlatformId 的区别只有一个 —— 返回应用时**不**当成一次登录：
@@ -159,7 +164,9 @@ public class MainActivity extends Activity {
                 if (url.startsWith(APP_ORIGIN)) {
                     // 从平台登录页回到了应用界面
                     final String justLoggedIn = activePlatformId;
+                    final String loginTargetAccountId = activeLoginAccountId;
                     activePlatformId = null;
+                    activeLoginAccountId = null;
                     updateBar();
                     // 应用是单页，WebView 历史对它没有意义；但平台浏览留下的条目会让
                     // "回到应用后再侧滑"退进平台页。
@@ -200,7 +207,8 @@ public class MainActivity extends Activity {
                             final String js =
                                     "window.HH&&window.HH.returnedFromLogin&&window.HH.returnedFromLogin("
                                             + org.json.JSONObject.quote(justLoggedIn) + ","
-                                            + (storageArg == null ? "null" : org.json.JSONObject.quote(storageArg)) + ")";
+                                            + (storageArg == null ? "null" : org.json.JSONObject.quote(storageArg)) + ","
+                                            + (loginTargetAccountId == null ? "null" : org.json.JSONObject.quote(loginTargetAccountId)) + ")";
                             final android.os.Handler h = new android.os.Handler();
                             final int[] tries = {0};
                             final Runnable[] fire = new Runnable[1];
@@ -516,7 +524,12 @@ public class MainActivity extends Activity {
     }
 
     void openLoginPage(String url, String platformId) {
+        openLoginPage(url, platformId, null);
+    }
+
+    void openLoginPage(String url, String platformId, String targetAccountId) {
         activePlatformId = platformId;
+        activeLoginAccountId = targetAccountId;
         updateBar();
         webView.loadUrl(url);
     }

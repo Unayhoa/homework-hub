@@ -487,7 +487,10 @@ export class SyncEngine {
       id: accountId,
       platformId,
       label: opts.label ?? existing?.label ?? opts.displayName ?? this.#offlineLabel(platformId, username),
-      username,
+      // 重登到已有账号时**保留原 username**：调用方传的 'browser' 只是"应用内登录"的
+      // 占位身份，拿它覆盖会把账号显示名/身份写成 browser（真机表现为账号列表里
+      // 同一平台出现两条、原账号的改名与勾选看起来失效）。
+      username: existing?.username ?? username,
       enabled: true,
       createdAt: existing?.createdAt ?? this.#clock.now().toISOString(),
       lastSyncAt: existing?.lastSyncAt,
@@ -500,6 +503,22 @@ export class SyncEngine {
     // 例外：「一键重登」不这么做 —— 它只是刷新会话，必须保留用户的课程选择。
     if (!opts.preserveCourseSelection) {
       await this.#clearCourseCursors(accountId);
+    }
+    // 「一键重登」自愈：早期版本因为 accountId 没传回原生侧，重登会误建一个
+    // `platform::browser` 账号 —— 它把同一批课程按**平台原名**又抓了一遍，
+    // 用户看到的就是"改名失效、待办翻倍"。
+    // 重登成功且明确知道目标账号时，把这个误建的兄弟账号清掉（不留墓碑：
+    // 它是 bug 产物，不该阻止用户以后正常添加）。
+    if (opts.preserveCourseSelection) {
+      const stray = `${platformId}::browser`;
+      if (stray !== accountId) {
+        const all = await this.#store.listAccounts();
+        if (all.some((a) => a.id === stray)) {
+          await this.#store.removeAccount(stray);
+          await this.#vault.remove(stray);
+          this.#logger.info('已清理重登误建的 browser 账号', { platformId, stray, kept: accountId });
+        }
+      }
     }
     this.#logger.info('已登记离线账号（未发出任何请求）', { platformId, accountId, preserve: opts.preserveCourseSelection === true });
     return account;

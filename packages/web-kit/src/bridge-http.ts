@@ -37,6 +37,14 @@ interface AndroidBridgeHost {
   httpRequest?: (id: string, method: string, url: string, headersJson: string, body: string | null) => void;
   /** 在同一个 WebView 里打开平台的登录页（url 由 JS 侧从适配器的 homepage 取，避免 Java 里再维护一份平台清单） */
   openLogin?: (url: string, platformId: string) => void;
+  /**
+   * 「一键重登」专用入口：额外带上目标账号 id。
+   *
+   * 为什么必须从原生侧传：accountId 若只存在 JS 全局里，切到官方登录页再回来时
+   * WebView 可能已重载、全局丢失 → 退化成新建 `platform::browser` 账号，
+   * 用户原有课程的改名/勾选全部作废（真机 2026-11-09 就是这么坏的）。
+   */
+  openLoginWithAccount?: (url: string, platformId: string, accountId: string) => void;
   /** 发系统通知 */
   notify?: (title: string, body: string) => void;
   /** 上报日志到 logcat，便于真机排查 */

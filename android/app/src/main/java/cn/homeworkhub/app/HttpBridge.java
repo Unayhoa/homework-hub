@@ -120,8 +120,22 @@ public class HttpBridge {
 
     @android.webkit.JavascriptInterface
     public void openLogin(final String url, final String platformId) {
-        Log.i(TAG, "打开平台登录页 " + platformId + " -> " + url);
-        activity.runOnUiThread(() -> activity.openLoginPage(url, platformId));
+        // 兼容旧调用：没有 accountId 时按普通「应用内登录」处理。
+        openLoginWithAccount(url, platformId, null);
+    }
+
+    /**
+     * 「一键重登」入口：额外带上 targetAccountId，登录返回时把会话登记到**同一个账号**
+     * （保留课程勾选/改名），而不是新建一个 `platform::browser`。
+     *
+     * 为什么要从原生侧传：targetAccountId 若只存在 JS 全局里，切到官方登录页再回来
+     * 时 WebView 可能已重载，全局丢失 → 退化成新建账号、重拉全部课程、改名全废
+     * （真机 2026-11-09 就是这么坏的）。原生侧字段能跨页面存活。
+     */
+    @android.webkit.JavascriptInterface
+    public void openLoginWithAccount(final String url, final String platformId, final String accountId) {
+        Log.i(TAG, "打开平台登录页 " + platformId + " accountId=" + accountId + " -> " + url);
+        activity.runOnUiThread(() -> activity.openLoginPage(url, platformId, accountId));
     }
 
     /**
