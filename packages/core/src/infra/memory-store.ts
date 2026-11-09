@@ -40,11 +40,39 @@ export class MemoryStore implements HubStore {
    * 与其再写一份 HubStore 实现，不如让内存实现支持序列化。
    */
   snapshot(): MemoryStoreSnapshot {
+    // 【关键】持久化时把 `raw` 收窄成运行时真正需要的几个小字段。
+    //
+    // `raw` 原本是平台原始响应对象（共享课整条 courseOpenDtos、考试/作业原始行…），
+    // 体积远大于其余字段之和，运行时却只用到极少数键（如智慧树的 recruitId/secret，
+    // 用来判定"这是共享课"并拼学习页地址）。
+    // 真机踩过（2026-11-09）：智慧树接入后 raw 让整个 snapshot 逼近 V8 单字符串上限，
+    // `JSON.stringify` 在**落盘这一步**抛 `Invalid string length`，
+    // 表现为「同步请求 0 次就失败」，日志看不出任何原因。
+    // 这里保留一张白名单，其余 raw 一律丢弃 —— snapshot 从可能的几十 MB 降到几十 KB。
+    const RAW_KEEP = ['recruitId', 'secret', 'courseId', 'homepage'] as const;
+    const slimRaw = (raw: unknown): unknown => {
+      if (!raw || typeof raw !== 'object') return undefined;
+      const out: Record<string, unknown> = {};
+      for (const k of RAW_KEEP) {
+        const v = (raw as Record<string, unknown>)[k];
+        if (v !== undefined) out[k] = v;
+      }
+      return Object.keys(out).length > 0 ? out : undefined;
+    };
+    const slim = <T extends { raw?: unknown }>(x: T): T => {
+      if (!x || typeof x !== 'object') return x;
+      const kept = slimRaw(x.raw);
+      if (kept === undefined) {
+        const { raw: _omit, ...rest } = x as T & { raw?: unknown };
+        return rest as T;
+      }
+      return { ...x, raw: kept };
+    };
     return {
       version: 1,
       accounts: [...this.#accounts.values()],
-      courses: [...this.#courses.values()],
-      tasks: [...this.#tasks.values()],
+      courses: [...this.#courses.values()].map(slim),
+      tasks: [...this.#tasks.values()].map(slim),
       cursors: [...this.#cursors.values()],
       reminders: [...this.#reminders.values()],
       syncLog: this.#syncLog.slice(-500),

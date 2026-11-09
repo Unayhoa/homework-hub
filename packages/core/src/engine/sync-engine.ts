@@ -1059,12 +1059,68 @@ export class SyncEngine {
   }
 
   /** 单账号同步主体。所有异常在这里被转成报告，绝不向外抛。 */
+  /**
+   * 【错误定位包装，彻底修好后可并入 #syncAccountInner】
+   *
+   * 单独包一层的原因：真机上智慧树某一步抛了未捕获异常（表现 Invalid string length），
+   * 而报告里只有「请求 0 / 拉取 0」，无法判断死在哪一步。这层把异常兜住，
+   * 并把 `phase` 写进 message/detail —— 用户就能在同步日志里看到具体阶段。
+   */
   async #syncAccountInner(account: PlatformAccount, opts: SyncOptions): Promise<AccountSyncReport> {
+    try {
+      return await this.#syncAccountBody(account, opts);
+    } catch (e) {
+      const err = toHubError(e, account.platformId);
+      const rawErr = e as Error & { name?: string; stack?: string };
+      const phase = (this as unknown as { __curPhase?: string }).__curPhase ?? '未知阶段';
+      (this as unknown as { __curPhase?: string }).__curPhase = undefined;
+      const locator =
+        `[err-locator] ${rawErr?.name ?? 'Error'}: ${String(rawErr?.message ?? e).slice(0, 160)} ` +
+        `（阶段=${phase}）` +
+        (rawErr?.stack ? `\n${rawErr.stack.split('\n').slice(1, 4).join('\n')}` : '');
+      this.#logger.error('单账号同步未捕获异常', {
+        platformId: account.platformId,
+        accountId: account.id,
+        phase,
+        error: describe(e),
+      });
+      const report: AccountSyncReport = {
+        accountId: account.id,
+        platformId: account.platformId,
+        label: account.label,
+        courses: 0,
+        fetched: 0,
+        created: 0,
+        updated: 0,
+        unchanged: 0,
+        vanished: 0,
+        removed: 0,
+        reminders: [],
+        events: [],
+        status: 'failed',
+        message: `同步中断（${phase}）：${String(err.message ?? e).slice(0, 300)}`,
+        detail: locator.slice(0, 900),
+        http: createHttpStats(),
+        readOnly: createReadOnlyGuardStats(),
+        sessionOrigin: 'derived',
+        sessionOriginNote: '同步中断，未确定',
+        durationMs: 0,
+      };
+      await this.#recordLog(report).catch(() => {});
+      await this.#markAccount(account, 'failed', report.message, err.code).catch(() => {});
+      return report;
+    }
+  }
+
+  async #syncAccountBody(account: PlatformAccount, opts: SyncOptions): Promise<AccountSyncReport> {
     const startMs = this.#clock.nowMs();
     const stats = createHttpStats();
     const guardStats = createReadOnlyGuardStats();
     const now = this.#clock.now();
     const adapter = this.#registry.get(account.platformId);
+    // 【错误定位】当前执行到哪一步。若抛未捕获异常，这个字段会写进日志的 detail，
+    // 让「请求 0、拉取 0」这种没有上下文的失败能落到具体阶段。彻底修好后随 [err-locator] 一起删。
+    const phaseRef = { value: 'init' };
 
     // 会话来源在读到会话之后才能确定，但 finish() 有可能在此之前就被调用，
     // 所以用可变引用 + 保守默认值（derived = 不假设用户自己带来的）。
@@ -1114,6 +1170,11 @@ export class SyncEngine {
 
     const ctx = this.#contextFor(account.platformId, account.id, stats, opts.retry, guardStats);
     const log = ctx.logger;
+    // 【错误定位】给当前异常打阶段标签（供 #syncAccountInner 的兜底捕获读取）
+    const markPhase = (p: string) => {
+      (this as unknown as { __curPhase?: string }).__curPhase = p;
+    };
+    markPhase('加载会话');
 
     const session = await this.#vault.load(account.id);
     if (!session) {
@@ -1147,6 +1208,7 @@ export class SyncEngine {
     }
 
     // ---- 课程（较稳定，可缓存） ----
+    markPhase('拉取课程');
     let courses = await this.#store.listCourses([account.id]);
     const courseTtl = opts.courseTtlMs ?? 12 * 60 * 60 * 1000;
     const courseAge = account.lastSyncAt ? now.getTime() - new Date(account.lastSyncAt).getTime() : Infinity;
@@ -1386,6 +1448,7 @@ export class SyncEngine {
             quietCourseIds,
             ...(knownStartsAt ? { knownStartsAt } : {}),
           };
+        markPhase('抓取作业/考试');
         const page = await adapter.fetchTasks(ctx, session, req);
         declaredTotal = page.declaredTotal ?? declaredTotal;
         collected.push(...page.items);

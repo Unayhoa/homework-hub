@@ -78,6 +78,19 @@ export class PersistentStore implements HubStore {
     if (!this.#loaded) return;
     try {
       const json = JSON.stringify(this.#inner.snapshot());
+      // 【错误定位 + 防御】localStorage 有配额（一般 5–10MB），
+      // 而 V8 单字符串上限约 512MB。在超限前先给出可读错误，
+      // 避免上层只看到「Invalid string length」这种指不到原因的异常。
+      const LIMIT = 4 * 1024 * 1024;
+      if (json.length > LIMIT) {
+        const err = new Error(
+          `存储快照过大（${(json.length / 1024 / 1024).toFixed(1)}MB > ${LIMIT / 1024 / 1024}MB），` +
+            `可能是某条任务的 raw 未被裁剪。已跳过落盘以免撑爆 localStorage。`,
+        );
+        this.#lastError = err.message;
+        this.#opts.onError(err);
+        return;
+      }
       this.#opts.storage.setItem(this.#opts.key, json);
       this.#lastBytes = json.length;
       this.#lastError = null;
