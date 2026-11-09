@@ -45,6 +45,8 @@ export interface CourseGradeSummary {
   finalScore?: number;
   examScore?: number;
   meetScore?: number;
+  /** 学习进度分（成绩规则里的 courseScore；如心理健康 15） */
+  studyScore?: number;
   /** 学习习惯分（如心理健康课的 25 分钟/天规则） */
   habitScore?: number;
   habitTotal?: number;

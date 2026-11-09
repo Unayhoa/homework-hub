@@ -865,8 +865,13 @@ function renderTaskPoints(data) {
   // 分三堆：逾期 / 进行中 / 已完成。
   // 逾期和已完成各自折起来 —— 前者已经无法改变，后者不需要再看，
   // 一直铺在首屏只会把"还能做什么"挤下去（用户原话：多门逾期一定有收纳需求）。
+  // 有成绩摘要的共享课（如心理健康）单独置顶：它需要继续推进，不能沉进“已完成”。
+  const hasGrade = (c) =>
+    c.grade && (Number.isFinite(c.grade.totalScore) || Number.isFinite(c.grade.usualScore));
+  const pinned = rows.filter(hasGrade);
+  const regularRows = rows.filter((c) => !hasGrade(c));
   const buckets = { closed: [], active: [], done: [] };
-  for (const c of rows) {
+  for (const c of regularRows) {
     const k = pointsStatus(c).kind;
     (k === 'closed' ? buckets.closed : k === 'done' ? buckets.done : buckets.active).push(c);
   }
@@ -893,9 +898,14 @@ function renderTaskPoints(data) {
     const g = c.grade ?? {};
     const gradeParts = [];
     if (Number.isFinite(g.usualScore)) gradeParts.push(`平时分 ${g.usualScore}`);
+    if (Number.isFinite(g.examScore)) gradeParts.push(`平时测试 ${g.examScore}`);
+    if (Number.isFinite(g.meetScore)) gradeParts.push(`见面课 ${g.meetScore}`);
     if (Number.isFinite(g.finalScore)) gradeParts.push(`期末 ${g.finalScore}`);
     if (Number.isFinite(g.totalScore)) gradeParts.push(`总评 ${g.totalScore}`);
-    if (Number.isFinite(g.habitScore)) gradeParts.push(`学习习惯 ${g.habitScore}/${g.habitTotal ?? '?'}`);
+    const moduleParts = [];
+    if (Number.isFinite(g.studyScore)) moduleParts.push(`学习进度 ${g.studyScore}`);
+    if (Number.isFinite(g.habitScore)) moduleParts.push(`学习习惯 ${g.habitScore}/${g.habitTotal ?? '?'}`);
+    if (Number.isFinite(g.interactionScore)) moduleParts.push(`互动 ${g.interactionScore}/${g.interactionTotal ?? '?'}`);
     return `
       <div class="point-card ${st.kind}${open}">
         <div class="point-head">
@@ -906,6 +916,7 @@ function renderTaskPoints(data) {
         <div class="point-bar"><i style="width:${pct}%"></i></div>
         ${st.text ? `<div class="point-window ${st.cls}">${escapeHtml(st.text)}</div>` : ''}
         ${gradeParts.length ? `<div class="point-window">${escapeHtml(gradeParts.join(' · '))}</div>` : ''}
+        ${moduleParts.length ? `<div class="point-window">${escapeHtml(moduleParts.join(' · '))}</div>` : ''}
       </div>`;
   };
 
@@ -913,6 +924,10 @@ function renderTaskPoints(data) {
   // 逾期曾经排在第一位 —— 那是把"已经无法改变的事"放在用户每天第一眼的位置，
   // 而它恰恰是唯一不需要现在动手的一类（用户 2026-11-03 提出）。
   let html = badLine;
+  if (pinned.length > 0) {
+    html += `<div class="points-pinned-label">优先推进 · 成绩摘要</div>`;
+    html += pinned.map(card).join('');
+  }
   html += buckets.active.map(card).join('');
   if (buckets.closed.length > 0) {
     // 默认收起：知道"有 2 门逾期"就够，细节想看再点开

@@ -320,6 +320,12 @@ export class ZhihuishuAdapter implements PlatformAdapter {
         const chapter = (res.body.chapterOrLesson ?? null) as { clList?: unknown[] } | null;
         const counts = countVideos(chapter);
         if (counts.total <= 0) continue;
+        // 有些账号的章节树只回进度百分比、不回逐视频 watchStatus；此时不要显示 0/78。
+        // avgStudiedProcess 是平台自己给的整体观看进度，作为只在 done=0 时的兜底。
+        if (counts.done === 0) {
+          const studied = parsePercent((res.body as { avgStudiedProcess?: unknown }).avgStudiedProcess);
+          if (studied !== undefined && studied > 0) counts.done = Math.round((counts.total * studied) / 100);
+        }
         const remain = Math.max(0, counts.total - counts.done);
         const grade = await this.#fetchGrade(http, c);
         items.push({
@@ -363,6 +369,7 @@ export class ZhihuishuAdapter implements PlatformAdapter {
       ...(numeric(ssd.finalScore) !== undefined ? { finalScore: numeric(ssd.finalScore) } : {}),
       ...(numeric(ssd.examScore) !== undefined ? { examScore: numeric(ssd.examScore) } : {}),
       ...(numeric(ssd.meetScore) !== undefined ? { meetScore: numeric(ssd.meetScore) } : {}),
+      ...(numeric(ssd.courseScore) !== undefined ? { studyScore: numeric(ssd.courseScore) } : {}),
       ...(numeric(habit.learnedHabitScore) !== undefined ? { habitScore: numeric(habit.learnedHabitScore) } : {}),
       ...(numeric(habit.learnedHabitTotalScore) !== undefined
         ? { habitTotal: numeric(habit.learnedHabitTotalScore) }
@@ -643,6 +650,14 @@ function numeric(v: unknown): number | undefined {
   return Number.isFinite(n) ? n : undefined;
 }
 
+function parsePercent(v: unknown): number | undefined {
+  if (typeof v === 'string') {
+    const m = /([\d.]+)\s*%/.exec(v);
+    if (m) return Number(m[1]);
+  }
+  return numeric(v);
+}
+
 /** 统计共享课「学习进度」里的视频任务点（只看 watchStatus==1 记为已完成）。 */
 function countVideos(chapter: { clList?: unknown[] } | null): { total: number; done: number } {
   let total = 0;
@@ -664,11 +679,11 @@ function countVideos(chapter: { clList?: unknown[] } | null): { total: number; d
         for (const v of videos) {
           if (typeof v !== 'object' || v === null) continue;
           total += 1;
-          if (Number((v as { watchStatus?: unknown }).watchStatus) === 1) done += 1;
+          if (Number((v as { watchStatus?: unknown }).watchStatus) >= 1) done += 1;
         }
       } else if (Number(l.videoId) > 0) {
         total += 1;
-        if (Number(l.watchStatus) === 1) done += 1;
+        if (Number(l.watchStatus) >= 1) done += 1;
       }
     }
   }
