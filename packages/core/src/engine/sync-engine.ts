@@ -1355,6 +1355,20 @@ export class SyncEngine {
     } catch (e) {
       pageError = e;
       const err = toHubError(e, account.platformId);
+      // 【错误定位，临时保留】把真实异常全貌写进 details：
+      // 「Invalid string length」这类错误信息里没有任何上下文，只有原始 name/stack
+      // 和当时在跑的 URL 才能定位。彻底修掉（原生侧已加体积闸门）后再删这段。
+      const rawErr = e as Error & { name?: string; stack?: string };
+      const locator = [
+        `[err-locator] ${rawErr?.name ?? 'Error'}: ${String(rawErr?.message ?? e).slice(0, 200)}`,
+        ...(rawErr?.stack
+          ? rawErr.stack.split('\n').slice(0, 4).map((s) => `  at ${s.trim()}`)
+          : []),
+      ];
+      this.#logger.warn('同步异常全貌（错误定位）', { platformId: account.platformId, locator });
+      // 同时进「排查信息」：真机上用户能看到的就是这一栏，日志页看不到 logcat。
+      // 定位完成后（原生侧体积闸门已生效）再删掉这两个 [err-locator] 行。
+      adapterDetails.push(...locator);
       // 只有「会话 / 验证码」类问题才立刻中止并标记 auth-required。
       // 平台改版（SCHEMA_DRIFT）同样严重，但它不是登录问题 ——
       // 混为一谈会让 UI 弹出「请重新登录」这种完全误导人的提示。

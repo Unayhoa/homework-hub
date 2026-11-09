@@ -161,14 +161,19 @@ export class ZhihuishuAdapter implements PlatformAdapter {
 
   /**
    * 智慧树的保活探测：用最便宜的「登录用户信息」接口。
-   * 它只回答「cookie 还能不能用」，不拉课程/作业；间隔 20 分钟，
-   * 比 iSmart 的 ticket 换票机制更简单 —— 智慧树是 cookie-only，没有
-   * 可自动续期的 ticket，能做的只是尽量在会话闲置过期前轻触一下。
+   *
+   * 两个都必须对（2026-11-09 排查）：
+   *   1. **必须带 `?time=<ms>`**。空参请求平台也会回 `{"code":403,"message":"未登录"}`，
+   *      看起来像"会话失效"，其实只是少了个时间戳参数 —— 会把好会话误判成掉线。
+   *      这里把 time 先写死成一个固定占位（探活只关心能否拿到 uuid，不关心时间精度），
+   *      原生探活直接用这个完整 URL。
+   *   2. `alivePattern` 必须同时排除 `"code":403`。仅匹配 `"uuid"` 不够：登录页 HTML
+   *      或错误 JSON 里也可能出现 uuid 字样。
    */
   readonly keepAliveProbe = {
-    url: 'https://onlineservice-api.zhihuishu.com/gateway/f/v1/login/getLoginUserInfo',
+    url: 'https://onlineservice-api.zhihuishu.com/gateway/f/v1/login/getLoginUserInfo?time=1',
     method: 'GET' as const,
-    alivePattern: '"uuid"',
+    alivePattern: '"uuid":"[^"]+"',
     intervalMs: 20 * 60 * 1000,
   };
 
@@ -491,13 +496,24 @@ export class ZhihuishuAdapter implements PlatformAdapter {
   async #uuid(http: SessionHttpClient, ctx: AdapterContext): Promise<string> {
     const body = await this.#getJson(http, `${this.#ep.userInfo}?time=${ctx.clock.nowMs()}`);
     const uuid = (body.result as { uuid?: unknown } | undefined)?.uuid;
-    if (Number(body.code) !== 200 || typeof uuid !== 'string' || !uuid) {
-      throw new HubError('AUTH_REQUIRED', '智慧树会话已失效（未拿到登录用户 uuid），请重新登录', {
+    if (Number(body.code) === 200 && typeof uuid === 'string' && uuid) return uuid;
+    // 只有平台**明确**说「未登录/会话失效」才是 auth-required。
+    // 其它一切（JSON 结构变了、平台临时 5xx、返回空 result）都当 upstream，
+    // 否则会被 UI 显示成「登录已失效」，把用户赶去重登 —— 而其实他根本不需要。
+    const code = Number(body.code);
+    const msg = String((body.message ?? body.msg ?? '') as string);
+    const looksLoggedOut = code === 403 || code === 401 || /未登录|会话|失效|重新登录/.test(msg);
+    if (looksLoggedOut) {
+      throw new HubError('AUTH_REQUIRED', `智慧树会话已失效（${msg || `code=${code}`}），请重新登录`, {
         platformId: this.id,
         requiresUserAction: true,
       });
     }
-    return uuid;
+    throw new HubError(
+      'UPSTREAM',
+      `智慧树用户信息接口异常（code=${code || '空'}，未拿到 uuid）：${JSON.stringify(body).slice(0, 200)}`,
+      { platformId: this.id },
+    );
   }
 
   /**

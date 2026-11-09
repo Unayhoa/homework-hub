@@ -165,10 +165,16 @@ describe('智慧树 · 抓取链路（HAR 结构）', () => {
     assert.ok(calls.some((u) => u.includes('courseId=11430986')));
   });
 
-  it('会话失效（getLoginUserInfo 非 200）→ AUTH_REQUIRED', async () => {
-    const ctx = makeCtx(() => ({ body: JSON.stringify({ code: 302, result: null }) }));
+  it('平台明确说「未登录」→ AUTH_REQUIRED', async () => {
+    const ctx = makeCtx(() => ({ body: JSON.stringify({ code: 403, message: '未登录', result: null }) }));
     const adapter = new ZhihuishuAdapter();
     await assert.rejects(() => adapter.fetchCourses(ctx, SESSION), /会话已失效|AUTH/);
+  });
+
+  it('非登录类异常（平台 302 空 result）→ UPSTREAM，不误报登录失效', async () => {
+    const ctx = makeCtx(() => ({ body: JSON.stringify({ code: 302, result: null }) }));
+    const adapter = new ZhihuishuAdapter();
+    await assert.rejects(() => adapter.fetchCourses(ctx, SESSION), /接口异常|UPSTREAM/);
   });
 
   it('保活探测指向登录用户信息接口，且间隔不短于 15 分钟', () => {
@@ -178,6 +184,10 @@ describe('智慧树 · 抓取链路（HAR 结构）', () => {
     assert.ok(p.intervalMs >= 15 * 60 * 1000);
     assert.equal(new RegExp(p.alivePattern).test('{"code":200,"result":{"uuid":"x"}}'), true);
     assert.equal(new RegExp(p.alivePattern).test('<html>login</html>'), false);
+    // 必须排除「未登录」错误 JSON：里面没有 uuid 值
+    assert.equal(new RegExp(p.alivePattern).test('{\"result\":null,\"code\":403,\"message\":\"未登录\"}'), false);
+    // 必须带 time 参数，否则平台会误回未登录
+    assert.match(p.url, /time=/);
   });
 
   it('共享课列表与学习进度（免加密接口）能算出视频任务点', async () => {
@@ -239,4 +249,6 @@ describe('智慧树 · 抓取链路（HAR 结构）', () => {
     });
   });
 });
+
+
 

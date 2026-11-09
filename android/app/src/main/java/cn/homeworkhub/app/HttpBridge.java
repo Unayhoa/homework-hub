@@ -390,6 +390,17 @@ public class HttpBridge {
                 if (tm.find()) conn.setRequestProperty("Authorization", "Bearer " + tm.group(1));
             }
 
+            // 智慧树：网关对缺 Origin/Referer 的请求可能直接回 403「未登录」，
+            // 看起来像会话失效，其实是请求形状不对（2026-11-09 排查）。这里按域补齐。
+            if (currentUrl.contains("zhihuishu.com")) {
+                try {
+                    java.net.URL uz = new java.net.URL(currentUrl);
+                    String origin = uz.getProtocol() + "://" + uz.getHost();
+                    if (!headers.containsKey("Origin")) conn.setRequestProperty("Origin", origin);
+                    if (!headers.containsKey("Referer")) conn.setRequestProperty("Referer", origin + "/");
+                } catch (Exception ignored) { }
+            }
+
             for (Map.Entry<String, String> e : headers.entrySet()) {
                 String name = e.getKey();
                 if (name.equalsIgnoreCase("cookie") || name.equalsIgnoreCase("user-agent")) continue;
@@ -454,7 +465,21 @@ public class HttpBridge {
      * 业务上我们只需要 HTML/JSON（最大几 MB），8MB 绰绰有余；
      * 超限就截断并标记，让调用方看到「被截断」而不是一个莫名其妙的报错。
      */
-    private static final int MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
+    private static final int MAX_RESPONSE_BYTES = 1024 * 1024;
+
+    /**
+     * 回调进 WebView 的字符串上限（**这个才是 Invalid string length 的真正来源**）。
+     *
+     * 为什么单独设一个比响应体更小的上限：
+     *   callback() 要把整个 resultJson 再 `JSONObject.quote()` 一遍（转义 + 加引号），
+     *   8MB 的响应转义后字符串可能翻倍，再拼进 evaluateJavascript 的 JS 源码里，
+     *   整个 JS 字符串连同 V8 内部的 rope 结构足以触碰引擎上限，在 JS 侧抛
+     *   「Invalid string length」—— 而错误信息里完全看不到是哪个请求、多大。
+     *
+     * 所以：超过这个字节数就**在原生侧就截断为一条结构化错误**（带 url / 字节数），
+     * 让 JS 收到一条正常的小 JSON，而不是一个把错误盖掉的怪异常。
+     */
+    private static final int MAX_CALLBACK_BYTES = 512 * 1024;
 
     private static boolean lastTruncated = false;
 
@@ -567,8 +592,21 @@ public class HttpBridge {
 
     /** 通过 evaluateJavascript 回调页面里的 __hhBridge（必须在 UI 线程）。 */
     private void callback(String kind, String id, String payloadJson) {
+        // 【错误定位】回调体积检查。
+        // 这一行是为了彻底钉死「Invalid string length」而留的：如果某个响应在
+        // JSONObject.quote 之后仍然过大，说明真正的上限在这儿被突破。此时不把
+        // 巨型字符串塞进 evaluateJavascript（那会在 JS 侧炸掉、错误还指不到原因），
+        // 而是回一条结构化的小 JSON，明确写清 url 与字节数。
+        int payloadBytes = payloadJson == null ? 0 : payloadJson.length();
+        String out = payloadJson;
+        if (payloadBytes > MAX_CALLBACK_BYTES) {
+            Log.w(TAG, "回调体积超限 id=" + id + " kind=" + kind + " bytes=" + payloadBytes);
+            out = "{\"status\":500,\"url\":\"\",\"text\":\"\",\"error\":\"响应体过大被拦截（"
+                    + payloadBytes + " 字节，上限 " + MAX_CALLBACK_BYTES
+                    + "）。这是 Invalid string length 的根因定位点：请求返回的不是作业 JSON，而是大文件/流式页面。\"}";
+        }
         final String js = "window.__hhBridge&&window.__hhBridge." + kind + "("
-                + JSONObject.quote(id) + "," + JSONObject.quote(payloadJson) + ")";
+                + JSONObject.quote(id) + "," + JSONObject.quote(out) + ")";
         activity.runOnUiThread(() -> activity.evaluateJs(js));
     }
 }
