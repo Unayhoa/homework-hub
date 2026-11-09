@@ -1,22 +1,20 @@
 /**
  * 智慧树（在线学堂 / zhihuishu.com）适配器。
  *
- * 数据来源：2026-11-07 真机 HAR（onlineweb.zhihuishu.com）。只做**账号登录 + 作业待办**，
- * 任务点/考试先不做（任务点统计在用户版不作为首批能力）。
+ * 数据来源：2026-11-07 / 11-09 真机 HAR（onlineweb / onlineweb2 / stuonline /
+ * onlineexamh5new）。覆盖普通学习课、翻转课的作业，以及「共享课」（如大学生
+ * 心理健康）的章节测验、见面课测验、期末考试、平时成绩与视频任务点。
  *
- * 真实链路（HAR 实证）：
- *   1. getLoginUserInfo → 拿 `uuid`（后续接口都要）
- *   2. getStudentCourseList → 学习中的课程（studyCourses / archiveCourses）
- *   3. homeworkUser/List → 每门课全部作业（completeTab=0 全部，2=未完成，1=已完成）
+ * 请求链路（全部 HAR 实证）：
+ *   - 普通课：getLoginUserInfo → getStudentCourseList → homeworkUser/List
+ *   - 共享课列表：queryShareCourseInfo（固定查询密文）
+ *   - 共享课任务点/成绩：stuonline/stuLearnReportNew/*（免加密 POST）
+ *   - 共享课作业/考试：appcomm-user/c/has 换密钥 → studentexam/taurusexam
+ *     的 secretStr（RSA + AES-CBC，见 exam-crypto.ts，已离线逐字节验证）
  *
  * 注意：
- *   - 智慧树的接口全部要求 `uuid` + `dateFormate`；uuid 每次同步现取，不缓存。
- *   - 「共享课」（如“大学生心理健康”）不在首批：它走
- *     `student/course/share/queryShareCourseInfo`，请求体里的 `secretStr` 由页面
- *     `window.yxyz()` + RSA/AES 动态生成（HAR 实证）；服务端适配器无法安全复现，
- *     需要后续用 WebView 采集页面状态再补。首批只覆盖普通学习课/翻转课。
- *   - `status` 是提交状态：1=未提交、2=被打回、3=待批阅/批阅中、4=已批阅、5=已出分。
- *   - 截止时间用 `endTime`（epoch 毫秒），`homeworkEndDate` 作为兜底。
+ *   - 普通课程接口要求 `uuid` + `dateFormate`；uuid 每次同步现取，不缓存。
+ *   - 作业 `status`：1=未提交、2=被打回、3=待批阅、4=已批阅、5=已出分。
  *   - 这是一个 **cookie-only** 平台：应用内登录后由原生 CookieManager 保管会话。
  */
 import type {
@@ -36,6 +34,7 @@ import type { Credentials, Session } from '#core/ports/vault.ts';
 import type { ReadOnlyPolicy } from '#core/ports/read-only.ts';
 import { HubError, schemaDrift } from '#core/domain/errors.ts';
 import { SessionHttpClient } from '#core/engine/session-http.ts';
+import { buildSecretStr, recoverSl, rsaEncryptUid } from './exam-crypto.ts';
 
 export interface ZhihuishuEndpointMap {
   /** 当前登录用户（含 uuid）。GET。 */
@@ -60,6 +59,18 @@ export interface ZhihuishuEndpointMap {
   stuHabit: string;
   /** 共享课互动分。 */
   stuForum: string;
+  /** 共享课成绩证明接口（内含 studentScoreDto，是平时分的第二数据源）。 */
+  stuCertify: string;
+  /** 共享课见面课教学任务（免加密兜底数据源）。 */
+  stuTeachingTask: string;
+  /** 作业/考试密钥交换接口（GET，uid 用 RSA 公钥加密）。 */
+  examHas: string;
+  /** 作业列表（章节测验 + 见面课测验）。POST，secretStr 为 AES 加密参数。 */
+  examHomework: string;
+  /** 期末考试列表。POST，secretStr 为 AES 加密参数。 */
+  examFinal: string;
+  /** 作业考试页面（点任务跳转）。 */
+  examPage: string;
 }
 
 export const ZhihuishuEndpoints: ZhihuishuEndpointMap = {
@@ -77,6 +88,12 @@ export const ZhihuishuEndpoints: ZhihuishuEndpointMap = {
   stuReport: 'https://stuonline.zhihuishu.com/stuonline/json/stuLearnReportNew/loadStuLearnReport/',
   stuHabit: 'https://stuonline.zhihuishu.com/stuonline/json/stuLearnReportNew/loadStuHabit/',
   stuForum: 'https://stuonline.zhihuishu.com/stuonline/json/stuLearnReportNew/loadCourseForum/',
+  stuCertify: 'https://stuonline.zhihuishu.com/stuonline/json/stuLearnReportNew/loadStudyCertify',
+  stuTeachingTask: 'https://stuonline.zhihuishu.com/stuonline/json/stuLearnReportNew/loadTeachingTask/',
+  examHas: 'https://appcomm-user.zhihuishu.com/app-commserv-user/c/has',
+  examHomework: 'https://studentexam-api.zhihuishu.com/studentExam/gateway/t/v1/student/getStudentHomework',
+  examFinal: 'https://taurusexam-api.zhihuishu.com/taurusExam/gateway/t/v1/student/getStudentFinalExam',
+  examPage: 'https://onlineexamh5new.zhihuishu.com/stuExamWeb.html',
 };
 
 /**
@@ -101,12 +118,13 @@ export class ZhihuishuAdapter implements PlatformAdapter {
   readonly displayName = '智慧树';
   readonly homepage = 'https://onlineweb.zhihuishu.com/';
   readonly #ep: typeof ZhihuishuEndpoints;
+  /** 作业/考试接口的 AES 密钥，一次同步内复用（密钥由 has 接口每次下发，可缓存一轮）。 */
+  #examCKey: string | undefined;
 
   readonly capabilities: AdapterCapabilities = {
     courses: true,
     tasks: true,
-    // 首批只做作业待办；考试/任务点按用户确认先不做
-    exams: false,
+    exams: true,
     incremental: false,
     cookieOnlySession: true,
     requiresNativeSigner: false,
@@ -133,6 +151,10 @@ export class ZhihuishuAdapter implements PlatformAdapter {
       {
         pattern: /stuonline\.zhihuishu\.com\/stuonline\/json\//,
         why: '查询共享课学习进度/成绩/教学任务（只读 JSON 接口，POST 只为传 courseId/recruitId）',
+      },
+      {
+        pattern: /(studentexam-api|taurusexam-api)\.zhihuishu\.com\/.*\/student\/getStudent(Homework|FinalExam)/,
+        why: '查询共享课作业/章节测验/见面课测验/期末考试列表（只读，POST 只为传加密参数）',
       },
     ],
   };
@@ -265,11 +287,22 @@ export class ZhihuishuAdapter implements PlatformAdapter {
       // {currentTime,msg,status}，没有 rt。先跳过，避免把整轮同步判成失败；
       // 共享课的视频任务点和成绩摘要已由 fetchCourseProgress 单独抓取。
       if ((course.raw as { recruitId?: unknown } | undefined)?.recruitId !== undefined) {
+        let got = 0;
         try {
-          items.push(...(await this.#listSharedTasks(http, course)));
+          const examTasks = await this.#fetchExamTasks(http, course, ctx);
+          got = examTasks.length;
+          items.push(...examTasks);
         } catch (e) {
-          // 共享课作业/考试首批不完整；失败不拖垮整轮同步，但要在日志里留下原因
-          sharedErrors.push(`${course.name}/共享课章节测验: ${String((e as Error).message ?? e).slice(0, 300)}`);
+          sharedErrors.push(`${course.name}/作业考试加密接口: ${String((e as Error).message ?? e).slice(0, 240)}`);
+        }
+        // 加密链路失败/返回空时，退回免加密的章节测验 + 见面课教学任务，
+        // 保证这门课至少不是「0 条」。
+        if (got === 0) {
+          try {
+            items.push(...(await this.#listSharedTasks(http, course)));
+          } catch (e) {
+            sharedErrors.push(`${course.name}/免加密兜底: ${String((e as Error).message ?? e).slice(0, 200)}`);
+          }
         }
         continue;
       }
@@ -337,7 +370,8 @@ export class ZhihuishuAdapter implements PlatformAdapter {
           if (counts.done === 0 && allScored) counts.done = counts.total;
         }
         const remain = Math.max(0, counts.total - counts.done);
-        const grade = await this.#fetchGrade(http, c);
+        const { grade, notes } = await this.#fetchGrade(http, c, res.body);
+        errors.push(...notes);
         items.push({
           platformCourseId: c.platformCourseId,
           total: counts.total,
@@ -354,10 +388,22 @@ export class ZhihuishuAdapter implements PlatformAdapter {
     return { items, hasMore: false, declaredTotal: items.length, ...(errors.length ? { details: errors } : {}) };
   }
 
-  /** 平时分/总评/学习习惯/互动分：四个免加密接口，一个失败不影响其他。 */
-  async #fetchGrade(http: SessionHttpClient, c: UnifiedCourse): Promise<CourseGradeSummary | undefined> {
+  /**
+   * 平时分/总评/学习习惯/互动分。
+   *
+   * 成绩有两个**独立的免加密数据源**：loadStuLearnReport 的 ssd，以及
+   * loadStudyCertify 的 studentScoreDto（HAR 里后者同样带 totalScore 99 /
+   * usualScore 30 / examScore 10 / meetScore 20 / finalScore 39）。
+   * 之前只走前者且错误被 safe() 静默吞掉，于是平时分长期不显示；现在两个都试，
+   * 并且把每个接口的结果写进 details，失败在「排查信息」里可见。
+   */
+  async #fetchGrade(
+    http: SessionHttpClient,
+    c: UnifiedCourse,
+    learnBody: Record<string, unknown>,
+  ): Promise<{ grade?: CourseGradeSummary; notes: string[] }> {
     const raw = (c.raw ?? {}) as { recruitId?: string | number };
-    if (raw.recruitId === undefined || raw.recruitId === null) return undefined;
+    if (raw.recruitId === undefined || raw.recruitId === null) return { notes: [] };
     const base = { courseId: c.platformCourseId, recruitId: String(raw.recruitId), type: 'l', courseTypeEs: '1' };
     const headers = {
       Origin: 'https://stuonline.zhihuishu.com',
@@ -366,41 +412,61 @@ export class ZhihuishuAdapter implements PlatformAdapter {
       )}&courseId=${encodeURIComponent(c.platformCourseId)}`,
       'X-Requested-With': 'XMLHttpRequest',
     };
-    const safe = async (url: string, form: Record<string, string>) => {
-      try {
-        const r = await http.postForm<Record<string, unknown>>(url, form, { headers });
-        return r.body ?? {};
-      } catch {
-        return {} as Record<string, unknown>;
+    const notes: string[] = [];
+    // 带 AJAX 头与不带都试一遍：不同版本的服务端对自定义头的容忍度不一样。
+    const safe = async (label: string, url: string, form: Record<string, string>): Promise<Record<string, unknown>> => {
+      for (const opts of [{ headers }, {}]) {
+        try {
+          const r = await http.postForm<Record<string, unknown>>(url, form, opts);
+          if (r.body && typeof r.body === 'object') return r.body;
+        } catch (e) {
+          notes.push(`${label}: ${String((e as Error).message ?? e).slice(0, 160)}`);
+        }
       }
+      notes.push(`${label}: 未拿到 JSON 响应`);
+      return {};
     };
-    const [report, habit, forum] = await Promise.all([
-      safe(this.#ep.stuReport, { courseId: base.courseId, recruitId: base.recruitId, stuRankType: 'classRank' }),
-      safe(this.#ep.stuHabit, base),
-      safe(this.#ep.stuForum, base),
+    const [report, certify, habit, forum] = await Promise.all([
+      safe('成绩总表', this.#ep.stuReport, { courseId: base.courseId, recruitId: base.recruitId, stuRankType: 'classRank' }),
+      safe('成绩证明', this.#ep.stuCertify, { courseId: base.courseId, recruitId: base.recruitId }),
+      safe('学习习惯', this.#ep.stuHabit, base),
+      safe('互动分', this.#ep.stuForum, base),
     ]);
     const ssd = (report.ssd ?? (report.data as { ssd?: unknown } | undefined)?.ssd ?? {}) as Record<string, unknown>;
+    const cert = (certify.studentScoreDto ?? (certify.data as { studentScoreDto?: unknown } | undefined)?.studentScoreDto ?? {}) as Record<string, unknown>;
     const habitBody = (habit.data ?? habit) as Record<string, unknown>;
     const forumBody = (forum.data ?? forum) as Record<string, unknown>;
+    const rules = (learnBody.scoreAssessRuleDto ?? {}) as Record<string, unknown>;
+    const pick = (a: Record<string, unknown>, b: Record<string, unknown>, ...keys: string[]) => {
+      for (const k of keys) {
+        const v = numeric(a[k] ?? b[k]);
+        if (v !== undefined) return v;
+      }
+      return undefined;
+    };
+    const habitScore = numeric(habitBody.learnedHabitScore);
+    const habitTotal = numeric(habitBody.learnedHabitTotalScore ?? rules.learnedHabitScoreShare);
+    const interactionScore = numeric(forumBody.learnedInteractiveScore);
+    const interactionTotal = numeric(forumBody.learnedInteractiveTotalScore ?? rules.learnedInteractiveScoreShare);
     const grade: CourseGradeSummary = {
-      ...(numeric(ssd.totalScore) !== undefined ? { totalScore: numeric(ssd.totalScore) } : {}),
-      ...(numeric(ssd.usualScore) !== undefined ? { usualScore: numeric(ssd.usualScore) } : {}),
-      ...(numeric(ssd.finalScore) !== undefined ? { finalScore: numeric(ssd.finalScore) } : {}),
-      ...(numeric(ssd.examScore) !== undefined ? { examScore: numeric(ssd.examScore) } : {}),
-      ...(numeric(ssd.meetScore) !== undefined ? { meetScore: numeric(ssd.meetScore) } : {}),
-      ...(numeric(ssd.courseScore) !== undefined ? { studyScore: numeric(ssd.courseScore) } : {}),
-      ...(numeric(habitBody.learnedHabitScore) !== undefined ? { habitScore: numeric(habitBody.learnedHabitScore) } : {}),
-      ...(numeric(habitBody.learnedHabitTotalScore) !== undefined
-        ? { habitTotal: numeric(habitBody.learnedHabitTotalScore) }
+      ...(pick(ssd, cert, 'totalScore', 'checkScore') !== undefined
+        ? { totalScore: pick(ssd, cert, 'totalScore', 'checkScore') }
         : {}),
-      ...(numeric(forumBody.learnedInteractiveScore) !== undefined
-        ? { interactionScore: numeric(forumBody.learnedInteractiveScore) }
+      ...(pick(ssd, cert, 'usualScore') !== undefined ? { usualScore: pick(ssd, cert, 'usualScore') } : {}),
+      ...(pick(ssd, cert, 'finalScore') !== undefined ? { finalScore: pick(ssd, cert, 'finalScore') } : {}),
+      ...(pick(ssd, cert, 'examScore') !== undefined ? { examScore: pick(ssd, cert, 'examScore') } : {}),
+      ...(pick(ssd, cert, 'meetScore') !== undefined ? { meetScore: pick(ssd, cert, 'meetScore') } : {}),
+      ...(pick(ssd, cert, 'courseScore', 'progressScore') !== undefined
+        ? { studyScore: pick(ssd, cert, 'courseScore', 'progressScore') }
         : {}),
-      ...(numeric(forumBody.learnedInteractiveTotalScore) !== undefined
-        ? { interactionTotal: numeric(forumBody.learnedInteractiveTotalScore) }
+      ...(habitScore !== undefined ? { habitScore, ...(habitTotal !== undefined ? { habitTotal } : {}) } : {}),
+      ...(interactionScore !== undefined
+        ? { interactionScore, ...(interactionTotal !== undefined ? { interactionTotal } : {}) }
         : {}),
     };
-    return Object.keys(grade).length > 0 ? grade : undefined;
+    const found = Object.keys(grade).length > 0;
+    if (!found) notes.push('成绩接口均未返回可解析的分数');
+    return { ...(found ? { grade } : {}), notes: notes.slice(0, 6) };
   }
 
   /** 作业列表页；点作业名先落到这门课的作业列表（具体作业的直达 URL 需要页面状态，先不猜）。 */
@@ -434,7 +500,88 @@ export class ZhihuishuAdapter implements PlatformAdapter {
     return uuid;
   }
 
-  /** 共享课的章节测验：从成绩分析页「学习进度/章节测验」接口拿 chapterName + state。 */
+  /**
+   * 取作业/考试接口的 AES 密钥。
+   *
+   * uid 用平台公钥本地生成（PKCS#1 v1.5），has 接口免登录；返回的 sl 是平台
+   * 私钥签发的块，用同一把公钥做 c^e mod n 还原出 cKey。详见 exam-crypto.ts。
+   */
+  async #examCKeyFor(http: SessionHttpClient): Promise<string> {
+    if (this.#examCKey) return this.#examCKey;
+    const uid = rsaEncryptUid('{"module":3}');
+    const res = await http.getJson<{ rt?: { sl?: unknown } }>(
+      `${this.#ep.examHas}?uid=${encodeURIComponent(uid)}`,
+    );
+    const sl = res.body?.rt?.sl;
+    if (typeof sl !== 'string' || !sl) {
+      throw new HubError('UPSTREAM', '智慧树密钥交换接口未返回 sl');
+    }
+    const cKey = recoverSl(sl)?.cKey;
+    if (!cKey) throw new HubError('UPSTREAM', '智慧树密钥交换返回无法解析');
+    this.#examCKey = cKey;
+    return cKey;
+  }
+
+  /** 共享课的作业/考试：复现页面加密，拿章节测验 + 见面课测验 + 期末考试。 */
+  async #fetchExamTasks(
+    http: SessionHttpClient,
+    course: UnifiedCourse,
+    ctx: AdapterContext,
+  ): Promise<PlatformTask[]> {
+    const raw = (course.raw ?? {}) as { recruitId?: string | number };
+    if (raw.recruitId === undefined || raw.recruitId === null) return [];
+    const recruitId = String(raw.recruitId);
+    const courseIdNum = Number(course.platformCourseId);
+    if (!Number.isFinite(courseIdNum)) return [];
+    const cKey = await this.#examCKeyFor(http);
+    const examPage = `${this.#ep.examPage}#/webExamList/?recruitId=${encodeURIComponent(recruitId)}`;
+
+    const homeworkRows = async (flag: 1 | 2): Promise<unknown[]> => {
+      const secretStr = buildSecretStr(
+        { recruitId, courseId: courseIdNum, flag, pageSize: 100, pageNum: 0 },
+        cKey,
+      );
+      const res = await http.postForm<{ rt?: { studentHomeworkList?: unknown[] } }>(
+        this.#ep.examHomework,
+        { secretStr },
+      );
+      const list = res.body?.rt?.studentHomeworkList;
+      return Array.isArray(list) ? list : [];
+    };
+    let homework = await homeworkRows(2);
+    if (homework.length === 0) homework = await homeworkRows(1);
+
+    const finalSecret = buildSecretStr({ courseId: courseIdNum, recruitId, flag: 2 }, cKey);
+    const finalRes = await http.postForm<{ rt?: unknown[] }>(this.#ep.examFinal, {
+      secretStr: finalSecret,
+    });
+    const finals = Array.isArray(finalRes.body?.rt) ? (finalRes.body!.rt as unknown[]) : [];
+
+    const tasks = parseZhihuishuExamTasks(homework, finals, course, examPage, ctx.clock.now());
+    if (tasks.length === 0) {
+      throw new HubError('UPSTREAM', `作业考试接口返回空（has 密钥已获取，flag2=${homework.length} 条）`);
+    }
+    return tasks;
+  }
+
+  /**
+   * 免加密兜底：见面课教学任务。loadTeachingTask 的 taskName 与作业考试页
+   * 的「见面课测验」一一对应，但只有上课时间、没有真正的截止/考试 ID。
+   */
+  async #listTeachingTasks(http: SessionHttpClient, course: UnifiedCourse): Promise<PlatformTask[]> {
+    const raw = (course.raw ?? {}) as { recruitId?: string | number };
+    if (raw.recruitId === undefined || raw.recruitId === null) return [];
+    const res = await http.postForm<{ teachingTask?: unknown[] }>(this.#ep.stuTeachingTask, {
+      courseId: course.platformCourseId,
+      recruitId: String(raw.recruitId),
+      type: 'l',
+      courseTypeEs: '1',
+    });
+    const rows = Array.isArray(res.body?.teachingTask) ? (res.body!.teachingTask as unknown[]) : [];
+    return parseZhihuishuTeachingTasks(rows, course);
+  }
+
+  /** 共享课的章节测验（加密链路失败时的兜底）。 */
   async #listSharedTasks(http: SessionHttpClient, course: UnifiedCourse): Promise<PlatformTask[]> {
     const raw = (course.raw ?? {}) as { recruitId?: string | number };
     if (raw.recruitId === undefined || raw.recruitId === null) return [];
@@ -452,7 +599,7 @@ export class ZhihuishuAdapter implements PlatformAdapter {
       ids.push(id);
       nameById.set(id, typeof c.chapterName === 'string' ? c.chapterName : `章节 ${ids.length}`);
     }
-    if (ids.length === 0) return [];
+    if (ids.length === 0) return this.#listTeachingTasks(http, course);
     const scoreRes = await http.postForm<Record<string, unknown>>(this.#ep.stuExamScore, {
       recruitId: String(raw.recruitId),
       chapterIds: ids.join(','),
@@ -479,6 +626,7 @@ export class ZhihuishuAdapter implements PlatformAdapter {
           raw: c,
         });
       }
+      out.push(...(await this.#listTeachingTasks(http, course)));
       return out;
     }
     for (const row of sldList) {
@@ -500,6 +648,7 @@ export class ZhihuishuAdapter implements PlatformAdapter {
         raw: r,
       });
     }
+    out.push(...(await this.#listTeachingTasks(http, course)));
     return out;
   }
 
@@ -675,6 +824,131 @@ function parsePercent(v: unknown): number | undefined {
     if (m) return Number(m[1]);
   }
   return numeric(v);
+}
+
+/** 平台时间是北京墙上时间（"2025-12-18 23:59:59"），转成 ISO。 */
+function wallTimeToIso(s: unknown): string | undefined {
+  if (typeof s !== 'string' || !s.trim()) return undefined;
+  const m = /^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?:[T\s]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?/.exec(s.trim());
+  if (!m) return undefined;
+  const d = new Date(
+    Number(m[1]),
+    Number(m[2]) - 1,
+    Number(m[3]),
+    Number(m[4] ?? 23),
+    Number(m[5] ?? 59),
+    Number(m[6] ?? 0),
+  );
+  return Number.isNaN(d.getTime()) ? undefined : d.toISOString();
+}
+
+/**
+ * 作业/考试接口原始行 → 任务（字段名来自 2026-11-09 HAR）。
+ *
+ * getStudentHomework 一次返回 8 条：meetCourseType=1 是见面课测验（4 条），
+ * 0 是章节测验（4 条）；getStudentFinalExam 返回期末考试。
+ * state=4 表示已出分。章节测验的 ID 与免加密兜底保持一致，避免切换数据源时重复。
+ */
+export function parseZhihuishuExamTasks(
+  homeworkRows: unknown[],
+  finalRows: unknown[],
+  course: { platformCourseId: string; name: string },
+  examPageUrl?: string,
+  now: Date = new Date(),
+): PlatformTask[] {
+  const out: PlatformTask[] = [];
+  const seen = new Set<string>();
+  for (const row of homeworkRows) {
+    if (typeof row !== 'object' || row === null) continue;
+    const r = row as Record<string, unknown>;
+    const name = typeof r.examName === 'string' ? r.examName.trim() : '';
+    const id = r.id ?? r.examId;
+    if (!name || id === undefined || id === null) continue;
+    const meet = Number(r.meetCourseType) === 1;
+    const chapterId = r.chapterId;
+    const key =
+      !meet && chapterId !== undefined && chapterId !== null
+        ? `chapter-quiz-${String(chapterId)}`
+        : `${meet ? 'meet-quiz' : 'quiz'}-${String(id)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const state = Number(r.state);
+    const end = typeof r.endDate === 'string' ? r.endDate : undefined;
+    const endIso = wallTimeToIso(end);
+    const expired = endIso !== undefined && new Date(endIso).getTime() < now.getTime();
+    out.push({
+      platformTaskId: key,
+      courseId: course.platformCourseId,
+      courseName: course.name,
+      kind: 'quiz',
+      title: `${meet ? '见面课测验' : '章节测验'} · ${name}`,
+      status: state >= 3 ? 'graded' : expired ? 'expired' : 'pending',
+      ...(end ? { deadline: end } : {}),
+      ...(typeof r.startTime === 'string' ? { publishedAt: wallTimeToIso(r.startTime) } : {}),
+      ...(numeric(r.score) !== undefined ? { score: numeric(r.score) } : {}),
+      ...(numeric(r.totalScore) !== undefined ? { totalScore: numeric(r.totalScore) } : {}),
+      ...(examPageUrl ? { sourceUrl: examPageUrl } : {}),
+      raw: r,
+    });
+  }
+  for (const row of finalRows) {
+    if (typeof row !== 'object' || row === null) continue;
+    const r = row as Record<string, unknown>;
+    const name = typeof r.examName === 'string' ? r.examName.trim() : '';
+    const id = r.id ?? r.examId;
+    if (!name || id === undefined || id === null) continue;
+    const key = `final-exam-${String(id)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const state = Number(r.state);
+    const end = typeof r.endDate === 'string' ? r.endDate : undefined;
+    const endIso = wallTimeToIso(end);
+    const expired = endIso !== undefined && new Date(endIso).getTime() < now.getTime();
+    out.push({
+      platformTaskId: key,
+      courseId: course.platformCourseId,
+      courseName: course.name,
+      kind: 'exam',
+      title: `期末考试 · ${name}`,
+      status: state >= 3 ? 'graded' : expired ? 'expired' : 'pending',
+      ...(typeof r.startTime === 'string' ? { startsAt: wallTimeToIso(r.startTime) } : {}),
+      ...(end ? { deadline: end } : {}),
+      ...(numeric(r.score) !== undefined ? { score: numeric(r.score) } : {}),
+      ...(numeric(r.totalScore) !== undefined ? { totalScore: numeric(r.totalScore) } : {}),
+      ...(examPageUrl ? { sourceUrl: examPageUrl } : {}),
+      raw: r,
+    });
+  }
+  return out;
+}
+
+/** 免加密兜底：loadTeachingTask 的见面课教学任务 → 见面课测验条目。 */
+export function parseZhihuishuTeachingTasks(
+  rows: unknown[],
+  course: { platformCourseId: string; name: string },
+): PlatformTask[] {
+  const out: PlatformTask[] = [];
+  for (const row of rows) {
+    if (typeof row !== 'object' || row === null) continue;
+    const r = row as Record<string, unknown>;
+    const name = typeof r.taskName === 'string' ? r.taskName.trim() : '';
+    const id = r.id ?? r.linkId;
+    if (!name || id === undefined || id === null) continue;
+    const learnTime = typeof r.learnTime === 'string' ? r.learnTime : undefined;
+    const score = numeric(r.testingScore ?? r.examScore ?? r.checkScore);
+    out.push({
+      platformTaskId: `meet-course-${String(id)}`,
+      courseId: course.platformCourseId,
+      courseName: course.name,
+      kind: 'quiz',
+      title: `见面课测验 · ${name}`,
+      status: Number(r.isAddScore) === 1 ? 'graded' : 'pending',
+      ...(learnTime ? { publishedAt: wallTimeToIso(learnTime) } : {}),
+      ...(score !== undefined ? { score } : {}),
+      raw: r,
+    });
+  }
+  return out;
 }
 
 /** 统计共享课「学习进度」里的视频任务点（只看 watchStatus==1 记为已完成）。 */

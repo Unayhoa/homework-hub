@@ -31,7 +31,7 @@
  * 6 = 增加「现在可做」的条数 availableNow（v0.2.44）。
  *     旧数据没有这个数，必须重抓才能补上。
  */
-export const TASK_POINT_SCHEMA = 8;
+export const TASK_POINT_SCHEMA = 9;
 
 /**
  * 课程级成绩摘要（共享课/成绩分析页提供）。

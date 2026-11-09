@@ -18,7 +18,7 @@
 
 - 源码：`packages/`（core 引擎 + 各平台适配器）、`apps/web`（界面 + 本地 API）、`apps/android`（WebView 壳）
 - 数据全在手机上，没有服务端；加密保险箱存平台会话
-- 当前版本 **1.0.1**，五个平台：超星学习通 / 长江雨课堂 / iSmart / PTA（拼题A）/ 智慧树（首批只做账号登录与作业待办）
+- 当前版本 **1.0.1**，五个平台：超星学习通 / 长江雨课堂 / iSmart / PTA（拼题A）/ 智慧树
 
 ---
 
@@ -45,19 +45,27 @@
 - 课程改名（显示层）+ 重名课程并存（按 ID 筛选）+ 手动作业归并
 - 点作业名跳平台：PTA / iSmart / 长江（部分）正常，**带返回条、返回时不触发登录登记**
 - 提醒设置互不覆盖
-- 智慧树内置（首批，2026-11-07 HAR）：应用内登录 + 作业待办；任务点/考试明确不做
+- 智慧树内置（2026-11-07 / 11-09 HAR）：应用内登录、普通课作业、共享课列表、视频任务点、平时成绩、章节测验 / 见面课测验 / 期末考试
 
 **智慧树端点（改前先看）**：`onlineservice-api.../gateway/f/v1/login/getLoginUserInfo` 取 `uuid` →
 `hike-teaching.zhihuishu.com/educational/platform/getStudentCourseList` 取课程 →
-`hiexam-server.zhihuishu.com/zhsathome/homeworkUser/List?completeTab=0` 取作业。
-作业 `status`：1 未提交、2 被打回、3 待批阅/批阅中、4 已批阅、5 已出分；截止时间用 `endTime`（epoch 毫秒）。
+`hiexam-server.zhihuishu.com/zhsathome/homeworkUser/List?completeTab=0` 取普通课作业。
+作业 `status`：1 未提交、2 被打回、3 待批阅、4 已批阅、5 已出分；截止时间用 `endTime`（epoch 毫秒）。
 **共享课**（如“大学生心理健康”）走 `student/course/share/queryShareCourseInfo`：请求体的 `secretStr`
 由页面 `window.yxyz()` + RSA/AES 生成，但 HAR 证实「同一组 status/page 查询」的密文是**确定性**的，
 所以适配器内置了未完成/已完成两份密文（见 `SHARED_COURSE_SECRETS`）。共享课的视频任务点与
-成绩摘要（平时分/期末/总评/学习习惯）走 `stuonline/stuLearnReportNew/*` 的免加密接口，已实现。
-**仍缺**：作业/章节测验/期末考试列表（`studentexam-api` 的 secretStr 带课程/招生维度），没有硬编码到开源版。
+成绩走 `stuonline/stuLearnReportNew/*` 的免加密接口；平时分有**两个**独立数据源：
+`loadStuLearnReport` 的 `ssd` 与 `loadStudyCertify` 的 `studentScoreDto`（后者是真机上实际成功的那个）。
+**作业/考试加密已复现**（见 `zhihuishu/src/exam-crypto.ts`，有逐字节 HAR 单测）：
+`uid` = RSA-1024 PKCS#1 v1.5 type2 加密 `{"module":3}`（平台公钥硬编码在 2.js）→
+`appcomm-user/c/has` 返回 `sl`（平台私钥签发，用公钥 `c^e mod n` 还原出 `cKey`）→
+`secretStr` = AES-128-CBC(`JSON.stringify(params)`, key=`cKey`, iv=`1g3qqdh4jvbskb9x`) 的 base64。
+**不硬编码任何 HAR 密文**：密钥每次同步现取，参数顺序必须与 HAR 一致（AES-CBC 对顺序敏感）。
+对应接口：`studentexam-api/.../getStudentHomework`（flag=2 返回 8 条：4 见面课 + 4 章节测验）、
+`taurusexam-api/.../getStudentFinalExam`（flag=2，参数 `courseId` 在前）。
+加密链路失败时退回免加密的 `loadExamAndScore` + `loadTeachingTask`，不会变成 0 条。
 **注意**：课程列表有 12h TTL；新开课/共享课要用课程页「刷新课程列表」强制拉一次。
-**任务点/考试没做不是遗漏，是首批范围**；也没有把 uuid 当长期凭据（每次同步现取）。
+也没有把 uuid 当长期凭据（每次同步现取）。
 
 **刻意如此，不是 bug**
 - 长江雨课堂的部分作业跳转会落到**平台首页** —— quizId 只在「即将截止」列表里，其余的真链接是猜的，猜出来的必然报错。给能打开的假地址比不给更糟。
