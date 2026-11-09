@@ -1,4 +1,4 @@
-/**
+﻿/**
  * web-kit —— 让同一份核心引擎跑在浏览器/WebView 里。
  *
  * 核心库（packages/core）刻意不依赖 node:fs / node:crypto，
@@ -16,5 +16,6 @@ export { PersistentStore, assertImplementsHubStore } from './persistent-store.ts
 export type { PersistentStoreOptions } from './persistent-store.ts';
 export { WebCryptoVault } from './webcrypto-vault.ts';
 export type { WebCryptoVaultOptions } from './webcrypto-vault.ts';
-export { BridgeHttpClient, hasNativeBridge, ensureBridgeCallbacks } from './bridge-http.ts';
+export { BridgeHttpClient, hasNativeBridge, ensureBridgeCallbacks, nativeCookieNames } from './bridge-http.ts';
 export type { BridgeHttpOptions } from './bridge-http.ts';
+

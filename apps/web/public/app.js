@@ -2726,8 +2726,16 @@ async function renderLog() {
         ${stats ? `<div class="muted">${stats}</div>` : ''}
         ${e.message ? `<div class="muted">${escapeHtml(e.message)}</div>` : ''}
         ${
-          e.detail
-            ? `<details class="log-detail"><summary>排查信息</summary><div class="muted">${escapeHtml(e.detail)}</div></details>`
+          e.detail || e.cookieProbe
+            ? `<details class="log-detail"><summary>排查信息</summary><div class="muted">${escapeHtml(e.detail ?? '')}${
+                e.cookieProbe
+                  ? `${e.detail ? '\n\n' : ''}原生 CookieManager 可见的 cookie（只列名字）：\n${escapeHtml(
+                      Object.entries(e.cookieProbe)
+                        .map(([host, names]) => `${host} → ${names.length ? names.join(', ') : '（空）'}`)
+                        .join('\n'),
+                    )}`
+                  : ''
+              }</div></details>`
             : ''
         }
         ${

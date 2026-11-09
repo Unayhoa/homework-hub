@@ -157,6 +157,30 @@ public class HttpBridge {
      *
      * @param json [{key,title,body,fireAtMs,dueAtMs}, ...]
      */
+    /**
+     * 【诊断】返回 CookieManager 里某个 URL 可见的 cookie **名字**（不返回值）。
+     *
+     * 为什么需要它（真机 2026-11-10）：WebView 里明明是已登录状态（页面能打开课程），
+     * 但原生请求一直 403。要么 cookie 没写进 CookieManager、要么写进了但域不匹配、
+     * 要么 native 读的时候还没 flush。这三者从 JS 侧完全看不出来 ——
+     * 所以直接问原生"你到底看得见哪些 cookie"，一次就能定位。
+     */
+    @android.webkit.JavascriptInterface
+    public String cookieNames(final String url) {
+        try {
+            String raw = android.webkit.CookieManager.getInstance().getCookie(url);
+            if (raw == null || raw.isEmpty()) return "[]";
+            org.json.JSONArray arr = new org.json.JSONArray();
+            for (String part : raw.split(";")) {
+                String name = part.split("=")[0].trim();
+                if (!name.isEmpty()) arr.put(name);
+            }
+            return arr.toString();
+        } catch (Throwable t) {
+            return "[\"__error__:" + String.valueOf(t.getMessage()).replace("\"", "'") + "\"]";
+        }
+    }
+
     @android.webkit.JavascriptInterface
     public void scheduleReminders(String json) {
         NotificationScheduler.syncSchedule(activity, json);

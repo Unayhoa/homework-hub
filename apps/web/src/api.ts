@@ -239,6 +239,13 @@ export interface ApiDeps {
    * 不注入就不写文件，功能照常（样本仍在 store 里）。
    */
   saveSample?: (pack: SamplePack) => Promise<{ path: string }>;
+  /**
+   * 【诊断】取某平台关键域在原生 CookieManager 里可见的 cookie **名字**。
+   *
+   * 由手机端注入（桌面端没有 CookieManager，不注入即可）。用途：WebView 显示已登录、
+   * 原生请求却 403 时，用它区分「cookie 没进 CookieManager」还是「域不匹配」。
+   */
+  cookieNames?: (url: string) => string[] | null;
 }
 
 export interface ApiRequest {
@@ -316,6 +323,36 @@ export function createApiHandler(deps: ApiDeps): ApiHandler {
    * **诊断工具用完就该撤** —— 留着不但给正常使用添噪音，还会把人往回引
    * （"日志里那些 cookie 名单"看起来像有用信息，其实与结论无关）。
    */
+  /**
+   * 【诊断】认证失败时，问原生 CookieManager 要该平台关键域可见的 cookie **名字**。
+   *
+   * 为什么值得保留这一段（与"诊断工具用完就该撤"不矛盾）：
+   * 它回答的是「WebView 显示已登录、原生请求却 403」这个**结构性**问题 ——
+   * 只有两种可能（cookie 没进 CookieManager / 进了但域不匹配），而两者修法完全不同。
+   * 没有这条证据就只能靠猜，而猜错会让用户反复重登。
+   */
+  const KEY_HOSTS: Record<string, string[]> = {
+    chaoxing: ['https://i.chaoxing.com', 'https://mooc1-api.chaoxing.com', 'https://passport2.chaoxing.com'],
+    zhihuishu: [
+      'https://onlineservice-api.zhihuishu.com',
+      'https://hike-teaching.zhihuishu.com',
+      'https://hiexam-server.zhihuishu.com',
+      'https://stuonline.zhihuishu.com',
+    ],
+    ismart: ['https://school.ismartlearning.cn', 'https://me.ismartlearning.cn'],
+  };
+  function probeCookieNames(platformId: string): Record<string, string[]> | null {
+    if (!deps.cookieNames) return null;
+    const hosts = KEY_HOSTS[platformId];
+    if (!hosts) return null;
+    const out: Record<string, string[]> = {};
+    for (const h of hosts) {
+      const names = deps.cookieNames(h);
+      if (names) out[h.replace(/^https:\/\//, '')] = names;
+    }
+    return Object.keys(out).length > 0 ? out : null;
+  }
+
   function summarize(report: SyncReport) {
     return {
       ok: report.totals.failed === 0,
@@ -336,6 +373,10 @@ export function createApiHandler(deps: ApiDeps): ApiHandler {
         sessionOrigin: x.sessionOrigin,
         // 密码重登成功但会话没建立 → UI 直接弹官方登录页让用户完成安全验证
         ...(x.needBrowserLogin ? { needBrowserLogin: true } : {}),
+        // 【诊断】认证失败时，附上原生 CookieManager 里该平台关键域可见的 cookie **名字**。
+        // 用来一眼区分「cookie 没进 CookieManager」和「进了但域不匹配」——
+        // WebView 显示已登录、原生请求却 403 时，这两者的修法完全不同。
+        ...(x.status === 'auth-required' ? { cookieProbe: probeCookieNames(x.platformId) } : {}),
       })),
     };
   }
@@ -1082,6 +1123,9 @@ export function createApiHandler(deps: ApiDeps): ApiHandler {
           ...(typeof e.detail === 'string' && e.detail.length > 3000
             ? { detail: `${e.detail.slice(0, 3000)}…（截断）` }
             : {}),
+          // 【诊断】认证失败的记录，附上原生 CookieManager 里该平台关键域的 cookie 名字。
+          // 这是「WebView 已登录但原生 403」唯一能一次说清根因的证据，所以放在日志页可展开处。
+          ...(e.status === 'auth-required' ? { cookieProbe: probeCookieNames(e.platformId) } : {}),
         }));
         return { status: 200, body: { log: trimmed } };
       }

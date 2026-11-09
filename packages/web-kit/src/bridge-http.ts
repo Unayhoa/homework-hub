@@ -47,6 +47,13 @@ interface AndroidBridgeHost {
   openLoginWithAccount?: (url: string, platformId: string, accountId: string) => void;
   /** 发系统通知 */
   notify?: (title: string, body: string) => void;
+  /**
+   * 【诊断】原生 CookieManager 里某个 URL 可见的 cookie **名字**（JSON 数组字符串，不含值）。
+   *
+   * 用途：WebView 显示已登录、但原生请求 403 时，用它一眼判断是
+   * 「cookie 没进 CookieManager」还是「进了但域不匹配」——两者修法完全不同。
+   */
+  cookieNames?: (url: string) => string;
   /** 上报日志到 logcat，便于真机排查 */
   log?: (level: string, message: string) => void;
 }
@@ -133,6 +140,26 @@ export interface BridgeHttpOptions {
 
 export function hasNativeBridge(): boolean {
   return typeof window !== 'undefined' && typeof window.Android?.httpRequest === 'function';
+}
+
+/**
+ * 【诊断】问原生要某个 URL 在 CookieManager 里可见的 cookie **名字**。
+ *
+ * 返回形如 `['JSESSIONID','route']`；拿不到（非手机端/桥不可用）返回 `null`。
+ * 只取名字不取值 —— 会话凭据不过手这条约束不破。
+ */
+export function nativeCookieNames(url: string): string[] | null {
+  if (typeof window === 'undefined') return null;
+  const fn = window.Android?.cookieNames;
+  if (typeof fn !== 'function') return null;
+  try {
+    const raw = fn(url);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed) ? parsed.map((x) => String(x)) : null;
+  } catch {
+    return null;
+  }
 }
 
 export class BridgeHttpClient implements HttpClient {
