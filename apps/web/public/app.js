@@ -1318,7 +1318,10 @@ function renderAccounts(state) {
       const canRelogin = !a.hasCredentials && a.username === 'browser' && loginUrl;
       let cred = '';
       if (a.hasCredentials) {
-        cred = `<span class="cred-badge" title="已记住密码：会话失效时同步会自动重新登录，不需要你操作">🔑 自动重登已开启</span>`;
+        // 有保存密码：不仅能自动重登，也给一个**可点的手动重登**按钮
+        // （2026-11-09 用户要求）—— 自动重登偶发失败时，用户能自己点一下重试，
+        // 不必再"移除账号→重新添加"（那会丢掉课程勾选和改名）。
+        cred = `<button class="cred-badge as-btn" data-relogin-pwd="${escapeHtml(a.id)}" title="用已保存的密码立即重新登录一次（不影响你的课程勾选与改名）">🔑 一键重登</button>`;
       } else if (canRelogin) {
         cred = `<button class="cred-badge as-btn" data-relogin="${escapeHtml(a.platformId)}" data-login-url="${escapeHtml(loginUrl)}" title="打开平台官方登录页重新登录一次（会话失效时用这个）">🔑 一键重登</button>`;
       }
@@ -3378,6 +3381,20 @@ $('courseList').addEventListener('change', async (e) => {
   const cb = e.target.closest('input[data-mute-course]');
   if (!cb) return;
   const muted = !cb.checked;
+  // 取消勾选会**清除这门课的全部记录**（2026-11-09 用户明确要求），
+  // 所以必须二次确认 —— 手滑一下不该让历史记录无声消失。
+  if (muted) {
+    const name = cb.closest('.course-row')?.querySelector('.course-row-name')?.textContent?.trim() || '这门课';
+    const yes = confirm(
+      `取消勾选「${name}」会清除它的全部记录（待办、已完成、变更历史）。\n\n` +
+        `适用于：已结课 / 往期课程 / 全部做完不会再布置。\n` +
+        `以后重新勾选可以再同步回来。\n\n确定取消勾选并清除记录？`,
+    );
+    if (!yes) {
+      cb.checked = true; // 还原勾选，不做任何改动
+      return;
+    }
+  }
   busy(true);
   try {
     await api('/api/course/mute', {
@@ -3388,7 +3405,10 @@ $('courseList').addEventListener('change', async (e) => {
         muted,
       }),
     });
-    toast(muted ? '已跳过这门课程（已有记录保留）' : '已恢复同步这门课程');
+    toast(muted ? '已取消勾选并清除该课记录' : '已恢复同步这门课程');
+    // 记录变了：刷新待办与课程列表，避免界面留着刚被清掉的条目
+    await refresh();
+    await renderCourses();
   } catch (err) {
     cb.checked = !cb.checked; // 失败回滚，别让界面说谎
     toast(`设置失败：${err.message}`, 4200);
@@ -3397,6 +3417,27 @@ $('courseList').addEventListener('change', async (e) => {
   }
 });
 $('accountList').addEventListener('click', async (e) => {
+  // 有保存密码的账号：用已保存密码立即重登（保留课程勾选/改名）。
+  // 必须放在下面 data-relogin 之前判断 —— 两个属性不同，但都要在这里拦。
+  const pwdRelogin = e.target.closest('button[data-relogin-pwd]');
+  if (pwdRelogin) {
+    pwdRelogin.disabled = true;
+    showSyncBar('正在用保存的密码重新登录…');
+    try {
+      const r = await api('/api/relogin', { method: 'POST', body: JSON.stringify({ accountId: pwdRelogin.dataset.reloginPwd }) });
+      if (r.ok) {
+        showSyncBar(r.message || '已重新登录', 'done', 4000);
+      } else {
+        showSyncBar(r.error || '重登失败', 'error', 9000);
+      }
+      await refresh();
+    } catch (err) {
+      showSyncBar(`重登失败：${err.message}`, 'error', 9000);
+    } finally {
+      pwdRelogin.disabled = false;
+    }
+    return;
+  }
   // 「一键重登」：直接切到该平台的官方登录页。
   // 走的是和应用内登录完全相同的那条路（同一个 WebView / 同一份 CookieManager），
   // 所以平台上记住的账号密码、验证码偏好都会自己带出来 —— 通常只要输一次验证码。

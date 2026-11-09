@@ -83,34 +83,36 @@ const baseControl = (): StubControl => ({
   coursesFail: false,
 });
 
-describe('手动静默课程：不发请求，但记录必须完整保留', () => {
-  it('设为「不再同步」后同步不再请求该课程，任务不被删除也不被标记', async () => {
+describe('取消勾选课程：不发请求，且清除该课记录', () => {
+  it('设为「不再同步」后同步不再请求该课程，且该课任务被软删除（记录不再显示）', async () => {
     const control = baseControl();
     const { dir, store, engine } = await makeEngineWithClock(makeStubAdapter(control), new FixedClock(new Date()));
     try {
       const account = await engine.login('stub', 'u1', { password: 'p1' });
       await engine.syncAll({});
       const before = await store.listTasks({ accountIds: [account.id] });
-      assert.ok(before.length > 0, '先要有数据才谈得上保留');
+      assert.ok(before.length > 0, '先要有数据才谈得上清除');
+      const courseId = before[0]!.courseId;
 
-      await engine.setCourseMuted(account.id, before[0]!.courseId, true);
+      await engine.setCourseMuted(account.id, courseId, true);
 
       control.fetchCalls = 0;
       await engine.syncAll({});
       assert.equal(control.fetchCalls, 0, '静默课程不应再发任何请求');
 
-      const after = await store.listTasks({ accountIds: [account.id], includeDeleted: true });
-      assert.equal(after.length, before.length, '记录数量必须不变');
+      // 语义变更（2026-11-09 用户要求）：取消勾选 = 清除该课记录（软删除）
+      // 用户可见的待办来源是 engine.upcoming（会过滤 userDeletedAt），用它断言才是真实效果。
+      const todo = await engine.upcoming({ withinDays: 365, includeOverdue: true });
       assert.ok(
-        after.every((t) => !t.deletedAt && !t.userDeletedAt),
-        '静默不是删除 —— 记录不能被标记删除',
+        todo.every((t) => t.courseId !== courseId),
+        '取消勾选后该课任务不应再出现在待办里',
       );
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
   });
 
-  it('恢复同步后课程重新参与', async () => {
+  it('恢复同步后课程重新参与，任务被重新拉回', async () => {
     const control = baseControl();
     const { dir, store, engine } = await makeEngineWithClock(makeStubAdapter(control), new FixedClock(new Date()));
     try {
@@ -128,6 +130,8 @@ describe('手动静默课程：不发请求，但记录必须完整保留', () =
       control.fetchCalls = 0;
       await engine.syncAll({});
       assert.equal(control.fetchCalls, 1, '恢复后应重新请求');
+      const back = await engine.upcoming({ withinDays: 365, includeOverdue: true });
+      assert.ok(back.some((t) => t.courseId === courseId), '重新勾选并同步后该课任务应回来');
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

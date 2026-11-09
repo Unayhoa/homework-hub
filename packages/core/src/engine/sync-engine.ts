@@ -332,6 +332,53 @@ export class SyncEngine {
   }
 
   /**
+   * 「一键重登」：用保险箱里保存的密码重新登录一次，**保留**课程筛选/改期等一切用户偏好。
+   *
+   * 为什么要单独一个方法而不是复用 login()：login() 走的是「全新添加」语义，
+   * 会清掉课程游标（course-mute / course-exclude 等）—— 那正是用户抱怨的
+   * 「重新登录后课程要重新勾选和改名」。重登只是刷新会话，绝不能动用户的选择。
+   *
+   * 只对「有保存密码」的账号有效；没有密码（应用内登录/粘贴 cookie）时明确报错，
+   * 由 UI 引导去走官方登录页，而不是假装成功。
+   */
+  async relogin(accountId: string): Promise<{ ok: boolean; message: string }> {
+    const account = await this.#store.getAccount(accountId);
+    if (!account) throw new HubError('AUTH_FAILED', `账号不存在：${accountId}`);
+    const adapter = this.#registry.get(account.platformId);
+    if (!adapter) throw new HubError('AUTH_FAILED', `未找到平台适配器 ${account.platformId}`);
+    const session = await this.#vault.load(accountId);
+    const cred = session?.credentials;
+    if (!session || !cred?.password || session.origin === 'imported') {
+      throw new HubError('AUTH_FAILED', '这个账号没有保存密码，无法一键重登；请用「应用内登录」在平台官方页面登录一次', {
+        platformId: account.platformId,
+        requiresUserAction: true,
+      });
+    }
+    const ctx = this.#contextFor(account.platformId, accountId);
+    const fresh = await adapter.login(ctx, { username: cred.username ?? account.username, ...cred });
+    fresh.accountId = accountId;
+    fresh.credentials = cred;
+    await this.#vault.save(fresh);
+    // 注意：**不**调用 #clearCourseCursors —— 保留用户的课程勾选与改名。
+    // 立即验证会话真的建立了（学习通「登录成功但会话没建」会被这一步抓到）。
+    let verified = true;
+    try {
+      verified = await adapter.probeSession(ctx, fresh);
+    } catch {
+      verified = false;
+    }
+    if (!verified) {
+      await this.#markAccount(account, 'auth-required', '重登接口返回成功，但会话仍未建立', 'AUTH_REQUIRED').catch(() => {});
+      return {
+        ok: false,
+        message: '重登接口返回成功，但会话仍未建立（可能需要验证码/二次校验）。若仍不行，请用「应用内登录」登录一次。',
+      };
+    }
+    await this.#markAccount(account, 'ok', '已手动重登，会话已恢复', undefined).catch(() => {});
+    return { ok: true, message: '已重新登录，会话已恢复' };
+  }
+
+  /**
    * 登记一个「离线账号」—— **全程不发任何网络请求**。
    *
    * 这是零影响路线（HAR 回放、CDP 附着）的入口。它们不走我们自己的登录：
@@ -2481,15 +2528,20 @@ export class SyncEngine {
   }
 
   /**
-   * 把某门课设为「不再同步」（手动静默）。
+   * 把某门课设为「不再同步」（课程栏取消勾选）。
    *
-   * 与 `deleteCourse`（删整课）的区别很重要：
-   *   - 删整课：任务被标记删除 + 加入排除清单 —— 库里也看不到了；
-   *   - 静默：**不动任何已有数据**，只是后续同步不再请求这门课。
-   * 往期课程用它最合适：省掉全部请求，历史记录仍然完整保留。
+   * 语义（2026-11-09 用户明确要求变更）：**取消勾选 = 这门课与我无关，记录一并清掉**。
+   *   - 取消勾选（muted=true）：不再请求它，且把该课已有任务软删除（记录/待办/历史都不再显示）。
+   *     理由：用户取消勾选通常意味着「结课了 / 往期课程 / 全部做完，不可能再布置」——
+   *     留着这些记录只会污染待办与统计。
+   *   - 重新勾选（muted=false）：恢复同步。之前被清掉的记录在下一轮同步时由平台重新拉回
+   *     （因为任务只是软删除，不是物理删除，且对应课程仍在库里）。
    *
-   * 注意：静默是用户的长期偏好，**重新登录不会自动撤销**它
-   * （与「删整课」被重新登录清除的语义相反 —— 那个是「重新开始」的信号）。
+   * 为什么仍用 course-mute 游标、而不是复用 deleteCourse 的 course-exclude：
+   *   取消勾选是「可逆的、临时的」，重新勾选要能恢复同步；而 deleteCourse 是「永久排除」。
+   *   两者语义不同，不能混。
+   *
+   * UI 侧必须为取消勾选加二次确认（会清记录），见 app.js。
    */
   async setCourseMuted(accountId: string, courseId: string, muted: boolean): Promise<void> {
     let list: string[] = [];
@@ -2508,6 +2560,33 @@ export class SyncEngine {
       cursor: JSON.stringify([...set]),
       updatedAt: this.#clock.now().toISOString(),
     });
+    // 取消勾选 = 记录一并清掉（软删除，重新勾选后恢复）。
+    if (muted) {
+      const tasks = (await this.#store.listTasks({ accountIds: [accountId], includeDeleted: true })).filter(
+        (t) => t.courseId === courseId && !t.userDeletedAt,
+      );
+      if (tasks.length > 0) {
+        const at = this.#clock.now().toISOString();
+        // 用 deletedAt（平台级软删除）而不是 userDeletedAt（用户明确删除）标记：
+        // 前者在下一次同步看到上游仍有该任务时会被自动恢复（见 merge 逻辑），
+        // 后者是用户的永久意图、同步永不复活它 —— 而「取消勾选」是可逆的临时操作，
+        // 必须能在重新勾选后自动恢复。
+        await this.#store.softDeleteTasks(tasks.map((t) => t.id), at);
+        await this.#refreshNotificationSchedule();
+        this.#logger.info('取消勾选课程并清除其记录', { accountId, courseId, removed: tasks.length });
+      }
+    } else {
+      // 重新勾选：把之前因取消勾选而软删除的任务恢复（清掉 deletedAt），
+      // 这样即使这一轮同步还没跑，用户立刻就能看到记录回来。
+      const tasks = (await this.#store.listTasks({ accountIds: [accountId], includeDeleted: true })).filter(
+        (t) => t.courseId === courseId && t.deletedAt,
+      );
+      if (tasks.length > 0) {
+        await this.#store.upsertTasks(tasks.map((t) => ({ ...t, deletedAt: undefined })));
+        await this.#refreshNotificationSchedule();
+        this.#logger.info('重新勾选课程并恢复其记录', { accountId, courseId, restored: tasks.length });
+      }
+    }
     this.#logger.info(muted ? '课程已设为不再同步' : '课程已恢复同步', { accountId, courseId });
   }
 

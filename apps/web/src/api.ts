@@ -1096,6 +1096,19 @@ export function createApiHandler(deps: ApiDeps): ApiHandler {
         return { status: 200, body: summarize(report) };
       }
 
+      if (method === 'POST' && path === '/api/relogin') {
+        const body = parseBody();
+        const accountId = String(body.accountId ?? '');
+        if (!accountId) throw new Error('缺少 accountId');
+        const r = await deps.engine.relogin(accountId);
+        if (r.ok) {
+          // 重登成功后立刻同步这个账号（保留课程选择），让用户一步到位
+          const report = await deps.engine.syncAll({ accountIds: [accountId] });
+          return { status: 200, body: { ok: true, message: r.message, sync: summarize(report) } };
+        }
+        return { status: 200, body: { ok: false, error: r.message } };
+      }
+
       if (method === 'POST' && path === '/api/login') {
         const body = parseBody();
         const platformId = String(body.platformId ?? '');
