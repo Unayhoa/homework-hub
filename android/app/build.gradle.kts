@@ -10,7 +10,7 @@ android {
         applicationId = "cn.homeworkhub.app"
         minSdk = 26          // adaptive icon / WebViewAssetLoader 都要求 26+
         targetSdk = 34
-        versionCode = 158
+        versionCode = 159
         versionName = "1.0.1"
     }
 
@@ -42,5 +42,6 @@ dependencies {
     // 这是 ES Module 能加载的前提 —— file:// 下模块会被 CORS 拦掉）
     implementation("androidx.webkit:webkit:1.11.0")
 }
+
 
 
