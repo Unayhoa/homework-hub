@@ -131,8 +131,8 @@ export class ZhihuishuAdapter implements PlatformAdapter {
     allowPost: [
       { pattern: /student\/course\/share\/queryShareCourseInfo/, why: '查询共享课列表（只读，POST 只为传加密参数）' },
       {
-        pattern: /stuonline\.zhihuishu\.com\/stuonline\/json\/stuLearnReportNew\//,
-        why: '查询共享课学习进度/成绩（只读，POST 只为传 courseId/recruitId）',
+        pattern: /stuonline\.zhihuishu\.com\/stuonline\/json\//,
+        why: '查询共享课学习进度/成绩/教学任务（只读 JSON 接口，POST 只为传 courseId/recruitId）',
       },
     ],
   };
@@ -359,9 +359,16 @@ export class ZhihuishuAdapter implements PlatformAdapter {
     const raw = (c.raw ?? {}) as { recruitId?: string | number };
     if (raw.recruitId === undefined || raw.recruitId === null) return undefined;
     const base = { courseId: c.platformCourseId, recruitId: String(raw.recruitId), type: 'l', courseTypeEs: '1' };
+    const headers = {
+      Origin: 'https://stuonline.zhihuishu.com',
+      Referer: `https://stuonline.zhihuishu.com/stuonline/stuLearnReportNew/index?recruitId=${encodeURIComponent(
+        String(raw.recruitId),
+      )}&courseId=${encodeURIComponent(c.platformCourseId)}`,
+      'X-Requested-With': 'XMLHttpRequest',
+    };
     const safe = async (url: string, form: Record<string, string>) => {
       try {
-        const r = await http.postForm<Record<string, unknown>>(url, form);
+        const r = await http.postForm<Record<string, unknown>>(url, form, { headers });
         return r.body ?? {};
       } catch {
         return {} as Record<string, unknown>;
@@ -372,7 +379,9 @@ export class ZhihuishuAdapter implements PlatformAdapter {
       safe(this.#ep.stuHabit, base),
       safe(this.#ep.stuForum, base),
     ]);
-    const ssd = (report.ssd ?? {}) as Record<string, unknown>;
+    const ssd = (report.ssd ?? (report.data as { ssd?: unknown } | undefined)?.ssd ?? {}) as Record<string, unknown>;
+    const habitBody = (habit.data ?? habit) as Record<string, unknown>;
+    const forumBody = (forum.data ?? forum) as Record<string, unknown>;
     const grade: CourseGradeSummary = {
       ...(numeric(ssd.totalScore) !== undefined ? { totalScore: numeric(ssd.totalScore) } : {}),
       ...(numeric(ssd.usualScore) !== undefined ? { usualScore: numeric(ssd.usualScore) } : {}),
@@ -380,15 +389,15 @@ export class ZhihuishuAdapter implements PlatformAdapter {
       ...(numeric(ssd.examScore) !== undefined ? { examScore: numeric(ssd.examScore) } : {}),
       ...(numeric(ssd.meetScore) !== undefined ? { meetScore: numeric(ssd.meetScore) } : {}),
       ...(numeric(ssd.courseScore) !== undefined ? { studyScore: numeric(ssd.courseScore) } : {}),
-      ...(numeric(habit.learnedHabitScore) !== undefined ? { habitScore: numeric(habit.learnedHabitScore) } : {}),
-      ...(numeric(habit.learnedHabitTotalScore) !== undefined
-        ? { habitTotal: numeric(habit.learnedHabitTotalScore) }
+      ...(numeric(habitBody.learnedHabitScore) !== undefined ? { habitScore: numeric(habitBody.learnedHabitScore) } : {}),
+      ...(numeric(habitBody.learnedHabitTotalScore) !== undefined
+        ? { habitTotal: numeric(habitBody.learnedHabitTotalScore) }
         : {}),
-      ...(numeric(forum.learnedInteractiveScore) !== undefined
-        ? { interactionScore: numeric(forum.learnedInteractiveScore) }
+      ...(numeric(forumBody.learnedInteractiveScore) !== undefined
+        ? { interactionScore: numeric(forumBody.learnedInteractiveScore) }
         : {}),
-      ...(numeric(forum.learnedInteractiveTotalScore) !== undefined
-        ? { interactionTotal: numeric(forum.learnedInteractiveTotalScore) }
+      ...(numeric(forumBody.learnedInteractiveTotalScore) !== undefined
+        ? { interactionTotal: numeric(forumBody.learnedInteractiveTotalScore) }
         : {}),
     };
     return Object.keys(grade).length > 0 ? grade : undefined;

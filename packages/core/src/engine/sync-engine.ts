@@ -886,6 +886,8 @@ export class SyncEngine {
       courseUrl?: string;
       /** 课程级成绩摘要（共享课成绩分析页提供） */
       grade?: CourseGradeSummary;
+      /** 是否是共享课（需要重点推进，界面置顶） */
+      pinned?: boolean;
     }>;
   }> {
     const account = await this.#store.getAccount(accountId);
@@ -939,6 +941,7 @@ export class SyncEngine {
           hasOpenNow: tp.hasOpenNow === true,
           ...(typeof tp.availableNow === 'number' ? { availableNow: tp.availableNow } : {}),
           ...(c.grade ? { grade: c.grade } : {}),
+          pinned: Boolean((c.raw as { recruitId?: unknown } | undefined)?.recruitId !== undefined),
           ...(courseUrl ? { courseUrl } : {}),
         };
       }),

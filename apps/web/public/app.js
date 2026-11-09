@@ -866,8 +866,7 @@ function renderTaskPoints(data) {
   // 逾期和已完成各自折起来 —— 前者已经无法改变，后者不需要再看，
   // 一直铺在首屏只会把"还能做什么"挤下去（用户原话：多门逾期一定有收纳需求）。
   // 有成绩摘要的共享课（如心理健康）单独置顶：它需要继续推进，不能沉进“已完成”。
-  const hasGrade = (c) =>
-    c.grade && (Number.isFinite(c.grade.totalScore) || Number.isFinite(c.grade.usualScore));
+  const hasGrade = (c) => c.pinned === true || Boolean(c.grade);
   const pinned = rows.filter(hasGrade);
   const regularRows = rows.filter((c) => !hasGrade(c));
   const buckets = { closed: [], active: [], done: [] };
