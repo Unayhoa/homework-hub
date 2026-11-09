@@ -1069,7 +1069,19 @@ export function createApiHandler(deps: ApiDeps): ApiHandler {
         const entries = [];
         for (const acc of accounts) entries.push(...(await deps.store.listSyncLog(acc.id, 30)));
         entries.sort((x, y) => y.finishedAt.localeCompare(x.finishedAt));
-        return { status: 200, body: { log: entries.slice(0, 40) } };
+        // 响应体积闸门：老版本写进 store 的超长 message/detail 可能还在，
+        // 直接回传会让 WebView 的 JSON.parse 抛 Invalid string length。
+        // 这里再兜一次（新数据已在 engine 侧截断，这里防的是历史脏数据）。
+        const trimmed = entries.slice(0, 40).map((e) => ({
+          ...e,
+          ...(typeof e.message === 'string' && e.message.length > 1500
+            ? { message: `${e.message.slice(0, 1500)}…（截断）` }
+            : {}),
+          ...(typeof e.detail === 'string' && e.detail.length > 3000
+            ? { detail: `${e.detail.slice(0, 3000)}…（截断）` }
+            : {}),
+        }));
+        return { status: 200, body: { log: trimmed } };
       }
 
       // ---- 写 ----

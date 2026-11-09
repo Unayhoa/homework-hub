@@ -559,9 +559,57 @@ export class SyncEngine {
       };
     }
 
-    const reports = await mapLimit(targets, opts.concurrency ?? 2, (account) =>
-      this.syncAccount(account, opts),
-    );
+    const reports = await mapLimit(targets, opts.concurrency ?? 2, async (account) => {
+      // 【兜底，必须有】单账号同步**绝不能**把整轮同步带崩。
+      //
+      // 真机踩过（2026-11-09）：智慧树某一步抛了个异常（表现是 Invalid string length），
+      // 异常穿出 #syncAccountInner 一路冒到 mapLimit → syncAll 整体 reject，
+      // 结果：① 那条同步日志根本没写（用户看到"日志里没有智慧树"）
+      //       ② 前端 catch 到的是原始异常文本，弹窗只有一句 Invalid string length。
+      // 这里兜住它：任何未处理异常都变成该账号的一条 failed 报告 + 一条日志，
+      // 其它账号照常完成，用户能在日志里看到是哪一步、什么错误。
+      try {
+        return await this.syncAccount(account, opts);
+      } catch (e) {
+        const err = toHubError(e, account.platformId);
+        const rawErr = e as Error & { name?: string; stack?: string };
+        const locator = `[err-locator] 顶层未捕获 ${rawErr?.name ?? 'Error'}: ${String(
+          rawErr?.message ?? e,
+        ).slice(0, 200)}`;
+        this.#logger.error('单账号同步抛出未捕获异常（已隔离，不影响其它账号）', {
+          platformId: account.platformId,
+          accountId: account.id,
+          error: describe(e),
+          stack: rawErr?.stack?.split('\n').slice(0, 5).join(' | '),
+        });
+        const report: AccountSyncReport = {
+          accountId: account.id,
+          platformId: account.platformId,
+          label: account.label,
+          courses: 0,
+          fetched: 0,
+          created: 0,
+          updated: 0,
+          unchanged: 0,
+          vanished: 0,
+          removed: 0,
+          reminders: [],
+          events: [],
+          status: 'failed',
+          message: `同步中断：${String(err.message ?? e).slice(0, 400)}`,
+          detail: locator.slice(0, 600),
+          http: createHttpStats(),
+          readOnly: createReadOnlyGuardStats(),
+          sessionOrigin: 'derived',
+          sessionOriginNote: '同步中断，未确定',
+          durationMs: 0,
+        };
+        // 即便出错也写一条日志：这样用户/维护者一定能在「同步日志」里看到这次失败。
+        await this.#recordLog(report).catch(() => {});
+        await this.#markAccount(account, 'failed', report.message, err.code).catch(() => {});
+        return report;
+      }
+    });
 
     // 同一平台的多个账号并发时，各自报告里的 http 统计是分开的；
     // 这里按平台汇总时要避免重复计算 —— 所以只在单账号场景下累加限流等待，
@@ -1971,6 +2019,12 @@ export class SyncEngine {
 
   async #recordLog(report: AccountSyncReport): Promise<void> {
     const now = this.#clock.now().toISOString();
+    // 【体积闸门】message/detail 是唯一可能被上游/异常撑大的字段。
+    // 不在这里截断，它们会被写进 store，再经 /api/log、/api/state 回传 WebView，
+    // 最终在 JSON.stringify / JSON.parse 处炸成 Invalid string length（真机已踩）。
+    // 截断到此为止，任何下游都不可能再看到巨型字符串。
+    const cap = (s: string | undefined, n: number): string | undefined =>
+      typeof s === 'string' && s.length > n ? `${s.slice(0, n)}…（已截断，原长 ${s.length}）` : s;
     await this.#store.appendSyncLog({
       accountId: report.accountId,
       platformId: report.platformId,
@@ -1981,8 +2035,8 @@ export class SyncEngine {
       updated: report.updated,
       removed: report.removed,
       fetched: report.fetched,
-      message: report.message,
-      ...(report.detail ? { detail: report.detail } : {}),
+      message: cap(report.message, 1500),
+      ...(report.detail ? { detail: cap(report.detail, 3000)! } : {}),
       requests: report.http.requests,
       retries: report.http.retries,
       durationMs: report.durationMs,

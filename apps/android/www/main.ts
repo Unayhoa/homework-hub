@@ -293,11 +293,69 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Res
     body,
   });
 
-  return new Response(JSON.stringify(result.body), {
+  // 【错误定位，彻底修好后再删】这里的 JSON.stringify 是「Invalid string length」
+  // 的最后一处可能产生点：如果 result.body 里藏着超大字段（某个 message/detail 未截断），
+  // stringify 会在这一行直接抛，而错误信息里没有任何上下文。
+  // 先做一次体积体检：找到最大的字段并落一份可读日志，再把体积和路径说清楚。
+  let payload: string;
+  try {
+    payload = JSON.stringify(result.body);
+  } catch (e) {
+    // 走到这里说明 body 里确实有无法序列化的巨型字符串
+    const offending = findHugeString(result.body);
+    const msg =
+      `[big-string] ${url.pathname} 响应无法序列化：` +
+      `字段=${offending.path || '?'} 长度=${offending.len} 字符。` +
+      `这是 Invalid string length 的根因（该字段应被截断但漏了）。`;
+    window.Android?.log?.('error', msg);
+    return new Response(
+      JSON.stringify({ ok: false, error: msg.slice(0, 500) }),
+      { status: 500, headers: { 'Content-Type': 'application/json; charset=utf-8' } },
+    );
+  }
+  // 超过 4MB 的响应在 WebView 里解析仍然是高危的，但至少先记下来是哪条接口
+  if (payload.length > 4 * 1024 * 1024) {
+    const offending = findHugeString(result.body);
+    window.Android?.log?.(
+      'warn',
+      `[big-string] ${url.pathname} 响应 ${(payload.length / 1024 / 1024).toFixed(1)}MB，` +
+        `最大字段=${offending.path} 长度=${offending.len}`,
+    );
+  }
+
+  return new Response(payload, {
     status: result.status,
     headers: { 'Content-Type': 'application/json; charset=utf-8' },
   });
 };
+
+/** 在任意对象里找最长的字符串字段（只用于诊断，找到第一个最大的就返回）。 */
+function findHugeString(root: unknown): { path: string; len: number } {
+  let best = { path: '', len: 0 };
+  const seen = new WeakSet<object>();
+  const walk = (v: unknown, path: string, depth: number): void => {
+    if (depth > 6 || v === null || v === undefined) return;
+    if (typeof v === 'string') {
+      if (v.length > best.len) best = { path, len: v.length };
+      return;
+    }
+    if (typeof v !== 'object') return;
+    if (seen.has(v as object)) return;
+    seen.add(v as object);
+    if (Array.isArray(v)) {
+      // 只抽查前 5 个元素，避免本诊断本身变成大循环
+      for (let i = 0; i < Math.min(v.length, 5); i += 1) {
+        walk(v[i], `${path}[${i}]`, depth + 1);
+      }
+      return;
+    }
+    for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+      walk(val, path ? `${path}.${k}` : k, depth + 1);
+    }
+  };
+  walk(root, '', 0);
+  return best;
+}
 
 // ---------------------------------------------------------------- 暴露给原生
 
