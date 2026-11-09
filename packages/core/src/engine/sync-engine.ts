@@ -371,7 +371,7 @@ export class SyncEngine {
       await this.#markAccount(account, 'auth-required', '重登接口返回成功，但会话仍未建立', 'AUTH_REQUIRED').catch(() => {});
       return {
         ok: false,
-        message: '重登接口返回成功，但会话仍未建立（可能需要验证码/二次校验）。若仍不行，请用「应用内登录」登录一次。',
+        message: '密码登录接口返回成功，但会话仍未建立（平台要求安全验证/二次校验）。将自动打开官方登录页，请完成一次拖拽验证。',
       };
     }
     await this.#markAccount(account, 'ok', '已手动重登，会话已恢复', undefined).catch(() => {});
@@ -417,12 +417,23 @@ export class SyncEngine {
        * 用这个标记把刷新从「看有没有 storage」里解耦出来。
        */
       freshLogin?: boolean;
+      /**
+       * 「一键重登」路径：登录返回后**保留**用户已有的课程勾选/改名/排除清单。
+       *
+       * 为什么要这个开关：registerOfflineAccount 原本在每次应用内登录返回时都
+       * 调 #clearCourseCursors（为「重新开始」语义服务）。但「重登」只是刷新会话，
+       * 用户明确抱怨过重新登录后课程要重新勾选和改名 —— 那不是他想要的结果。
+       * 一键重登时传 true，跳过清游标。
+       */
+      preserveCourseSelection?: boolean;
+      /** 「一键重登」目标账号：登录返回时把会话归到这个已有的 accountId，而不是另起一个。 */
+      accountId?: string;
     } = {},
   ): Promise<PlatformAccount> {
     // 确认适配器存在 —— 这一步是纯内存查询，不发请求
     this.#registry.require(platformId);
 
-    const accountId = `${platformId}::${username}`;
+    const accountId = opts.accountId ?? `${platformId}::${username}`;
 
     // ---- 墓碑：用户此前明确移除过这个账号 ----
     const tombstone = await this.#store.getCursor(REMOVED_NS, accountId);
@@ -486,8 +497,11 @@ export class SyncEngine {
     await this.#store.upsertAccount(account);
     // 应用内登录返回 = 用户刚在官方页面登录完 → 清掉删课排除与跳过游标，
     // 让这门课（哪怕之前被「删整课」过）重新参与同步。
-    await this.#clearCourseCursors(accountId);
-    this.#logger.info('已登记离线账号（未发出任何请求）', { platformId, accountId });
+    // 例外：「一键重登」不这么做 —— 它只是刷新会话，必须保留用户的课程选择。
+    if (!opts.preserveCourseSelection) {
+      await this.#clearCourseCursors(accountId);
+    }
+    this.#logger.info('已登记离线账号（未发出任何请求）', { platformId, accountId, preserve: opts.preserveCourseSelection === true });
     return account;
   }
 

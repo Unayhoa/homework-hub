@@ -46,6 +46,8 @@ let currentState = null;
 const IS_ANDROID = window.__HH_PLATFORM === 'android';
 /** 手机端：记住用户从哪个平台去登录了，回来后自动读取。 */
 let pendingPlatformId = null;
+// 「一键重登」时记住目标账号 ID：从官方登录页回来后要把会话归到这个已有账号（保留课程选择）。
+let pendingReloginAccountId = null;
 
 // ---------------------------------------------------------------- 基础
 
@@ -1464,8 +1466,10 @@ function renderPlatformOptions() {
 }
 
 /** 手机端登录：切到平台官网，回来后由原生侧调 HH.returnedFromLogin 自动读取。 */
-function openPlatformLogin(platformId, url) {
+function openPlatformLogin(platformId, url, targetAccountId) {
   pendingPlatformId = platformId;
+  // 「一键重登」场景：记住要归到哪个已有账号，回来后 preserving 课程选择登记回去。
+  pendingReloginAccountId = targetAccountId || null;
   if (window.Android?.openLogin) {
     window.Android.openLogin(url, platformId);
   } else {
@@ -1481,7 +1485,9 @@ function openPlatformLogin(platformId, url) {
  */
 async function returnedFromLogin(platformId, storageJson) {
   const id = platformId || pendingPlatformId;
+  const targetAccountId = pendingReloginAccountId;
   pendingPlatformId = null;
+  pendingReloginAccountId = null;
   if (!id) return;
   const pname = platforms.find((p) => p.id === id)?.displayName ?? id;
   // 与手动/自动同步一致：不锁界面，只在底部状态条上表达进度
@@ -1493,6 +1499,8 @@ async function returnedFromLogin(platformId, storageJson) {
       method: 'browser',
       username: 'browser',
       storage: storageJson ?? null,
+      // 「一键重登」：归到原有账号 + 保留课程勾选/改名
+      ...(targetAccountId ? { targetAccountId } : {}),
     };
     const reg = await api('/api/login', { method: 'POST', body: JSON.stringify(body) });
     // 这个账号此前被用户移除过 → 不静默重建，问一次。
@@ -3421,16 +3429,29 @@ $('accountList').addEventListener('click', async (e) => {
   // 必须放在下面 data-relogin 之前判断 —— 两个属性不同，但都要在这里拦。
   const pwdRelogin = e.target.closest('button[data-relogin-pwd]');
   if (pwdRelogin) {
+    const targetAccountId = pwdRelogin.dataset.reloginPwd;
     pwdRelogin.disabled = true;
     showSyncBar('正在用保存的密码重新登录…');
     try {
-      const r = await api('/api/relogin', { method: 'POST', body: JSON.stringify({ accountId: pwdRelogin.dataset.reloginPwd }) });
+      const r = await api('/api/relogin', { method: 'POST', body: JSON.stringify({ accountId: targetAccountId }) });
       if (r.ok) {
         showSyncBar(r.message || '已重新登录', 'done', 4000);
+        await refresh();
+      } else if (r.needBrowserLogin) {
+        // 密码登录被验证码/二次校验挡下 —— 按用户方案：打开官方登录页让他完成拖拽，
+        // 回来后登记到**同一个账号**并保留课程勾选（targetAccountId 透传）。
+        const acc = (currentState?.accounts ?? []).find((a) => a.id === targetAccountId);
+        const pid = acc?.platformId ?? '';
+        const loginUrl = platforms.find((p) => p.id === pid)?.authMethods?.find((m) => m.kind === 'in-app')?.loginUrl ?? '';
+        if (!loginUrl || !window.Android?.openLogin) {
+          showSyncBar(r.message || '重登失败', 'error', 9000);
+        } else {
+          toast('需要在官方页面完成一次安全验证（拖滑块），完成后自动返回', 6000);
+          openPlatformLogin(pid, loginUrl, targetAccountId);
+        }
       } else {
-        showSyncBar(r.error || '重登失败', 'error', 9000);
+        showSyncBar(r.message || r.error || '重登失败', 'error', 9000);
       }
-      await refresh();
     } catch (err) {
       showSyncBar(`重登失败：${err.message}`, 'error', 9000);
     } finally {

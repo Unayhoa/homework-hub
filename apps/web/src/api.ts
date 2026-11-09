@@ -1100,13 +1100,32 @@ export function createApiHandler(deps: ApiDeps): ApiHandler {
         const body = parseBody();
         const accountId = String(body.accountId ?? '');
         if (!accountId) throw new Error('缺少 accountId');
-        const r = await deps.engine.relogin(accountId);
-        if (r.ok) {
-          // 重登成功后立刻同步这个账号（保留课程选择），让用户一步到位
-          const report = await deps.engine.syncAll({ accountIds: [accountId] });
-          return { status: 200, body: { ok: true, message: r.message, sync: summarize(report) } };
+        try {
+          const r = await deps.engine.relogin(accountId);
+          if (r.ok) {
+            // 重登成功后立刻同步这个账号（保留课程选择），让用户一步到位
+            const report = await deps.engine.syncAll({ accountIds: [accountId] });
+            return { status: 200, body: { ok: true, message: r.message, sync: summarize(report) } };
+          }
+          // 重登接口成功但会话没建立（学习通常见）→ 让 UI 打开官方登录页，用户拖一次滑块。
+          return {
+            status: 200,
+            body: { ok: false, needBrowserLogin: true, message: r.message },
+          };
+        } catch (e) {
+          // 撞验证码 / 密码错 / 没存密码 → 都引导到「官方登录页」这条最可靠的路。
+          if (e instanceof HubError) {
+            return {
+              status: 200,
+              body: {
+                ok: false,
+                needBrowserLogin: e.code === 'CAPTCHA_REQUIRED' || e.code === 'AUTH_FAILED' || e.code === 'AUTH_REQUIRED',
+                message: e.message,
+              },
+            };
+          }
+          throw e;
         }
-        return { status: 200, body: { ok: false, error: r.message } };
       }
 
       if (method === 'POST' && path === '/api/login') {
@@ -1132,6 +1151,10 @@ export function createApiHandler(deps: ApiDeps): ApiHandler {
               // 这也是「官方登录时刻」应该被刷新的时刻（与是否有 localStorage 快照无关）。
               // 'cookie-import' 不算：那是用户从别处拷来的凭据，不是刚发生的登录。
               freshLogin: authMethod === 'browser',
+              // 「一键重登」：登录返回到**原有账号**，并保留课程勾选/改名 —— 不另起账号。
+              ...(typeof body.targetAccountId === 'string' && body.targetAccountId
+                ? { accountId: body.targetAccountId, preserveCourseSelection: true }
+                : {}),
             });
           } catch (e) {
             // 撞墓碑：这个账号此前被用户移除过。
