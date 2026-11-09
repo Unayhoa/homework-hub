@@ -79,3 +79,16 @@ export function looksLikeAuthWall(html: string): boolean {
   const head = html.slice(0, 4000);
   return /name=["']?(uname|password|pwd)["']?/i.test(head) || /(登录|扫码登录|请先登录|安全验证|拖动滑块)/.test(head);
 }
+
+/**
+ * 【错误定位，调试期保留】说明 looksLikeAuthWall 到底是被哪个特征触发的。
+ * 强特征（登录输入框 / 安全验证 / 滑块）几乎必然是登录墙；
+ * 弱特征（正文里出现「登录」二字）可能是正常页面误判 —— 两者的处置完全不同。
+ */
+export function authWallSignal(html: string): 'input' | 'verify' | 'weak-login' | '' {
+  const head = html.slice(0, 4000);
+  if (/name=["']?(uname|password|pwd)["']?/i.test(head)) return 'input';
+  if (/(扫码登录|请先登录|安全验证|拖动滑块)/.test(head)) return 'verify';
+  if (/登录/.test(head)) return 'weak-login';
+  return '';
+}

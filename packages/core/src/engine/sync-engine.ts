@@ -673,9 +673,19 @@ export class SyncEngine {
       });
       return await this.#syncAccountInner(account, { ...opts, reloginAttempted: true });
     } catch (e) {
-      const msg = `自动重新登录失败：${(e as Error).message ?? String(e)}`;
+      const loginErr = toHubError(e, account.platformId);
+      const why =
+        loginErr.details && typeof loginErr.details.why === 'string'
+          ? String(loginErr.details.why)
+          : undefined;
+      const msg = `自动重新登录失败（${loginErr.code}）：${loginErr.message ?? String(e)}`;
       this.#logger.warn('自动重新登录失败', { platformId: account.platformId, error: msg });
-      return { ...report, message: msg };
+      await this.#markAccount(account, 'auth-required', msg, loginErr.code).catch(() => {});
+      // 【错误定位，调试期保留】把登录失败的实测细节放进 detail 并**重新写一条日志**，
+      // 否则用户看到的还是首轮那条（无 detail）——这就是"没有可展开的排查信息"的原因之一。
+      const failedReport = { ...report, message: msg, ...(why ? { detail: why } : {}) };
+      await this.#recordLog(failedReport).catch(() => {});
+      return failedReport;
     }
   }
 
@@ -1473,8 +1483,16 @@ export class SyncEngine {
         }
         const note = recovery.note;
         const msg = this.#authMessage(err.message, session, adapter) + (note ? ` 〔${note}〕` : '');
+        // 【错误定位，调试期保留】把适配器给的诊断细节（HTTP 状态/验证码/首门课错误）
+        // 放进 detail，让同步日志里出现可展开的「排查信息」—— 否则用户只看到一句定性的话。
+        const errDetail =
+          err.details && typeof err.details.why === 'string' ? String(err.details.why) : undefined;
         await this.#markAccount(account, 'auth-required', msg, err.code);
-        return finish('auth-required', { courses: courses.length, fetched: collected.length }, msg);
+        return finish(
+          'auth-required',
+          { courses: courses.length, fetched: collected.length, ...(errDetail ? { detail: errDetail } : {}) },
+          msg,
+        );
       }
 
       if (collected.length === 0) {

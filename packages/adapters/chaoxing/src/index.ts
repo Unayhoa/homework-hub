@@ -42,6 +42,7 @@ import { normalizeTitle } from '#core/domain/ids.ts';
 import { SessionHttpClient } from '#core/engine/session-http.ts';
 import { mapLimit } from '#core/engine/http-pipeline.ts';
 import {
+  authWallSignal,
   firstGroup,
   looksLikeAuthWall,
   matchAll,
@@ -287,12 +288,20 @@ export class ChaoxingAdapter implements PlatformAdapter {
       if (looksLikeAuthWall(text)) {
         throw new HubError(
           'CAPTCHA_REQUIRED',
-          `超星返回了登录/验证页面（HTTP ${res.status}，首段：${head}），` +
-            '可能是账号密码错误或触发了图形验证码。建议改用「手动粘贴 Cookie」方式登录。',
-          { platformId: this.id, requiresUserAction: true },
+          `超星登录返回了登录/验证页面（HTTP ${res.status}），可能是账号密码错误或触发了图形验证码。` +
+            '建议改用「手动粘贴 Cookie」方式登录。',
+          {
+            platformId: this.id,
+            requiresUserAction: true,
+            details: {
+              why:
+                `登录接口：HTTP ${res.status} len=${text.length} ` +
+                `信号=${authWallSignal(text) || '无'} 首段=${text.replace(/\s+/g, ' ').slice(0, 160)}`,
+            },
+          },
         );
       }
-      throw schemaDrift(this.id, `登录接口返回非 JSON（HTTP ${res.status}）：${head}`);
+      throw schemaDrift(this.id, `登录接口返回非 JSON（HTTP ${res.status}）：${text.replace(/\s+/g, ' ').slice(0, 160)}`);
     }
 
     const ok = parsed.status === true || parsed.status === 1;
@@ -722,23 +731,32 @@ export class ChaoxingAdapter implements PlatformAdapter {
         ? `连续 ${FAIL_FAST_STREAK} 门课程都返回登录页，已检查 ${abortedAt}/${courses.length} 门后提前中止` +
           '（避免继续发送无效请求）。再点一次同步会自动跑完整诊断。'
         : `已完整检查全部 ${courses.length} 门课程，全部返回登录页`;
-      // 【错误定位，调试期保留】把「登录页」的具体特征（HTTP 状态 / 验证码 / 响应首段）带上，
-      // 否则「疑似会话失效」和「被验证码拦下」在用户看来一模一样，无法判断该重登还是该等。
-      const hintText = this.#lastAuthWallHint ? `；实测特征：${this.#lastAuthWallHint}` : '';
+      // 诊断细节（实测特征 + 首门课错误）单独放进 details.why → 同步日志「排查信息」可展开查看；
+      // message 保持简洁（一行定性），不把技术细节塞进弹窗。
+      const firstErr = (errors[0] ?? '').slice(0, 400);
+      const why =
+        (this.#lastAuthWallHint ? `实测特征：${this.#lastAuthWallHint}` : '实测特征：无（未命中登录墙分支）') +
+        (firstErr ? `\n首门课错误：${firstErr}` : '') +
+        (diag.filter((d) => /登录页|会话|验证|401|403/.test(d)).length
+          ? `\n命中登录墙的课程：${diag.filter((d) => /登录页|会话|验证|401|403/.test(d)).slice(0, 5).join('；')}`
+          : '');
       throw new HubError(
         authLike ? 'AUTH_REQUIRED' : 'UPSTREAM',
         authLike
-          ? `疑似学习通会话已失效：${evidence}${hintText}` +
+          ? `疑似学习通会话已失效：${evidence}` +
             '若该账号是用「账号密码」添加的，会自动重新登录并重试；' +
             '若是「应用内登录」添加的，请到「登录平台」重新登录一次。' +
-            '（这是基于响应特征的判断，也可能是部分课程需要单独授权——完整诊断会给出每门课的结果）'
+            '（这是基于响应特征的判断，也可能是部分课程需要单独授权——展开「排查信息」看每门课的结果）'
           : `学习通：${courses.length} 门课程全部解析出 0 条作业/考试。` +
-            `这不是「没有作业」，更可能是接口参数或解析问题。各课程结果：${diag.concat(errors).slice(0, 4).join('；')}`,
+            `这不是「没有作业」，更可能是接口参数或解析问题。`,
         {
           platformId: this.id,
           requiresUserAction: authLike,
-          // 打上标记 → 引擎记游标 → 下次同步自动跑完整诊断
-          details: aborted ? { failFast: true, checked: abortedAt, total: courses.length } : undefined,
+          // failFast 标记 → 引擎记游标 → 下次自动跑完整诊断；why → 日志可展开的诊断细节
+          details: {
+            ...(aborted ? { failFast: true, checked: abortedAt, total: courses.length } : {}),
+            why,
+          },
         },
       );
     }
@@ -864,8 +882,10 @@ export class ChaoxingAdapter implements PlatformAdapter {
       // 【错误定位，调试期保留】把 HTTP 状态、响应长度、首段特征写进 lastAuthWallHint，
       // 供上层把「疑似会话失效」细化成「HTTP 200 + 验证码页 / 302 / 登录页」。
       const head = text.replace(/\s+/g, ' ').slice(0, 120);
+      const sig = authWallSignal(text);
       const hint =
         `HTTP ${res.status} len=${text.length} ` +
+        `信号=${sig || '无'} ` +
         (/验证码|captcha|vcode|verify/i.test(text)
           ? '含验证码'
           : /登录|login|passport/i.test(text)
@@ -924,6 +944,11 @@ export class ChaoxingAdapter implements PlatformAdapter {
       });
       const text = await res.text();
       if (looksLikeAuthWall(text)) {
+        // 【错误定位，调试期保留】考试列表也记录实测特征，覆盖「作业没墙、考试被墙」的情况
+        const head = text.replace(/\s+/g, ' ').slice(0, 120);
+        this.#lastAuthWallHint =
+          `考试列表：HTTP ${res.status} len=${text.length} ` +
+          (/验证码|captcha|vcode|verify/i.test(text) ? '含验证码' : /登录|login|passport/i.test(text) ? '含登录页' : `首段=${head}`);
         throw new HubError('AUTH_REQUIRED', '考试列表返回登录页，会话已失效', {
           platformId: this.id,
           requiresUserAction: true,
