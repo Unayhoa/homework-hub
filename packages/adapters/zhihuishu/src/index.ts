@@ -177,10 +177,21 @@ export class ZhihuishuAdapter implements PlatformAdapter {
     intervalMs: 20 * 60 * 1000,
   };
 
+  /**
+   * 会话失效时的可能原因，按可能性从高到低（仿 iSmart 的归因原则：顺序直接决定
+   * 用户下一步做什么，把罕见原因放前面会让人以为账号被盗）。
+   *
+   * 智慧树是 **cookie-only 多域会话**（onlineservice-api / hike-teaching / hiexam-server /
+   * stuonline … 各自独立 cookie），没有可续期 ticket。实际排查中最常见的是：
+   *   1. 手机深睡没联网 → 某次请求失败后会话闲置作废（与 iSmart 同类主因）；
+   *   2. 平台侧会话到期（cookie 有效期耗尽）；
+   *   3. 在别处登录把本机顶下线。
+   * 具体是哪一种，由 recoverSession 的逐域探活证据判定，不靠猜。
+   */
   readonly sessionExpiryCauses = [
-    '智慧树登录态靠 cookie 维持，长时间不用会过期',
-    '你在别处退出登录或换了账号',
-    '平台要求重新验证（短信/图形验证码）',
+    '手机在深睡时没给本应用联网，那段空档里会话闲置作废（参见「账号」页后台保活的「未测成」）',
+    '智慧树的 cookie 有效期到了（平台侧会话到期，需在官方页面重新登录）',
+    '你在别处登录或主动退出了',
   ];
 
   constructor(opts: ZhihuishuAdapterOptions = {}) {
@@ -229,6 +240,111 @@ export class ZhihuishuAdapter implements PlatformAdapter {
       // 探活只回答「还能不能用」；任何不能解析的形态都视为失效
       return false;
     }
+  }
+
+  /**
+   * 【定位根因】逐域探活：智慧树的会话由多个域各自独立的 cookie 组成，掉登录时
+   * 必须区分「全域失效」还是「只有某个子域掉了」。仿 iSmart 的做法：在失效那一刻
+   * 把每一层域的实测证据（HTTP 状态 / 业务 code / 响应首段）收集起来，交给上层归因。
+   *
+   * 只打最便宜的只读接口，绝不拉业务数据：
+   *   · onlineservice-api  → getLoginUserInfo（主会话，决定 uuid）
+   *   · hike-teaching      → getStudentCourseList（课程）
+   *   · hiexam-server      → homeworkUser/List（作业，不带课程 → 只看是否被登出）
+   */
+  async diagnoseDomains(
+    ctx: AdapterContext,
+    session: Session,
+  ): Promise<Array<{ domain: string; ok: boolean; detail: string }>> {
+    const http = new SessionHttpClient(ctx, session);
+    const now = ctx.clock.nowMs();
+    const probes: Array<{ domain: string; url: string; judge: (status: number, text: string) => boolean }> = [
+      {
+        domain: 'onlineservice-api（主会话/uuid）',
+        url: `${this.#ep.userInfo}?time=${now}`,
+        judge: (_s, t) => Number((JSON.parse(t || '{}') as { code?: unknown }).code) === 200,
+      },
+      {
+        domain: 'hike-teaching（课程列表）',
+        url: `${this.#ep.courseList}?year=&term=&uuid=probe&dateFormate=${now}`,
+        judge: (_s, t) => /"rt"\s*:\s*\{/.test(t) || /"status"\s*:\s*"?200/.test(t),
+      },
+      {
+        domain: 'hiexam-server（作业列表）',
+        url: `${this.#ep.homeworkList}?courseId=0&pageIndex=1&pageSize=1&key=&completeTab=0&uuid=probe&dateFormate=${now}`,
+        judge: (_s, t) => /"rt"\s*:/.test(t),
+      },
+    ];
+    const out: Array<{ domain: string; ok: boolean; detail: string }> = [];
+    for (const p of probes) {
+      try {
+        const res = await http.request({ url: p.url, method: 'GET' });
+        const text = await res.text().catch(() => '');
+        const head = text.replace(/\s+/g, ' ').slice(0, 100);
+        const loggedOut = res.status === 401 || res.status === 403 || /"code"\s*:\s*(401|403)|未登录|请登录|login/i.test(text.slice(0, 2000));
+        let ok: boolean;
+        try {
+          ok = p.judge(res.status, text);
+        } catch {
+          ok = false;
+        }
+        out.push({
+          domain: p.domain,
+          ok,
+          detail: `HTTP ${res.status} ${loggedOut ? '判定=未登录 ' : ''}首段=${head}`,
+        });
+      } catch (e) {
+        // 网络/通道问题：明确区别于「会话失效」
+        out.push({ domain: p.domain, ok: false, detail: `通道错误（网络/DNS）：${String((e as Error).message ?? e).slice(0, 80)}` });
+      }
+    }
+    return out;
+  }
+
+  /**
+   * 会话失效时的自动恢复尝试。
+   *
+   * 智慧树是 cookie-only，没有 iSmart 那样的可续期 ticket —— 我们**无法**在这里
+   * 替用户重登（那需要账号密码或官方页面）。所以这个方法不做恢复，只做**归因**：
+   * 调 diagnoseDomains 逐域取证，告诉上层「是全灭、还是某个子域掉了、还是没网」，
+   * 让同步日志能直接写清根因，而不是笼统一句「登录已失效」。
+   */
+  async recoverSession(
+    ctx: AdapterContext,
+    session: Session,
+  ): Promise<{
+    recovered: boolean;
+    note?: string;
+    diagnosis?: 'recovered' | 'ticket-expired' | 'mechanism' | 'channel';
+  }> {
+    const rows = await this.diagnoseDomains(ctx, session);
+    const anyOk = rows.some((r) => r.ok);
+    const allNetwork = rows.every((r) => /通道错误/.test(r.detail));
+    const detail = rows.map((r) => `${r.domain}:${r.ok ? '正常' : '失效'}（${r.detail}）`).join('；');
+
+    if (allNetwork) {
+      return {
+        recovered: false,
+        diagnosis: 'channel',
+        note:
+          `逐域探活全部是通道错误（网络/DNS 没测成），**不是会话失效**。${detail}`,
+      };
+    }
+    if (anyOk) {
+      // 还有域能用 → 不是全域登出，是部分子域 cookie 掉了 / 平台风控只拦了某域
+      return {
+        recovered: false,
+        diagnosis: 'mechanism',
+        note:
+          `部分域仍可用，但主链路需要的域已失效 —— 属于「部分 cookie 掉线」，不是账号被登出。${detail}`,
+      };
+    }
+    return {
+      recovered: false,
+      diagnosis: 'ticket-expired',
+      note:
+        `所有域都判定未登录：会话确实已整体失效（cookie-only，App 无法自动续期，需在官方页面重新登录）。${detail}`,
+    };
   }
 
   async fetchCourses(ctx: AdapterContext, session: Session, _req?: FetchCoursesRequest): Promise<Page<PlatformCourse>> {
@@ -707,6 +823,17 @@ export class ZhihuishuAdapter implements PlatformAdapter {
     }
     if (!res.body || typeof res.body !== 'object') {
       throw new HubError('UPSTREAM', '智慧树返回的不是 JSON（可能需要重新登录）', {
+        platformId: this.id,
+        requiresUserAction: true,
+      });
+    }
+    // 智慧树很多接口是 **HTTP 200 + 业务 code=401/403**（真机实证）。
+    // 只判 HTTP 状态会把它当 UPSTREAM，从而**不触发逐域定位**，也就查不出根因。
+    // 这里把业务层的未登录也归成 AUTH_REQUIRED，和 HTTP 401/403 走同一条排查路径。
+    const bcode = Number((res.body as { code?: unknown; status?: unknown }).code ?? (res.body as { status?: unknown }).status);
+    const bmsg = String((res.body as { message?: unknown; msg?: unknown }).message ?? (res.body as { msg?: unknown }).msg ?? '');
+    if ((bcode === 401 || bcode === 403) || (/未登录|请登录|重新登录|会话.*失效/.test(bmsg) && !('rt' in res.body))) {
+      throw new HubError('AUTH_REQUIRED', `智慧树会话已失效（业务层未登录 code=${bcode || '空'} ${bmsg.slice(0, 40)}）`, {
         platformId: this.id,
         requiresUserAction: true,
       });

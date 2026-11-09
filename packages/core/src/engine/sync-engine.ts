@@ -1558,11 +1558,13 @@ export class SyncEngine {
           return finish('partial', { courses: courses.length, fetched: collected.length }, msg);
         }
         const note = recovery.note;
-        const msg = this.#authMessage(err.message, session, adapter) + (note ? ` 〔${note}〕` : '');
-        // 【错误定位，调试期保留】把适配器给的诊断细节（HTTP 状态/验证码/首门课错误）
-        // 放进 detail，让同步日志里出现可展开的「排查信息」—— 否则用户只看到一句定性的话。
-        const errDetail =
-          err.details && typeof err.details.why === 'string' ? String(err.details.why) : undefined;
+        // message 只放一句定性 + 归因结论（短）；逐域实测证据（长）放进 detail 供展开查看。
+        const msg = this.#authMessage(err.message, session, adapter) + (note ? ` 〔${note.slice(0, 200)}〕` : '');
+        // 把「适配器给的诊断细节」+「自动恢复/归因的逐域证据」一起放进可展开的「排查信息」。
+        const detailParts: string[] = [];
+        if (err.details && typeof err.details.why === 'string') detailParts.push(String(err.details.why));
+        if (note) detailParts.push(`自动恢复结论：${note}`);
+        const errDetail = detailParts.length > 0 ? detailParts.join('\n') : undefined;
         await this.#markAccount(account, 'auth-required', msg, err.code);
         return finish(
           'auth-required',
