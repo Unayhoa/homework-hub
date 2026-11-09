@@ -11,7 +11,7 @@ $ node apps/cli/src/main.ts demo
 
 $ npm test
 ...
-tests 589 / pass 589 / fail 0
+tests 590 / pass 590 / fail 0
 ```
 
 ## 功能与验证状态
@@ -285,7 +285,7 @@ cd homework-hub
 # 复现改版、限流、会话失效、任务增删改，逐条断言引擎的处理是否正确
 node apps/cli/src/main.ts demo
 
-# 单元测试（589 项）
+# 单元测试（590 项）
 npm test
 
 # 查看支持的平台与能力矩阵
@@ -443,6 +443,7 @@ HH_LOG=debug HH_TRACE=1 node apps/cli/src/main.ts sync --dry-run
 3. **删除判定必须能容忍上游抖动。**
    分页请求失败、临时风控都会让某一轮「少看到」任务，立刻删库会让作业一闪一闪。
    → 连续缺席 N 轮才软删除；数据不完整时整轮禁用删除判定。
+
 
 
 

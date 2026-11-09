@@ -829,7 +829,19 @@ export class SyncEngine {
     if (this.#progressInFlight.has(accountId)) return undefined;
 
     const last = await this.courseProgressFetchedAt(accountId);
-    if (last && this.#clock.now().getTime() - new Date(last).getTime() < ttlMs) return undefined;
+    if (last && this.#clock.now().getTime() - new Date(last).getTime() < ttlMs) {
+      // 任务点数据虽然新鲜，但共享课的**平时分**是后加的字段：老数据里没有 grade，
+      // 而 24h TTL 内不会重抓，用户会一直看不到平时分。这里额外判一次「有共享课
+      // 却还没有 grade」，命中就重抓一轮（只影响共享课那种带 recruitId 的课程）。
+      const fresh = await this.#store.listCourses([accountId]);
+      const missingGrade = fresh.some(
+        (c) =>
+          (c.raw as { recruitId?: unknown } | undefined)?.recruitId !== undefined &&
+          c.taskPoints &&
+          !c.grade,
+      );
+      if (!missingGrade) return undefined;
+    }
 
     return this.refreshCourseProgress(accountId);
   }
@@ -1192,6 +1204,11 @@ export class SyncEngine {
       const internalIdOf = (c: { platformCourseId: string }) =>
         makeCourseId(account.platformId, account.id, c.platformCourseId);
       crawlableCourses = crawlableCourses.filter((c) => {
+        // 共享课永远不跳：它的「任务点全部完成」不等于「没有作业/考试」。
+        // 任务点(视频)和作业/章节测验/见面课/期末是两套独立数据（2026-11-09 真机：
+        // 心理健康 78/78 视频看完，但仍有 8 条测验 + 1 场期末考试）。跳过它就会
+        // 让这些条目永远抓不到。
+        if ((c.raw as { recruitId?: unknown } | undefined)?.recruitId !== undefined) return true;
         // UnifiedTask.courseId 是内部 ID（makeCourseId），不是平台原始 ID —— 键要对齐
         const ts = byCourse.get(internalIdOf(c));
         if (!ts || ts.length === 0) return true; // 库里没数据 → 必须爬
@@ -1200,7 +1217,7 @@ export class SyncEngine {
         if (!last || nowMs - new Date(last).getTime() >= skipTtlMs) return true; // TTL 已过 → 重爬
         return false;
       });
-      skippedCourseCount = courses.length - crawlableCourses.length;
+      skippedCourseCount = crawlableCourses.length === courses.length ? 0 : courses.length - crawlableCourses.length;
       if (skippedCourseCount > 0) {
         log.info('跳过已全部完成的课程（TTL 内）', {
           skipped: skippedCourseCount,
@@ -1216,6 +1233,9 @@ export class SyncEngine {
       // 满足这三条的课程，考试/测验的时间窗早已关闭，不可能再冒出新的。
       quietCourseIds = crawlableCourses
         .filter((c) => {
+          // 共享课不判静默：同一理由 —— 视频看完 ≠ 没有待考的测验/考试。
+          // quietCourseIds 会让适配器跳过考试探测请求，这对共享课是错的。
+          if ((c.raw as { recruitId?: unknown } | undefined)?.recruitId !== undefined) return false;
           const ts = byCourse.get(internalIdOf(c));
           if (!ts || ts.length === 0) return false;
           if (!ts.every((t) => isTerminal(t.status))) return false;
