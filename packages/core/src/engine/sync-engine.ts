@@ -572,15 +572,10 @@ export class SyncEngine {
         return await this.syncAccount(account, opts);
       } catch (e) {
         const err = toHubError(e, account.platformId);
-        const rawErr = e as Error & { name?: string; stack?: string };
-        const locator = `[err-locator] 顶层未捕获 ${rawErr?.name ?? 'Error'}: ${String(
-          rawErr?.message ?? e,
-        ).slice(0, 200)}`;
         this.#logger.error('单账号同步抛出未捕获异常（已隔离，不影响其它账号）', {
           platformId: account.platformId,
           accountId: account.id,
           error: describe(e),
-          stack: rawErr?.stack?.split('\n').slice(0, 5).join(' | '),
         });
         const report: AccountSyncReport = {
           accountId: account.id,
@@ -597,7 +592,6 @@ export class SyncEngine {
           events: [],
           status: 'failed',
           message: `同步中断：${String(err.message ?? e).slice(0, 400)}`,
-          detail: locator.slice(0, 600),
           http: createHttpStats(),
           readOnly: createReadOnlyGuardStats(),
           sessionOrigin: 'derived',
@@ -1060,30 +1054,15 @@ export class SyncEngine {
 
   /** 单账号同步主体。所有异常在这里被转成报告，绝不向外抛。 */
   /**
-   * 【错误定位包装，彻底修好后可并入 #syncAccountInner】
-   *
-   * 单独包一层的原因：真机上智慧树某一步抛了未捕获异常（表现 Invalid string length），
-   * 而报告里只有「请求 0 / 拉取 0」，无法判断死在哪一步。这层把异常兜住，
-   * 并把 `phase` 写进 message/detail —— 用户就能在同步日志里看到具体阶段。
+   * 单账号同步：兜住未捕获异常，避免一个账号把整轮同步带崩（异常必须变成该账号
+   * 一条 failed 报告 + 一条日志，其它账号照常完成）。
    */
   async #syncAccountInner(account: PlatformAccount, opts: SyncOptions): Promise<AccountSyncReport> {
     try {
       return await this.#syncAccountBody(account, opts);
     } catch (e) {
       const err = toHubError(e, account.platformId);
-      const rawErr = e as Error & { name?: string; stack?: string };
-      const phase = (this as unknown as { __curPhase?: string }).__curPhase ?? '未知阶段';
-      (this as unknown as { __curPhase?: string }).__curPhase = undefined;
-      const locator =
-        `[err-locator] ${rawErr?.name ?? 'Error'}: ${String(rawErr?.message ?? e).slice(0, 160)} ` +
-        `（阶段=${phase}）` +
-        (rawErr?.stack ? `\n${rawErr.stack.split('\n').slice(1, 4).join('\n')}` : '');
-      this.#logger.error('单账号同步未捕获异常', {
-        platformId: account.platformId,
-        accountId: account.id,
-        phase,
-        error: describe(e),
-      });
+      this.#logger.error('单账号同步未捕获异常', { platformId: account.platformId, accountId: account.id, error: describe(e) });
       const report: AccountSyncReport = {
         accountId: account.id,
         platformId: account.platformId,
@@ -1098,8 +1077,8 @@ export class SyncEngine {
         reminders: [],
         events: [],
         status: 'failed',
-        message: `同步中断（${phase}）：${String(err.message ?? e).slice(0, 300)}`,
-        detail: locator.slice(0, 900),
+        message: `同步中断：${String(err.message ?? e).slice(0, 300)}`,
+        detail: undefined,
         http: createHttpStats(),
         readOnly: createReadOnlyGuardStats(),
         sessionOrigin: 'derived',
@@ -1118,9 +1097,6 @@ export class SyncEngine {
     const guardStats = createReadOnlyGuardStats();
     const now = this.#clock.now();
     const adapter = this.#registry.get(account.platformId);
-    // 【错误定位】当前执行到哪一步。若抛未捕获异常，这个字段会写进日志的 detail，
-    // 让「请求 0、拉取 0」这种没有上下文的失败能落到具体阶段。彻底修好后随 [err-locator] 一起删。
-    const phaseRef = { value: 'init' };
 
     // 会话来源在读到会话之后才能确定，但 finish() 有可能在此之前就被调用，
     // 所以用可变引用 + 保守默认值（derived = 不假设用户自己带来的）。
@@ -1170,11 +1146,6 @@ export class SyncEngine {
 
     const ctx = this.#contextFor(account.platformId, account.id, stats, opts.retry, guardStats);
     const log = ctx.logger;
-    // 【错误定位】给当前异常打阶段标签（供 #syncAccountInner 的兜底捕获读取）
-    const markPhase = (p: string) => {
-      (this as unknown as { __curPhase?: string }).__curPhase = p;
-    };
-    markPhase('加载会话');
 
     const session = await this.#vault.load(account.id);
     if (!session) {
@@ -1208,7 +1179,6 @@ export class SyncEngine {
     }
 
     // ---- 课程（较稳定，可缓存） ----
-    markPhase('拉取课程');
     let courses = await this.#store.listCourses([account.id]);
     const courseTtl = opts.courseTtlMs ?? 12 * 60 * 60 * 1000;
     const courseAge = account.lastSyncAt ? now.getTime() - new Date(account.lastSyncAt).getTime() : Infinity;
@@ -1458,7 +1428,6 @@ export class SyncEngine {
             quietCourseIds,
             ...(knownStartsAt ? { knownStartsAt } : {}),
           };
-        markPhase('抓取作业/考试');
         const page = await adapter.fetchTasks(ctx, session, req);
         declaredTotal = page.declaredTotal ?? declaredTotal;
         collected.push(...page.items);
@@ -1476,20 +1445,6 @@ export class SyncEngine {
     } catch (e) {
       pageError = e;
       const err = toHubError(e, account.platformId);
-      // 【错误定位，临时保留】把真实异常全貌写进 details：
-      // 「Invalid string length」这类错误信息里没有任何上下文，只有原始 name/stack
-      // 和当时在跑的 URL 才能定位。彻底修掉（原生侧已加体积闸门）后再删这段。
-      const rawErr = e as Error & { name?: string; stack?: string };
-      const locator = [
-        `[err-locator] ${rawErr?.name ?? 'Error'}: ${String(rawErr?.message ?? e).slice(0, 200)}`,
-        ...(rawErr?.stack
-          ? rawErr.stack.split('\n').slice(0, 4).map((s) => `  at ${s.trim()}`)
-          : []),
-      ];
-      this.#logger.warn('同步异常全貌（错误定位）', { platformId: account.platformId, locator });
-      // 同时进「排查信息」：真机上用户能看到的就是这一栏，日志页看不到 logcat。
-      // 定位完成后（原生侧体积闸门已生效）再删掉这两个 [err-locator] 行。
-      adapterDetails.push(...locator);
       // 只有「会话 / 验证码」类问题才立刻中止并标记 auth-required。
       // 平台改版（SCHEMA_DRIFT）同样严重，但它不是登录问题 ——
       // 混为一谈会让 UI 弹出「请重新登录」这种完全误导人的提示。

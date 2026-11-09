@@ -395,6 +395,22 @@ final class KeepAliveScheduler {
             o.put("nextAtMs", prefs(ctx).getLong(KEY_NEXT, 0L));
             o.put("sessionFailures", sessionFailures);
             o.put("unreachable", unreachable);
+            // 当前到底在保活哪些平台（来自配置里的 probes）。界面据此显示
+            // 「正在保活：iSmart、智慧树」而不是笼统地写死某一个平台的名字。
+            JSONArray platforms = new JSONArray();
+            JSONObject cfg = config(ctx);
+            JSONArray probesCfg = cfg == null ? null : cfg.optJSONArray("probes");
+            if (probesCfg != null) {
+                java.util.Set<String> seen = new java.util.LinkedHashSet<>();
+                for (int i = 0; i < probesCfg.length(); i++) {
+                    JSONObject p = probesCfg.optJSONObject(i);
+                    if (p == null) continue;
+                    String pid = p.optString("platformId", "");
+                    if (!pid.isEmpty()) seen.add(pid);
+                }
+                for (String pid : seen) platforms.put(pid);
+            }
+            o.put("platforms", platforms);
             o.put("log", log);
             return o.toString();
         } catch (Exception e) {

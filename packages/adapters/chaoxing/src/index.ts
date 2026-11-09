@@ -163,6 +163,8 @@ export class ChaoxingAdapter implements PlatformAdapter {
    * 只进日志 / 界面的诊断提示，不参与业务判断；一次解析最多十几条。
    */
   #resolveTrace: string[] = [];
+  /** 【错误定位，调试期保留】最近一次「作业/考试列表返回登录页」的具体特征（HTTP 状态 + 响应片段） */
+  #lastAuthWallHint = '';
 
   readonly capabilities: AdapterCapabilities = {
     courses: true,
@@ -277,25 +279,29 @@ export class ChaoxingAdapter implements PlatformAdapter {
     try {
       parsed = JSON.parse(text) as typeof parsed;
     } catch {
+      // 【错误定位，调试期保留】把登录接口的 HTTP 状态与响应首段一并抛出，
+      // 区分「密码错」「验证码」「接口改版」—— 否则只有一句"登录失败"。
+      const head = text.replace(/\s+/g, ' ').slice(0, 160);
       // 返回 HTML 说明大概率被验证码/风控拦住了。这是超星最常见的失败形态，
       // 必须给出可操作的提示，而不是一句「登录失败」。
       if (looksLikeAuthWall(text)) {
         throw new HubError(
           'CAPTCHA_REQUIRED',
-          '超星返回了登录/验证页面，可能是账号密码错误或触发了图形验证码。' +
-            '建议改用「手动粘贴 Cookie」方式登录。',
+          `超星返回了登录/验证页面（HTTP ${res.status}，首段：${head}），` +
+            '可能是账号密码错误或触发了图形验证码。建议改用「手动粘贴 Cookie」方式登录。',
           { platformId: this.id, requiresUserAction: true },
         );
       }
-      throw schemaDrift(this.id, `登录接口返回非 JSON：${text.slice(0, 160)}`);
+      throw schemaDrift(this.id, `登录接口返回非 JSON（HTTP ${res.status}）：${head}`);
     }
 
     const ok = parsed.status === true || parsed.status === 1;
     if (!ok) {
-      throw new HubError('AUTH_FAILED', `超星登录失败：${parsed.msg ?? parsed.message ?? '账号或密码错误'}`, {
-        platformId: this.id,
-        requiresUserAction: true,
-      });
+      throw new HubError(
+        'AUTH_FAILED',
+        `超星登录失败（HTTP ${res.status}）：${parsed.msg ?? parsed.message ?? '账号或密码错误'}`,
+        { platformId: this.id, requiresUserAction: true },
+      );
     }
 
     // 注意：不要用「session.cookies 是否为空」判断风控 ——
@@ -716,10 +722,13 @@ export class ChaoxingAdapter implements PlatformAdapter {
         ? `连续 ${FAIL_FAST_STREAK} 门课程都返回登录页，已检查 ${abortedAt}/${courses.length} 门后提前中止` +
           '（避免继续发送无效请求）。再点一次同步会自动跑完整诊断。'
         : `已完整检查全部 ${courses.length} 门课程，全部返回登录页`;
+      // 【错误定位，调试期保留】把「登录页」的具体特征（HTTP 状态 / 验证码 / 响应首段）带上，
+      // 否则「疑似会话失效」和「被验证码拦下」在用户看来一模一样，无法判断该重登还是该等。
+      const hintText = this.#lastAuthWallHint ? `；实测特征：${this.#lastAuthWallHint}` : '';
       throw new HubError(
         authLike ? 'AUTH_REQUIRED' : 'UPSTREAM',
         authLike
-          ? `疑似学习通会话已失效：${evidence}` +
+          ? `疑似学习通会话已失效：${evidence}${hintText}` +
             '若该账号是用「账号密码」添加的，会自动重新登录并重试；' +
             '若是「应用内登录」添加的，请到「登录平台」重新登录一次。' +
             '（这是基于响应特征的判断，也可能是部分课程需要单独授权——完整诊断会给出每门课的结果）'
@@ -852,6 +861,17 @@ export class ChaoxingAdapter implements PlatformAdapter {
     });
     const text = await res.text();
     if (looksLikeAuthWall(text)) {
+      // 【错误定位，调试期保留】把 HTTP 状态、响应长度、首段特征写进 lastAuthWallHint，
+      // 供上层把「疑似会话失效」细化成「HTTP 200 + 验证码页 / 302 / 登录页」。
+      const head = text.replace(/\s+/g, ' ').slice(0, 120);
+      const hint =
+        `HTTP ${res.status} len=${text.length} ` +
+        (/验证码|captcha|vcode|verify/i.test(text)
+          ? '含验证码'
+          : /登录|login|passport/i.test(text)
+            ? '含登录页'
+            : `首段=${head}`);
+      this.#lastAuthWallHint = `${kind === 'exam' ? '考试' : '作业'}列表：${hint}`;
       throw new HubError('AUTH_REQUIRED', `${kind === 'exam' ? '考试' : '作业'}列表返回登录页，会话已失效`, {
         platformId: this.id,
         requiresUserAction: true,

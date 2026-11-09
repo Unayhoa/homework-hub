@@ -1836,11 +1836,21 @@ async function renderKeepAlive() {
 
   const stat =
     probes === 0
-      ? '当前没有需要保活的平台（只对 iSmart 这类服务端会话的平台启用）。'
+      ? '当前没有需要保活的平台（只对 iSmart、智慧树这类服务端会话的平台启用）。'
       : `已探测 ${log.length} 次 · 会话失效 ${sessionFailures} 次` +
         (unreachable > 0 ? ` · 未测成 ${unreachable} 次` : '') +
         ` · 每 ${intervalMin} 分钟一次` +
         (nextAt > Date.now() ? ` · 下次 ${tOf(nextAt)}` : '');
+
+  // 正在保活哪些平台：来自原生 state.platforms（配置里 probes 的 platformId 去重）。
+  // 之前文案写死「iSmart」，而实际智慧树也在这个清单里 —— 会让用户误以为智慧树没被保活。
+  const platformNames = Array.isArray(st.platforms)
+    ? st.platforms.map((id) => platformDisplayName(id)).filter(Boolean)
+    : [];
+  const whichText =
+    platformNames.length > 0
+      ? `正在保活：${platformNames.join('、')}。`
+      : '当前没有需要保活的平台。';
 
   // 电池优化白名单：它和应用级的「自启动 / 允许后台运行 / 不优化耗电」是**两套机制**
   // （真机上那几个开关全部放行，夜里请求仍然发不出去）。
@@ -1898,9 +1908,9 @@ async function renderKeepAlive() {
         <span>${st.enabled ? '已开启' : '已关闭'}</span>
       </label>
     </div>
-    <div class="muted">每 ${intervalMin} 分钟发 1 个只读探活请求，
-      让 iSmart 的登录不会因为长时间没有请求而失效。关掉后不再有任何后台请求。</div>
-    <div class="ka-stat">${escapeHtml(stat)}</div>
+    <div class="muted">每 ${intervalMin} 分钟发 1 个只读探活请求，让服务端会话（iSmart / 智慧树）
+      不会因为长时间没有请求而失效。关掉后不再有任何后台请求。</div>
+    <div class="ka-stat">${escapeHtml(whichText)} ${escapeHtml(stat)}</div>
     ${batteryRow}
     <div class="ka-action"><button class="ka-btn" id="kaSysSettings">打开电池设置</button></div>
     ${tip}
