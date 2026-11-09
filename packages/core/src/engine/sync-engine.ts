@@ -671,7 +671,22 @@ export class SyncEngine {
         platformId: account.platformId,
         accountId: account.id,
       });
-      return await this.#syncAccountInner(account, { ...opts, reloginAttempted: true });
+      // 重试一轮。若重登「成功」但重试后仍然 auth-required，说明登录接口返回成功、
+      // 会话却没真正建立（学习通 2026-11-09 真机：fanyalogin status:true，但业务接口全 403）。
+      // 这种情况要把话说清楚，而不是让用户看到自相矛盾的两条日志。
+      const retryReport = await this.#syncAccountInner(account, { ...opts, reloginAttempted: true });
+      if (retryReport.status === 'auth-required') {
+        const why =
+          '自动重新登录接口返回成功，但随后拉取仍被判定为会话失效（登录成功 ≠ 会话已建立，' +
+          '常见于平台要求验证码/二次校验，或原生未采纳登录下发的 cookie）。' +
+          '请在「账号」页用「应用内登录」在该平台的官方页面重新登录一次。';
+        this.#logger.warn('自动重新登录后会话仍无效', { platformId: account.platformId });
+        await this.#markAccount(account, 'auth-required', why, 'AUTH_REQUIRED').catch(() => {});
+        const enriched = { ...retryReport, message: why, detail: (retryReport.detail ?? '') || why };
+        await this.#recordLog(enriched).catch(() => {});
+        return enriched;
+      }
+      return retryReport;
     } catch (e) {
       const loginErr = toHubError(e, account.platformId);
       const why =

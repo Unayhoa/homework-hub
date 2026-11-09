@@ -317,6 +317,19 @@ export class ChaoxingAdapter implements PlatformAdapter {
     // Android 上 cookie 由原生 CookieManager 保管（凭据不过手），JS 侧 session.cookies
     // 本来就是空的（iSmart 那边踩过同一个坑，这里是漏改的第二处）。
     // 登录真伪交给下面的接口探测裁决：能拉到课程就是真的登录成功。
+    //
+    // 【关键】fanyalogin 返回 status:true 只代表「账号密码校验通过」，
+    // 真正的会话 cookie（_uid / fid / 等）是在随后访问 i.chaoxing.com 时才下发并写入
+    // 原生 CookieManager 的。少了这一步，登录「成功」但紧接着所有业务接口仍返回 403
+    // ——真机 2026-11-09 就是这个现象（自动重登成功但拉取全 403）。
+    // 所以这里主动访问一次 i.chaoxing.com（跟随跳转，原生侧会把沿途 Set-Cookie 写回），
+    // 让会话真正建立；失败不影响返回，由上层 probe 判定。
+    try {
+      await http.request({ url: 'https://i.chaoxing.com', method: 'GET' });
+    } catch {
+      // 预热失败不当作登录失败：有的环境 i.chaoxing.com 慢/被拦，交给后续 probe 裁决
+    }
+
     return { ...session, origin: 'derived', displayName: cred.username };
   }
 
