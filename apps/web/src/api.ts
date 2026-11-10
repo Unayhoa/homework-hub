@@ -245,8 +245,7 @@ export interface ApiDeps {
    * 由手机端注入（桌面端没有 CookieManager，不注入即可）。用途：WebView 显示已登录、
    * 原生请求却 403 时，用它区分「cookie 没进 CookieManager」还是「域不匹配」。
    */
-  cookieNames?: (url: string) => string[] | null;
-}
+  cookieNames?: (url: string) => string[] | null;}
 
 export interface ApiRequest {
   method: string;
@@ -342,15 +341,17 @@ export function createApiHandler(deps: ApiDeps): ApiHandler {
     ismart: ['https://school.ismartlearning.cn', 'https://me.ismartlearning.cn'],
   };
   function probeCookieNames(platformId: string): Record<string, string[]> | null {
-    if (!deps.cookieNames) return null;
+    if (!deps.cookieNames) return { '（诊断不可用）': ['__no_deps_cookieNames__'] };
     const hosts = KEY_HOSTS[platformId];
-    if (!hosts) return null;
+    if (!hosts) return { '（该平台未配置关键域）': [`__unknown_platform__:${platformId}`] };
     const out: Record<string, string[]> = {};
     for (const h of hosts) {
+      // 不再"拿不到就跳过"：每个域都要有一条结果，哪怕是错误标记 ——
+      // 否则界面上什么都看不到，无法判断是"没 cookie"还是"诊断没跑"。
       const names = deps.cookieNames(h);
-      if (names) out[h.replace(/^https:\/\//, '')] = names;
+      out[h.replace(/^https:\/\//, '')] = names ?? ['__null__'];
     }
-    return Object.keys(out).length > 0 ? out : null;
+    return out;
   }
 
   function summarize(report: SyncReport) {

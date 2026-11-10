@@ -1874,6 +1874,27 @@ async function renderKeepAlive() {
       ? `正在保活：${platformNames.join('、')}。`
       : '当前没有需要保活的平台。';
 
+  // 每个平台的「会话连续存活时长」——判断保活是否真的有效的量化判据。
+  // 只说"这段时间没掉"证明不了什么；必须给出"最近一次失效之后连续正常了多久"。
+  const fmtSpan = (ms) => {
+    const n = Number(ms);
+    if (!Number.isFinite(n) || n <= 0) return '—';
+    const h = Math.floor(n / 3600000);
+    const m = Math.round((n % 3600000) / 60000);
+    return h > 0 ? `${h} 小时 ${m} 分` : `${m} 分`;
+  };
+  const streaks = st.streaks && typeof st.streaks === 'object' ? st.streaks : null;
+  const streakLines = streaks
+    ? Object.entries(streaks)
+        .map(([pid, v]) => {
+          const name = platformDisplayName(pid);
+          const cur = fmtSpan(v?.currentStreakMs);
+          const best = fmtSpan(v?.bestStreakMs);
+          return `${name}：当前连续 ${cur}（历史最长 ${best}）`;
+        })
+        .join('；')
+    : '';
+
   // 电池优化白名单：它和应用级的「自启动 / 允许后台运行 / 不优化耗电」是**两套机制**
   // （真机上那几个开关全部放行，夜里请求仍然发不出去）。
   let batteryRow = '';
@@ -1933,6 +1954,7 @@ async function renderKeepAlive() {
     <div class="muted">每 ${intervalMin} 分钟发 1 个只读探活请求，让服务端会话（iSmart / 智慧树）
       不会因为长时间没有请求而失效。关掉后不再有任何后台请求。</div>
     <div class="ka-stat">${escapeHtml(whichText)} ${escapeHtml(stat)}</div>
+    ${streakLines ? `<div class="ka-stat">${escapeHtml(streakLines)}</div>` : ''}
     ${batteryRow}
     <div class="ka-action"><button class="ka-btn" id="kaSysSettings">打开电池设置</button></div>
     ${tip}
@@ -2726,7 +2748,7 @@ async function renderLog() {
         ${stats ? `<div class="muted">${stats}</div>` : ''}
         ${e.message ? `<div class="muted">${escapeHtml(e.message)}</div>` : ''}
         ${
-          e.detail || e.cookieProbe
+          e.detail || e.cookieProbe || window.__hhBridgeCheck
             ? `<details class="log-detail"><summary>排查信息</summary><div class="muted">${escapeHtml(e.detail ?? '')}${
                 e.cookieProbe
                   ? `${e.detail ? '\n\n' : ''}原生 CookieManager 可见的 cookie（只列名字）：\n${escapeHtml(
@@ -2735,7 +2757,7 @@ async function renderLog() {
                         .join('\n'),
                     )}`
                   : ''
-              }</div></details>`
+              }${window.__hhBridgeCheck ? `\n\n桥自检：${escapeHtml(window.__hhBridgeCheck)}` : ''}</div></details>`
             : ''
         }
         ${
@@ -3848,9 +3870,36 @@ function renderAppVersion() {
   el.textContent = v ? `v${v}` : '';
 }
 
+/**
+ * 【诊断自检】确认原生桥里「cookie 诊断」这个方法到底在不在。
+ *
+ * 为什么需要：真机 2026-11-10 加了 cookieNames 诊断，但排查信息里**什么都没有**。
+ * 静默失败无法区分三种情况：①桥方法不存在（旧包/注入失败）②存在但返回空
+ * ③上层把 null 当"没数据"跳过。这里在启动时直接试调一次，把结论记到日志，
+ * 下次一看就知道是哪一种。
+ */
+function selfCheckCookieBridge() {
+  const out = [];
+  try {
+    const bridge = window.Android;
+    out.push(`Android 桥=${bridge ? '存在' : '不存在'}`);
+    out.push(`cookieNames=${typeof bridge?.cookieNames === 'function' ? '可用' : '不可用'}`);
+    if (typeof bridge?.cookieNames === 'function') {
+      const raw = bridge.cookieNames('https://i.chaoxing.com');
+      out.push(`试探返回=${String(raw).slice(0, 120)}`);
+    }
+    out.push(`openLoginWithAccount=${typeof bridge?.openLoginWithAccount === 'function' ? '可用' : '不可用'}`);
+  } catch (e) {
+    out.push(`自检异常=${e.message}`);
+  }
+  return out.join(' · ');
+}
+
 (async () => {
   try {
     renderAppVersion();
+    // 启动自检：把桥能力结论存起来，认证失败时一并写进「排查信息」
+    window.__hhBridgeCheck = selfCheckCookieBridge();
     await refresh();
     if (token) localStorage.setItem('hh_token', token);
     // 打开就顺手更新一次（30 分钟内同步过则跳过）——

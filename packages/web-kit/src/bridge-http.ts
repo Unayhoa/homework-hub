@@ -145,20 +145,27 @@ export function hasNativeBridge(): boolean {
 /**
  * 【诊断】问原生要某个 URL 在 CookieManager 里可见的 cookie **名字**。
  *
- * 返回形如 `['JSESSIONID','route']`；拿不到（非手机端/桥不可用）返回 `null`。
- * 只取名字不取值 —— 会话凭据不过手这条约束不破。
+ * 返回值刻意**永不静默**：
+ *   · 桥可用 → `['JSESSIONID','route']`（可能是空数组 = 该域一个 cookie 都没有，这本身是结论）
+ *   · 桥不可用 → `['__no_bridge__']`
+ *   · 原生抛错 → `['__error__:<原因>']`
+ *
+ * 为什么不用 null 表示失败（真机 2026-11-10 踩过）：null 会被上层当成"没有数据"直接跳过，
+ * 于是用户看到排查信息里**什么都没有**，无法区分"没 cookie"和"诊断没跑起来"。
+ * 诊断工具自己静默失败，比没有诊断更糟。
  */
-export function nativeCookieNames(url: string): string[] | null {
-  if (typeof window === 'undefined') return null;
+export function nativeCookieNames(url: string): string[] {
+  if (typeof window === 'undefined') return ['__no_window__'];
   const fn = window.Android?.cookieNames;
-  if (typeof fn !== 'function') return null;
+  if (typeof fn !== 'function') return ['__no_bridge__'];
   try {
     const raw = fn(url);
-    if (!raw) return null;
+    if (!raw) return ['__empty_response__'];
     const parsed = JSON.parse(raw) as unknown;
-    return Array.isArray(parsed) ? parsed.map((x) => String(x)) : null;
-  } catch {
-    return null;
+    if (!Array.isArray(parsed)) return ['__bad_shape__'];
+    return parsed.map((x) => String(x));
+  } catch (e) {
+    return [`__error__:${String((e as Error).message ?? e).slice(0, 80)}`];
   }
 }
 

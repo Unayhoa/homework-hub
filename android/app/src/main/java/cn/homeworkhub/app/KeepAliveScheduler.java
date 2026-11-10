@@ -57,7 +57,16 @@ final class KeepAliveScheduler {
     private static final long MIN_INTERVAL_MS = 15 * 60 * 1000L;
     private static final long DEFAULT_INTERVAL_MS = 30 * 60 * 1000L;
     /** 保留最近多少条探测记录（滚动窗口） */
-    private static final int KEEP_LOG = 40;
+    /**
+     * 保留最近多少条探测记录（滚动窗口）。
+     *
+     * 2026-11-10 从 40 提到 400：40 条 × 20 分钟 ÷ 2 个平台 ≈ **6.7 小时**，
+     * 而用户要判断的是「智慧树能不能连续活过 9–10 小时」——
+     * 窗口比观测期还短，等于无法自证（结论只能是"最近 6.7 小时内没掉"）。
+     * 400 条 ≈ 66 小时（2.7 天），足以覆盖一整夜的掉线判断。
+     * 每条只有 t/platformId/kind/status/note 几个小字段，体积可以忽略。
+     */
+    private static final int KEEP_LOG = 400;
 
     /**
      * 记录格式版本。v3 修正了 v2 迁移的一个错：v2 只用 status 判断类别，
@@ -411,6 +420,55 @@ final class KeepAliveScheduler {
                 for (String pid : seen) platforms.put(pid);
             }
             o.put("platforms", platforms);
+            // ---- 每个平台的「会话连续存活时长」----
+            //
+            // 这才是判断保活是否有效的量化判据（2026-11-10 用户提出「9-10h 能否作为判据」）：
+            // 光看"这段时间没掉"证明不了什么 —— 必须知道**最近一次失效之后连续正常了多久**。
+            // 算法：从最新往回扫，遇到该平台最近一次 auth（会话失效）就停；
+            //   存活时长 = 最新一条 ok 的时间 − 那次失效的时间（没有失效记录则用日志最早时间）。
+            // 同时给出「最长一次连续存活」，用来和"没加保活时"的历史对照。
+            JSONObject streaks = new JSONObject();
+            java.util.Set<String> pids = new java.util.LinkedHashSet<>();
+            for (int i = 0; i < log.length(); i++) {
+                JSONObject e = log.optJSONObject(i);
+                if (e == null) continue;
+                String pid = e.optString("platformId", "");
+                if (!pid.isEmpty()) pids.add(pid);
+            }
+            for (String pid : pids) {
+                long lastAuthAt = 0;
+                long lastOkAt = 0;
+                long earliestAt = 0;
+                long bestStreak = 0;
+                long streakStart = 0;
+                for (int i = 0; i < log.length(); i++) {
+                    JSONObject e = log.optJSONObject(i);
+                    if (e == null || !pid.equals(e.optString("platformId", ""))) continue;
+                    long t = e.optLong("t", 0L);
+                    String kind = e.optString("kind", "");
+                    if (t <= 0) continue;
+                    if (earliestAt == 0 || t < earliestAt) earliestAt = t;
+                    if (KIND_AUTH.equals(kind)) {
+                        lastAuthAt = t;
+                        streakStart = 0;
+                    } else if (KIND_OK.equals(kind)) {
+                        lastOkAt = t;
+                        if (streakStart == 0) streakStart = t;
+                        long len = t - streakStart;
+                        if (len > bestStreak) bestStreak = len;
+                    }
+                    // unreachable 不打断连续（没测成 ≠ 掉线）
+                }
+                JSONObject s = new JSONObject();
+                long from = lastAuthAt > 0 ? lastAuthAt : earliestAt;
+                long current = (lastOkAt > 0 && from > 0) ? Math.max(0, lastOkAt - from) : 0;
+                s.put("currentStreakMs", current);
+                s.put("bestStreakMs", bestStreak);
+                s.put("lastAuthAtMs", lastAuthAt);
+                s.put("windowFromMs", earliestAt);
+                streaks.put(pid, s);
+            }
+            o.put("streaks", streaks);
             o.put("log", log);
             return o.toString();
         } catch (Exception e) {
