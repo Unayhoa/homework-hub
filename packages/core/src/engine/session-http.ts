@@ -104,10 +104,22 @@ export class SessionHttpClient {
     }
 
     if (raw.status === 401 || raw.status === 403) {
-      throw new HubError('AUTH_REQUIRED', `${this.#platformId} 返回 ${raw.status}，需要重新登录`, {
-        platformId: this.#platformId,
-        requiresUserAction: true,
-      });
+      // 【诊断】把响应体片段带进错误里。
+      //
+      // 为什么必须带（真机 2026-11-10 卡了很久）：超星返回 403 时，cookie 明明带了 20 个
+      // （_uid/fid/xxtenc 都在），我们却只能看到"需要重新登录"这句自己编的话，
+      // 完全不知道平台到底在抱怨什么（是缺某个头？被风控？还是真的会话无效？）。
+      // 平台的原文才是唯一能指向下一步的线索。
+      const snippet = text.replace(/\s+/g, ' ').slice(0, 300);
+      throw new HubError(
+        'AUTH_REQUIRED',
+        `${this.#platformId} 返回 ${raw.status}（响应：${snippet || '空'}）`,
+        {
+          platformId: this.#platformId,
+          requiresUserAction: true,
+          details: { httpStatus: raw.status, bodySnippet: snippet },
+        },
+      );
     }
 
     return { status: raw.status, body: body as T, raw };

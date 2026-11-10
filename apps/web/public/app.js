@@ -2744,7 +2744,7 @@ async function renderLog() {
       ].filter(Boolean).join(' · ');
       return `<div class="log-item">
         <div class="head"><span>${fmtLocal(e.finishedAt)}</span><span class="pill ${escapeHtml(status)}">${escapeHtml(status)}</span></div>
-        <div>${escapeHtml(e.platformId)} · 拉取 ${e.fetched} · 新增 ${e.created} · 更新 ${e.updated} · 删除 ${e.removed}</div>
+        <div>${escapeHtml(e.platformId)}${e.accountLabel ? `（${escapeHtml(e.accountLabel)}）` : ''} · 拉取 ${e.fetched} · 新增 ${e.created} · 更新 ${e.updated} · 删除 ${e.removed}</div>
         ${stats ? `<div class="muted">${stats}</div>` : ''}
         ${e.message ? `<div class="muted">${escapeHtml(e.message)}</div>` : ''}
         ${

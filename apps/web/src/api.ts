@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 与传输层无关的 API 实现。
  *
  * 抽出来的动机：同一个 API 需要跑在两种载体上 ——
@@ -1143,6 +1143,7 @@ export function createApiHandler(deps: ApiDeps): ApiHandler {
 
       if (method === 'GET' && path === '/api/log') {
         const accounts = await deps.engine.listAccounts();
+        const labelById = new Map(accounts.map((a) => [a.id, a.label]));
         const entries = [];
         for (const acc of accounts) entries.push(...(await deps.store.listSyncLog(acc.id, 30)));
         entries.sort((x, y) => y.finishedAt.localeCompare(x.finishedAt));
@@ -1151,6 +1152,10 @@ export function createApiHandler(deps: ApiDeps): ApiHandler {
         // 这里再兜一次（新数据已在 engine 侧截断，这里防的是历史脏数据）。
         const trimmed = entries.slice(0, 40).map((e) => ({
           ...e,
+          // 补上账号标签：同一平台多次同步（首轮 + 重登重试）会各写一条日志，
+          // 界面上看起来像"三个超星账号"。带出 label/accountId 后，
+          // 用户能分清"这是同一个账号的三次尝试"，而不是以为账号重复了。
+          accountLabel: labelById.get(e.accountId) ?? null,
           ...(typeof e.message === 'string' && e.message.length > 1500
             ? { message: `${e.message.slice(0, 1500)}…（截断）` }
             : {}),

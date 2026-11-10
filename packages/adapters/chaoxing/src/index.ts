@@ -885,10 +885,16 @@ export class ChaoxingAdapter implements PlatformAdapter {
     });
     if (course.cpi) params.set('cpi', course.cpi);
     const base = kind === 'exam' ? this.#ep.examTaskList : this.#ep.workTaskList;
+    // 【Referer 必须与目标域一致】
+    // 真机 2026-11-10：考试列表在 mooc1.chaoxing.com/exam-ans/…，而这里原本无论
+    // 作业还是考试都发 mooc1-api.chaoxing.com 作 Referer —— 跨域 Referer 被平台判成
+    // 非预期来源，直接回 403（诊断里 cookie 带了 20 个也照样 403，正是这个原因）。
+    // 三元原来两边写的是同一个值，等于考试那条从来没对过。
+    const referer = kind === 'exam' ? 'https://mooc1.chaoxing.com/' : 'https://mooc1-api.chaoxing.com/';
     const res = await http.request({
       url: `${base}?${params.toString()}`,
       method: 'GET',
-      headers: { Referer: kind === 'exam' ? 'https://mooc1-api.chaoxing.com/' : 'https://mooc1-api.chaoxing.com/' },
+      headers: { Referer: referer },
     });
     const text = await res.text();
     if (looksLikeAuthWall(text)) {
@@ -1032,6 +1038,11 @@ export class ChaoxingAdapter implements PlatformAdapter {
       mooc: 1,
       // 占位符。超星这个参数实际不校验，鉴权全靠 cookie。
       ut: 's',
+    }, {
+      // 【Referer 与目标域一致】真机 2026-11-10：这个 JSON 回退接口在
+      // mooc1.chaoxing.com 上，不带 Referer 会被判成非预期来源 → 403
+      // （日志里「作业(JSON)：chaoxing 返回 403」正是这条）。
+      headers: { Referer: 'https://mooc1.chaoxing.com/' },
     });
 
     const body = res.body ?? {};
