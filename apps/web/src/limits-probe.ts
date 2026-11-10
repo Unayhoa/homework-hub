@@ -58,25 +58,29 @@ export interface BlockVerdict {
 /**
  * 判定响应是否被拦。
  *
- * 只看 403 不够 —— 超星有很多"软拒绝"形态（200 但正文是错误页）。
- * 这里把已知的几种都算进去，宁可判严一点（测试目的是找安全上限）。
+ * 【判据要能区分"空列表"和"被拦"】（2026-11-10 真机踩过）
+ * 原来把「正文不含列表特征（goTask/overHidden2）」也算被拦，于是
+ * **一门没有作业的课**返回 7306 字节的空列表页时被判成"风控拦截" ——
+ * 结论完全反了，会让人以为 4 rps 都不安全。
+ *
+ * 正确认识：
+ *   · 真实有作业的列表页：19KB+，含 goTask
+ *   · 空列表页：约 7KB，含 `_HOST_` 脚本骨架、不含 goTask —— **这是正常响应**
+ *   · 被拦：403/429/5xx、或「无效的用户」这类明确拒绝、或极小页面（<2KB）
+ * 所以判据只认**明确的拒绝信号**，不拿"有没有 goTask"当拦截依据。
  */
 export function judgeResponse(status: number, body: string): BlockVerdict {
   if (status === 403) return { blocked: true, reason: 'HTTP 403' };
   if (status === 429) return { blocked: true, reason: 'HTTP 429（限流）' };
   if (status >= 500) return { blocked: true, reason: `HTTP ${status}（服务端异常）` };
+  if (status < 0) return { blocked: true, reason: '请求通道异常' };
   const head = body.slice(0, 2000);
   if (/无效的用户/.test(head)) return { blocked: true, reason: '正文「无效的用户」' };
   if (/验证码|captcha|滑动验证|安全验证/i.test(head)) return { blocked: true, reason: '正文含验证码' };
-  if (/请重新登录|重新登录|未登录/.test(head)) return { blocked: true, reason: '正文「请重新登录」' };
-  // 列表页特征：真实作业/考试列表一定含 goTask / goTest / overHidden2 之一。
-  // 三者都没有 = 拿到的不是列表页（多半是错误页或空壳）。
-  const looksList = /goTask|goTest|overHidden2|bottomList/i.test(head);
-  if (!looksList && body.length > 0) {
-    return { blocked: true, reason: `正文不含列表特征（len=${body.length}）` };
-  }
+  if (/请重新登录|未登录|无权限|没有权限/.test(head)) return { blocked: true, reason: '正文「请重新登录/无权限」' };
+  // 只有**极小页面**才算异常：正常空列表页约 7KB，真错误页（无效的用户）约 1.1KB。
   if (body.length > 0 && body.length < 2000) {
-    return { blocked: true, reason: `响应过短（len=${body.length}，正常列表页 19KB+）` };
+    return { blocked: true, reason: `响应过短（len=${body.length}，错误页特征）` };
   }
   return { blocked: false };
 }

@@ -41,14 +41,16 @@ describe('超星能力测试判据', () => {
     assert.equal(judgeResponse(200, '<html>请完成安全验证 滑动验证</html>').blocked, true);
   });
 
-  it('200 + 无列表特征 → 拦（拿到错误页/空壳）', () => {
-    const v = judgeResponse(200, '<html><body>something else entirely</body></html>');
-    assert.equal(v.blocked, true);
-    assert.match(v.reason ?? '', /列表特征/);
+  it('200 + 空列表页（约 7KB，无 goTask）→ **不拦**（这是正常响应）', () => {
+    // 真机 2026-11-10 踩过：一门没有作业的课返回 7306 字节空列表页骨架，
+    // 含 _HOST_ 脚本但不含 goTask。原来把它判成"被风控拦"，结论完全反了。
+    const emptyList = `<html lang="en"><script>_HOST_ = "//mooc1.chaoxing.com";</script>${'x'.repeat(7000)}`;
+    const v = judgeResponse(200, emptyList);
+    assert.equal(v.blocked, false, `空列表页不该判被拦（实际：${v.reason}）`);
   });
 
-  it('200 + 响应过短 → 拦（正常列表页 19KB+）', () => {
-    const v = judgeResponse(200, '<ul class="bottomList"></ul>');
+  it('200 + 极小页面（<2KB，错误页特征）→ 拦', () => {
+    const v = judgeResponse(200, '<html><body>some error</body></html>');
     assert.equal(v.blocked, true);
     assert.match(v.reason ?? '', /过短/);
   });

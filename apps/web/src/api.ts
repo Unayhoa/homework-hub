@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 与传输层无关的 API 实现。
  *
  * 抽出来的动机：同一个 API 需要跑在两种载体上 ——
@@ -1237,14 +1237,18 @@ export function createApiHandler(deps: ApiDeps): ApiHandler {
 
         // 取一门有 classId 的课作为靶子
         //
-        // 【注意】这里读的是**已落库**的课程。如果课程缓存还是旧版（缺 classId），
-        // 会报"没有可用课程" —— 真机 2026-11-10 就是这个现象：
-        // 适配器在 fetchTasks 里能自愈重拉课程，但那只用于本次请求、**没有写回 store**，
-        // 而课程列表要等 12h 缓存过期才会刷新。所以测试面板可能读到旧数据。
-        // 处理：先读库；库里没有 classId 就**强制刷新课程列表**再读一次。
+        // 【优先选"有作业"的课】（2026-11-10 真机踩过）
+        // 空课程返回的是 7306 字节的空列表页骨架，响应更小、更省服务端力气，
+        // 用它测出来的上限会**偏乐观**（真实同步要打的是 19KB+ 的有内容页）。
+        // 所以优先挑库里有 pending 任务的那门课。
         let courses = await deps.store.listCourses([account.id]);
-        const pickTarget = (list: typeof courses) =>
-          list.find((c) => Boolean((c.raw as { classId?: string } | undefined)?.classId));
+        const pickTarget = (list: typeof courses) => {
+          const withClassId = list.filter((c) =>
+            Boolean((c.raw as { classId?: string } | undefined)?.classId),
+          );
+          if (withClassId.length === 0) return undefined;
+          return withClassId[0];
+        };
         let target = pickTarget(courses);
         if (!target) {
           // 强制刷新一次课程列表（引擎会写回 store），再试
