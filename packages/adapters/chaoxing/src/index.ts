@@ -1593,18 +1593,34 @@ export class ChaoxingAdapter implements PlatformAdapter {
    *
    * 优化方案敲定后，本方法与 limits-probe.ts 一并删除。
    */
+  /**
+   * 【临时·能力测试】用真实课程发一次只读列表请求，返回状态码与正文。
+   *
+   * 供「设置 → 超星查询能力测试」调用（见 apps/web/src/limits-probe.ts）。
+   * 只打作业列表这一个最便宜的只读接口，不做任何写操作 ——
+   * 即便测试被平台拦，损失也只是这一次请求。
+   *
+   * 返回里带上 `url` 与签名状态：**测试本身出问题时必须能看出来**，
+   * 否则「参数错」会被误读成「被风控拦」，结论就反了（真机 2026-11-10 连踩两次）。
+   *
+   * 优化方案敲定后，本方法与 limits-probe.ts 一并删除。
+   */
   async probeReadOnlyOnce(
     ctx: AdapterContext,
     session: Session,
     course: { courseId: string; classId: string; cpi?: string; enc?: string },
-  ): Promise<{ status: number; body: string }> {
+  ): Promise<{ status: number; body: string; url: string; sig: { stuenc: boolean; workEnc: boolean; fromPage: boolean } }> {
     const http = new SessionHttpClient(ctx, session);
     // 【必须复用 #courseSignatures 取签名】（2026-11-10 真机踩过）
     // 原来这里把 `enc` 和 `stuenc` 都填成 course.enc —— 而真实请求里
     // `enc` 是课程页的 workEnc，与 stuenc 不是同一个值。参数错 → 平台回
     // 「提示 无效的用户！」(1149 字节) → 测试面板把 A1 误判成"被风控拦"。
     // 那种误判比没有数据更糟：会让人以为 4 rps 都不安全。
+    const before = this.#sigCacheCross.get(course.courseId);
     const sig = await this.#courseSignatures(http, course);
+    // 课程页诊断：签名到底是从课程页取到的，还是退化成 course.enc 了？
+    // 这是"测试被判被拦"的最可能原因 —— 必须能看见。
+    const sigTrace = this.#resolveTrace.filter((t) => t.startsWith('task-list:sig')).slice(-2);
     const now = Date.now();
     const t = sig.t ?? String(now);
     const params = new URLSearchParams({
@@ -1623,17 +1639,29 @@ export class ChaoxingAdapter implements PlatformAdapter {
       (course.cpi ? `&cpi=${encodeURIComponent(course.cpi)}` : '') +
       (sig.stuenc ? `&enc=${encodeURIComponent(sig.stuenc)}` : '') +
       `&t=${t}`;
+    const url = `${this.#ep.workTaskList}?${params.toString()}`;
+    const sigInfo = {
+      stuenc: Boolean(sig.stuenc),
+      workEnc: Boolean(sig.workEnc),
+      fromPage: Boolean(before) || Boolean(sig.workEnc),
+      trace: sigTrace.join(' | '),
+    };
     try {
       const res = await http.request({
-        url: `${this.#ep.workTaskList}?${params.toString()}`,
+        url,
         method: 'GET',
         headers: { Referer: referer },
       });
       const body = await res.text().catch(() => '');
-      return { status: res.status, body };
+      return { status: res.status, body, url, sig: sigInfo };
     } catch (e) {
       // 通道异常也要能被判定（当作失败样本），所以不抛，直接回 -1
-      return { status: -1, body: `请求异常：${String((e as Error).message ?? e).slice(0, 120)}` };
+      return {
+        status: -1,
+        body: `请求异常：${String((e as Error).message ?? e).slice(0, 120)}`,
+        url,
+        sig: sigInfo,
+      };
     }
   }
 

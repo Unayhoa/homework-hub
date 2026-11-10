@@ -347,7 +347,7 @@ export class SyncEngine {
   async probeChaoxingReadOnly(
     accountId: string,
     course: { courseId: string; classId: string; cpi?: string; enc?: string },
-  ): Promise<{ status: number; body: string }> {
+  ): Promise<{ status: number; body: string; url?: string; sig?: unknown }> {
     const account = await this.#store.getAccount(accountId);
     if (!account) throw new HubError('AUTH_FAILED', `账号不存在：${accountId}`);
     const adapter = this.#registry.require(account.platformId) as unknown as {
@@ -355,7 +355,7 @@ export class SyncEngine {
         ctx: AdapterContext,
         session: Session,
         c: { courseId: string; classId: string; cpi?: string; enc?: string },
-      ) => Promise<{ status: number; body: string }>;
+      ) => Promise<{ status: number; body: string; url?: string; sig?: unknown }>;
     };
     if (!adapter.probeReadOnlyOnce) throw new HubError('UPSTREAM', '该平台不支持只读能力测试');
     const session = await this.#vault.load(accountId);

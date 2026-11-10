@@ -42,6 +42,10 @@ export interface LimitTestResult {
   blockedSamples: string[];
   /** 是否通过（无任何拦截信号） */
   passed: boolean;
+  /** 第一个请求的实际 URL —— 测试自己出问题时靠它定位（如缺 stuenc/enc） */
+  firstUrl: string;
+  /** 第一个请求的签名状态（stuenc/workEnc 是否取到、是否来自课程页） */
+  firstSig: unknown;
 }
 
 /** 判定一次响应是否算「被平台拦住」。 */
@@ -85,12 +89,15 @@ export function judgeResponse(status: number, body: string): BlockVerdict {
  */
 export async function runLimitTestStep(
   step: LimitTestStep,
-  fetchOne: () => Promise<{ status: number; body: string }>,
+  fetchOne: () => Promise<{ status: number; body: string; url?: string; sig?: unknown }>,
   opts: { cooldownMs?: number; onProgress?: (done: number, total: number) => void } = {},
 ): Promise<LimitTestResult> {
   const startedAt = Date.now();
   const statusCounts: Record<string, number> = {};
   const blockedSamples: string[] = [];
+  /** 第一个请求的 URL 与签名状态 —— 测试自己出问题时靠它定位 */
+  let firstUrl = '';
+  let firstSig: unknown = undefined;
   let okCount = 0;
   let failCount = 0;
   let done = 0;
@@ -105,6 +112,10 @@ export async function runLimitTestStep(
       const idx = done;
       try {
         const res = await fetchOne();
+        if (idx === 1) {
+          firstUrl = res.url ?? '';
+          firstSig = res.sig;
+        }
         statusCounts[String(res.status)] = (statusCounts[String(res.status)] ?? 0) + 1;
         const v = judgeResponse(res.status, res.body);
         if (v.blocked) {
@@ -156,5 +167,7 @@ export async function runLimitTestStep(
     statusCounts,
     blockedSamples,
     passed: failCount === 0,
+    firstUrl,
+    firstSig,
   };
 }

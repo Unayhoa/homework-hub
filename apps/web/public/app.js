@@ -2792,9 +2792,16 @@ $('settingsList').addEventListener('click', async (e) => {
         ? '✅ 全绿'
         : `❌ 被拦：${(r.blockedSamples ?? []).join(' ｜ ')}`;
       line(
-        `${label} → 实际 ${r.actualRps} rps · 完成 ${r.requests} 请求 · ` +
+        `${label} → 实际 ${r.actualRps || '—'} rps · 完成 ${r.requests} 请求 · ` +
           `耗时 ${(r.durationMs / 1000).toFixed(1)}s · 状态 ${statusText || '无'} · ${verdict}`,
       );
+      // 测试自己出问题时要能看出来：把首个请求的 URL 与签名状态也打出来。
+      // 否则「参数错」会被误读成「被风控拦」，结论就反了。
+      if (r.firstUrl) {
+        const sig = r.firstSig ? JSON.stringify(r.firstSig) : '无';
+        line(`   首个请求：${r.firstUrl.slice(0, 180)}`);
+        line(`   签名：${sig}`);
+      }
       const sum = $('limitsSummary');
       if (sum) sum.textContent = r.passed ? `通过 ${rps} rps` : `上限 < ${rps} rps`;
       showSyncBar(r.passed ? `${label} 通过` : `${label} 被拦`, r.passed ? 'done' : 'error', 6000);
