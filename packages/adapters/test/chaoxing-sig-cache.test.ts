@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 超星跨轮签名缓存的安全阀。
  *
  * 背景（2026-11-10 真机反馈"重登功能后同步变慢"）：
@@ -97,18 +97,18 @@ describe('超星跨轮签名缓存', () => {
   it('第二轮复用签名，不再请求课程页（真的省了请求）', async () => {
     const adapter = new ChaoxingAdapter();
     const { ctx, urls } = makeCtx((req) => {
-      if (req.url.includes('mycourse/stu')) return { text: COURSE_PAGE };
+      if (req.url.includes('stucoursemiddle')) return { text: COURSE_PAGE };
       return { text: LIST_OK };
     });
 
     const req = { courses: courseRaw(), quietCourseIds: [] } as never;
     await adapter.fetchTasks(ctx, SESSION, req);
-    const coursePageHits1 = urls.filter((u) => u.includes('mycourse/stu')).length;
+    const coursePageHits1 = urls.filter((u) => u.includes('stucoursemiddle')).length;
     assert.ok(coursePageHits1 > 0, '第一轮必须去取签名');
 
     urls.length = 0;
     await adapter.fetchTasks(ctx, SESSION, req);
-    const coursePageHits2 = urls.filter((u) => u.includes('mycourse/stu')).length;
+    const coursePageHits2 = urls.filter((u) => u.includes('stucoursemiddle')).length;
     assert.equal(coursePageHits2, 0, '第二轮应复用跨轮缓存，不再请求课程页');
   });
 
@@ -120,7 +120,7 @@ describe('超星跨轮签名缓存', () => {
     // 注意必须两条都拒：只拒主路径时，回退路径会重新取一份**有效**签名并写回缓存，
     // 那属于正确行为，测不出"坏缓存是否被作废"（真机排查时踩过这个坑）。
     const { ctx } = makeCtx((r) => {
-      if (r.url.includes('mycourse/stu')) return { text: COURSE_PAGE };
+      if (r.url.includes('stucoursemiddle')) return { text: COURSE_PAGE };
       return { text: LIST_BAD };
     });
     await adapter.fetchTasks(ctx, SESSION, req).catch(() => undefined);
@@ -128,13 +128,14 @@ describe('超星跨轮签名缓存', () => {
     // 第二轮：换成新 ctx + 正常列表页。若坏签名没被作废，这一轮会直接复用缓存、
     // **不发课程页请求**（那就是死循环）。
     const { ctx: ctx2, urls: urls2 } = makeCtx((r) => {
-      if (r.url.includes('mycourse/stu')) return { text: COURSE_PAGE };
+      if (r.url.includes('stucoursemiddle')) return { text: COURSE_PAGE };
       return { text: LIST_OK };
     });
     await adapter.fetchTasks(ctx2, SESSION, req).catch(() => undefined);
     assert.ok(
-      urls2.filter((u) => u.includes('mycourse/stu')).length > 0,
+      urls2.filter((u) => u.includes('stucoursemiddle')).length > 0,
       '上一轮所有列表请求都被拒后，这一轮必须重新取签名（不能复用坏缓存）',
     );
   });
 });
+

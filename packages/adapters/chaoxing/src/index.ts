@@ -466,9 +466,29 @@ export class ChaoxingAdapter implements PlatformAdapter {
         if (!name) continue;
 
         seen.add(courseId);
+        // 【enc 必须从课程卡片里取出来】（2026-11-10 真机定位）
+        // 之前这里**从来没解析过 enc**，所以 course.raw.enc 永远是 undefined：
+        //   课程页 URL 缺 enc → 平台回 781 字节空壳 → 取不到 workEnc/stuenc
+        //   → 作业列表缺参数 → 平台回「提示 无效的用户！」(1149 字节)。
+        // 表现就是"15 门课全部 0 条"，而测试面板会把这种参数错误判成"被风控拦"。
+        // 课程卡片里的 enc 可能在链接里，也可能在卡片的 data-* / 隐藏域上，逐个试。
+        const encFromHref = queryParam(href, 'enc');
+        const encFromBlock =
+          firstGroup(block, /data-enc=["']([^"']+)["']/i) ??
+          firstGroup(block, /name=["']enc["'][^>]*value=["']([^"']+)["']/i) ??
+          firstGroup(block, /id=["']enc["'][^>]*value=["']([^"']+)["']/i) ??
+          firstGroup(block, /[?&]enc=([0-9a-zA-Z]{8,})/);
+        const enc = encFromHref ?? encFromBlock;
+        // cpi 同理：作业/考试列表都要它，之前也没解析过（一直 undefined）。
+        const cpi =
+          queryParam(href, 'cpi') ??
+          firstGroup(block, /data-cpi=["']([^"']+)["']/i) ??
+          firstGroup(block, /[?&]cpi=(\d{4,})/);
         out.push({
           platformCourseId: courseId,
           classId: classId ?? '',
+          ...(enc ? { enc } : {}),
+          ...(cpi ? { cpi } : {}),
           ...(href ? { squareUrl: /^https?:\/\//i.test(href) ? href : new URL(href, 'https://mooc2-ans.chaoxing.com').toString() } : {}),
           name: stripTags(name),
           teacher: firstGroup(block, /(?:教师|老师)[：:]\s*([^<\s]{1,20})/),
@@ -1267,17 +1287,23 @@ export class ChaoxingAdapter implements PlatformAdapter {
       return fallback;
     }
     try {
-      const url = chaoxingCourseUrl({
-        courseId: course.courseId,
-        classId: course.classId,
-        ...(course.cpi ? { cpi: course.cpi } : {}),
-        ...(course.enc ? { enc: course.enc } : {}),
-      });
+      // 【必须用 stucoursemiddle 打开课程页】（2026-11-10 真机定位到根因）
+      // HAR 实证：课程卡片的链接是
+      //   mooc1.chaoxing.com/visit/stucoursemiddle?courseid=&clazzid=&cpi=&ismooc2=1&v=2
+      // —— 链接里**根本没有 enc**。enc 是打开课程页后由服务端签发、写在隐藏域里的。
+      // 原来这里直接拼 mycourse/stu?...&enc=<course.enc>，而 course.enc 永远是空
+      //（课程卡片里没有它）→ 平台回 781 字节空壳 → 取不到 workEnc/stuenc
+      // → 作业列表缺参数 → 「提示 无效的用户！」(1149 字节)。
+      const url =
+        'https://mooc1.chaoxing.com/visit/stucoursemiddle' +
+        `?courseid=${encodeURIComponent(course.courseId)}` +
+        `&clazzid=${encodeURIComponent(course.classId)}` +
+        (course.cpi ? `&cpi=${encodeURIComponent(course.cpi)}` : '') +
+        '&ismooc2=1&v=2';
       const res = await http.request({
         url,
         method: 'GET',
-        // 课程页同样是"页面"，浏览器带的是同源 Referer；缺了可能拿到空壳/拒绝页。
-        headers: { Referer: 'https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/stu' },
+        headers: { Referer: 'https://mooc2-ans.chaoxing.com/mooc2-ans/visit/interaction' },
       });
       const html = await res.text();
       const enc =
