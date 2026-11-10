@@ -1333,10 +1333,24 @@ export class SyncEngine {
     let courses = await this.#store.listCourses([account.id]);
     const courseTtl = opts.courseTtlMs ?? 12 * 60 * 60 * 1000;
     const courseAge = account.lastSyncAt ? now.getTime() - new Date(account.lastSyncAt).getTime() : Infinity;
+    // 【缓存失效自愈】本地课程记录"看起来有、但关键参数缺失"时也要刷新。
+    //
+    // 真机 2026-11-10：snapshot 白名单曾把超星的 classId/cpi/enc 裁掉，
+    // 于是课程列表非空、缓存也没过期 → 12 小时内都不会重新拉 → 作业列表
+    // 一直回「无效的用户」。适配器侧虽有自愈（重新拉课程），但那只用于本次请求、
+    // **没有写回 store**，等于每轮同步都白拉一次课程，还让"测试面板"读到旧数据。
+    // 在这里判一次，把自愈提到引擎层：刷新后正常写回，下轮不必再拉。
+    const rawOf = (c: (typeof courses)[number]) => (c.raw ?? {}) as Record<string, unknown>;
+    const courseCacheIncomplete =
+      courses.length > 0 &&
+      // 只对"必须带 classId 才能查作业"的平台判（超星）。其它平台 raw 结构不同。
+      adapter.id === 'chaoxing' &&
+      courses.every((c) => !rawOf(c).classId);
     const shouldRefreshCourses =
       adapter.capabilities.courses &&
       (opts.refreshCourses === 'always' ||
         courses.length === 0 ||
+        courseCacheIncomplete ||
         (opts.refreshCourses !== 'if-empty' && courseAge > courseTtl));
 
     // 记住课程拉取失败的原因。

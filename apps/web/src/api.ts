@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 与传输层无关的 API 实现。
  *
  * 抽出来的动机：同一个 API 需要跑在两种载体上 ——
@@ -1236,12 +1236,27 @@ export function createApiHandler(deps: ApiDeps): ApiHandler {
         if (!session) throw new Error('学习通会话不存在，请先同步一次');
 
         // 取一门有 classId 的课作为靶子
-        const courses = await deps.store.listCourses([account.id]);
-        const target = courses.find((c) => {
-          const raw = (c.raw ?? {}) as { classId?: string; enc?: string };
-          return Boolean(raw.classId);
-        });
-        if (!target) throw new Error('没有可用课程（缺 classId），请先同步一次');
+        //
+        // 【注意】这里读的是**已落库**的课程。如果课程缓存还是旧版（缺 classId），
+        // 会报"没有可用课程" —— 真机 2026-11-10 就是这个现象：
+        // 适配器在 fetchTasks 里能自愈重拉课程，但那只用于本次请求、**没有写回 store**，
+        // 而课程列表要等 12h 缓存过期才会刷新。所以测试面板可能读到旧数据。
+        // 处理：先读库；库里没有 classId 就**强制刷新课程列表**再读一次。
+        let courses = await deps.store.listCourses([account.id]);
+        const pickTarget = (list: typeof courses) =>
+          list.find((c) => Boolean((c.raw as { classId?: string } | undefined)?.classId));
+        let target = pickTarget(courses);
+        if (!target) {
+          // 强制刷新一次课程列表（引擎会写回 store），再试
+          await deps.engine.syncAll({ accountIds: [account.id], refreshCourses: 'always' as const, maxPages: 1 });
+          courses = await deps.store.listCourses([account.id]);
+          target = pickTarget(courses);
+        }
+        if (!target) {
+          throw new Error(
+            '没有可用课程（课程缓存缺 classId，且刷新后仍未取到）。请先点一次「同步」再试。',
+          );
+        }
 
         const raw = (target.raw ?? {}) as { classId?: string; cpi?: string; enc?: string };
         const courseArg = {
@@ -1567,5 +1582,6 @@ function hostOf(url: string): string {
     return '';
   }
 }
+
 
 

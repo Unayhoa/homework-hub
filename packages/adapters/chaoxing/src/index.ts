@@ -505,22 +505,15 @@ export class ChaoxingAdapter implements PlatformAdapter {
       });
     let courses = mapCourses(req.courses ?? []);
 
-    // 【自愈】传入的课程全部缺 classId = 本地缓存是被旧版 snapshot 裁剪过的
-    //（旧白名单丢了 classId/cpi/enc）。这时不能硬着头皮发请求 ——
-    // 平台会回「提示 无效的用户！」，看起来像会话失效，实际是参数缺失。
-    // 直接重新拉一次课程列表，把 classId/cpi/enc 补回来。
+    // 【自愈已上移到引擎层】
+    //
+    // 这里原来有一段「课程全缺 classId 就重新拉一次课程列表」的逻辑。它有致命缺陷：
+    // 拉到的结果**只用于本次请求、不写回 store** —— 于是每轮同步都要白拉一次课程，
+    // 而且"测试面板"这类直接读库的地方仍然拿到旧数据（真机 2026-11-10 报
+    // 「没有可用课程（缺 classId）」）。
+    // 现在由引擎在 #syncAccountBody 里判断并强制刷新（会正常写回），这里只留告警。
     if (courses.length > 0 && courses.every((c) => !c.classId)) {
-      this.#resolveTrace.push('courses:缺classId→重新拉课程列表');
-      try {
-        const fresh = await this.fetchCourses(ctx, session, { forceRefresh: true } as never);
-        const freshCourses = mapCourses(fresh.items as unknown as UnifiedCourse[]);
-        if (freshCourses.some((c) => c.classId)) {
-          courses = freshCourses;
-          this.#resolveTrace.push(`courses:重新拉取成功(${freshCourses.length}门)`);
-        }
-      } catch (e) {
-        this.#resolveTrace.push(`courses:重新拉取失败 ${(e as Error).message.slice(0, 50)}`);
-      }
+      this.#resolveTrace.push('courses:全部缺classId（引擎应已强制刷新过）');
     }
 
     if (courses.length === 0) {
@@ -617,6 +610,10 @@ export class ChaoxingAdapter implements PlatformAdapter {
         //   都没有 = 拿到的是别的页面（拒绝页/空壳/重定向后的门户页）
         if (rawParsed.length === 0) {
           const hasList = /goTask|overHidden2|bottomList/i.test(html);
+          // 【安全阀】拿到的不是列表页（拒绝页/空壳）→ 作废这门课的签名缓存。
+          // 否则跨轮缓存会把一个已经失效的 enc 一直复用下去，每轮都失败，
+          // 而下一轮又命中同一份坏缓存 —— 死循环。
+          if (!hasList) this.#invalidateSig(course.courseId);
           const head = html.replace(/\s+/g, ' ').slice(0, 160);
           // 只给首段时，1148 字节的错误页看不出到底在说什么（首段全是 DOCTYPE）。
           // 补一段**正文**：去掉标签后的文字，错误页的真话通常就在里面
@@ -1007,6 +1004,10 @@ export class ChaoxingAdapter implements PlatformAdapter {
     });
     const text = await res.text();
     if (looksLikeAuthWall(text)) {
+      // 【安全阀】判定为登录墙/拒绝页 → 作废这门课的签名缓存。
+      // 这里比下面那条"解析 0 条"的分支更早命中（会直接抛错），
+      // 所以必须单独加一次，否则坏签名会一直被跨轮复用。
+      this.#invalidateSig(course.courseId);
       // 【错误定位，调试期保留】把 HTTP 状态、响应长度、首段特征写进 lastAuthWallHint，
       // 供上层把「疑似会话失效」细化成「HTTP 200 + 验证码页 / 302 / 登录页」。
       const head = text.replace(/\s+/g, ' ').slice(0, 120);
@@ -1170,6 +1171,13 @@ export class ChaoxingAdapter implements PlatformAdapter {
       });
     }
     const parsed = parseTaskListHtml(html, new Date(now));
+    // 【安全阀】回退路径拿到的也不是列表页 → 作废签名缓存。
+    // 真机排查结论：主路径失败后回退会**重新取一份签名并写回缓存**；
+    // 如果这份签名同样无效（列表还是拒绝页），缓存里就留着一份坏签名，
+    // 下一轮直接复用 → 每轮都失败的死循环。这里必须把它清掉。
+    if (parsed.length === 0 && !/goTask|overHidden2|bottomList/i.test(html)) {
+      this.#invalidateSig(course.courseId);
+    }
     return parsed.map((w) => ({
       platformTaskId: w.platformTaskId,
       courseId: course.courseId,
@@ -1210,6 +1218,30 @@ export class ChaoxingAdapter implements PlatformAdapter {
    */
   #sigCache = new Map<string, { stuenc?: string; workEnc?: string; t?: string }>();
 
+  /**
+   * 跨轮签名缓存：courseId → { stuenc, workEnc, at }。
+   *
+   * 【为什么敢跨轮缓存】（2026-11-10 提速，真机反馈"重登功能后同步变慢"）
+   * 课程页的 `enc` / `workEnc` 与「作业级 enc」不是一回事：
+   *   · 作业级 enc（点开某份作业用）**确实短命**，同步时抓到、过一会儿就失效
+   *     —— 那正是 chaoxingCourseUrl 上方那段结论，不缓存它；
+   *   · 课程页的 enc/workEnc 是**课程维度**的，同一门课在多次同步间通常不变
+   *     （HAR 里隔天抓的两份课程页，这两个值是一样的）。
+   * 所以这里缓存它们，但**不缓存 `t`**（t 与请求时刻绑定，必须每次新取）。
+   *
+   * 安全阀：TTL 30 分钟 + 任一列表请求判定失败时清掉该课缓存，
+   * 下次自然重取。宁可多一次请求，也不让过期签名把同步卡死。
+   */
+  #sigCacheCross = new Map<string, { stuenc?: string; workEnc?: string; at: number }>();
+  static readonly SIG_TTL_MS = 30 * 60 * 1000;
+
+  /** 作废某门课的跨轮签名缓存（列表请求被判失败时调用）。 */
+  #invalidateSig(courseId: string): void {
+    this.#sigCacheCross.delete(courseId);
+    this.#sigCache.delete(courseId);
+    this.#resolveTrace.push(`sig:作废 course=${courseId}`);
+  }
+
   async #courseSignatures(
     http: SessionHttpClient,
     course: { courseId: string; classId: string; cpi?: string; enc?: string },
@@ -1217,6 +1249,17 @@ export class ChaoxingAdapter implements PlatformAdapter {
     const cached = this.#sigCache.get(course.courseId);
     if (cached) return cached;
     const fallback = { ...(course.enc ? { stuenc: course.enc } : {}) };
+    // 跨轮命中：直接复用 enc/workEnc，只补一个新鲜的 t
+    const cross = this.#sigCacheCross.get(course.courseId);
+    if (cross && Date.now() - cross.at < ChaoxingAdapter.SIG_TTL_MS) {
+      const reused = { ...(cross.stuenc ? { stuenc: cross.stuenc } : {}), ...(cross.workEnc ? { workEnc: cross.workEnc } : {}) };
+      if (reused.stuenc || reused.workEnc) {
+        this.#resolveTrace.push(`task-list:sig 复用跨轮缓存 course=${course.courseId}`);
+        const result = { ...reused, t: String(Date.now()) };
+        this.#sigCache.set(course.courseId, result);
+        return result;
+      }
+    }
     if (!course.classId) {
       // 静默 return 是上一版的错误：诊断里显示「未产生记录」，
       // 看不出是"没 classId"还是"根本没跑"。提前返回也必须留痕。
@@ -1265,6 +1308,14 @@ export class ChaoxingAdapter implements PlatformAdapter {
         ...(pageT ? { t: pageT } : {}),
       };
       this.#sigCache.set(course.courseId, result);
+      // 同时写跨轮缓存（不存 t：t 必须每次新鲜）
+      if (result.stuenc || result.workEnc) {
+        this.#sigCacheCross.set(course.courseId, {
+          ...(result.stuenc ? { stuenc: result.stuenc } : {}),
+          ...(result.workEnc ? { workEnc: result.workEnc } : {}),
+          at: Date.now(),
+        });
+      }
       return result;
     } catch (e) {
       this.#resolveTrace.push(`task-list:sig 课程页取签名失败：${(e as Error).message.slice(0, 60)}`);
@@ -2730,3 +2781,4 @@ export function parseCookieHeader(input: string): Record<string, string> {
   }
   return out;
 }
+
