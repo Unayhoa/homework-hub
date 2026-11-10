@@ -249,6 +249,16 @@ final class KeepAliveScheduler {
             if (p == null) continue;
             String url = p.optString("url", "");
             if (url.isEmpty()) continue;
+            // 【占位符替换】`{now}` → 当前毫秒时间戳。
+            //
+            // 为什么必须在这里做（真机 2026-11-10）：智慧树的 getLoginUserInfo 要求
+            // `?time=<毫秒>`，而探针地址是 JS 侧一次性下发的静态字符串，写死成
+            // `time=1` 会被平台当成异常请求、直接回「未登录」——于是**好会话被误判
+            // 成掉线**，用户看到"智慧树又失效了"却其实只是探针参数不对。
+            // 也不能靠 JS 回调生成：原生是定时唤醒的，那时 JS 可能根本没在运行。
+            if (url.contains("{now}")) {
+                url = url.replace("{now}", String.valueOf(nowMs));
+            }
             String method = p.optString("method", "GET");
             String body = p.optString("body", "");
             String pattern = p.optString("alivePattern", "");

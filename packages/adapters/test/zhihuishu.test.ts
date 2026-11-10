@@ -188,6 +188,10 @@ describe('智慧树 · 抓取链路（HAR 结构）', () => {
     assert.equal(new RegExp(p.alivePattern).test('{\"result\":null,\"code\":403,\"message\":\"未登录\"}'), false);
     // 必须带 time 参数，否则平台会误回未登录
     assert.match(p.url, /time=/);
+    // 而且必须是占位符：真机 2026-11-10 写死 `time=1`，平台校验该参数后直接回
+    // 「未登录」，好会话被误判成掉线（用户看到"智慧树又失效了"）。
+    assert.match(p.url, /[?&]time=\{now\}/, 'time 必须是 {now} 占位符，由原生每次探测时替换');
+    assert.ok(!/[?&]time=1(&|$)/.test(p.url), '不能写死 time=1');
   });
 
   it('共享课列表与学习进度（免加密接口）能算出视频任务点', async () => {

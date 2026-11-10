@@ -171,7 +171,19 @@ export class ZhihuishuAdapter implements PlatformAdapter {
    *      或错误 JSON 里也可能出现 uuid 字样。
    */
   readonly keepAliveProbe = {
-    url: 'https://onlineservice-api.zhihuishu.com/gateway/f/v1/login/getLoginUserInfo?time=1',
+    /**
+     * 【`{now}` 是占位符，由原生侧在**每次探测时**替换成当前毫秒】（2026-11-10 真机修正）
+     *
+     * 原来这里写死成 `?time=1`，只为了让探针地址能当静态字符串传给原生。
+     * 但平台**是校验这个参数的**：HAR 里每次请求的 time 都是当前毫秒
+     * （1794038263328 这种）。写死成 1 属于异常请求，平台可能直接回
+     * `{"code":403,"message":"未登录"}` —— 于是**好会话被误判成掉线**，
+     * 用户看到的就是"智慧树又失效了"，而实际只是探针参数不对。
+     *
+     * 为什么不用 JS 侧的 urlFor 回调：原生是**定时唤醒**的（每 20 分钟），
+     * 那时 JS 可能根本没在跑，回调取不到。占位符替换是唯一可靠的做法。
+     */
+    url: 'https://onlineservice-api.zhihuishu.com/gateway/f/v1/login/getLoginUserInfo?time={now}',
     method: 'GET' as const,
     alivePattern: '"uuid":"[^"]+"',
     intervalMs: 20 * 60 * 1000,

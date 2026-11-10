@@ -1930,6 +1930,12 @@ async function renderKeepAlive() {
     .map((e) => {
       const t = e && e.t ? tOf(Number(e.t)) : '';
       const kind = kindOf(e);
+      // 【必须显示平台名】（2026-11-10 用户困惑的直接原因）
+      // 一轮探测会**同时**打多个平台（iSmart / 智慧树），各写一条记录。
+      // 原来只写「会话失效/会话正常」，于是同一分钟出现"一条失效、一条正常"，
+      // 用户根本看不出是哪个平台失效 —— 会把 iSmart 的正常误当成智慧树也正常。
+      const pid = e && typeof e.platformId === 'string' ? e.platformId : '';
+      const pname = pid ? platformDisplayName(pid) : '（旧记录·未标平台）';
       const label = kind === 'ok' ? '会话正常' : kind === 'auth' ? '会话失效' : '未测成：网络不通';
       const cls = kind === 'ok' ? 'ka-ok' : kind === 'auth' ? 'ka-bad' : 'ka-warn';
       const detail =
@@ -1938,6 +1944,7 @@ async function renderKeepAlive() {
           : [e?.status ? `HTTP ${e.status}` : '', e?.note ?? ''].filter(Boolean).join(' · ');
       return `<div class="ka-row">
         <span>${escapeHtml(t)}</span>
+        <span class="ka-plat">${escapeHtml(pname)}</span>
         <span class="${cls}">${escapeHtml(label)}</span>
         <span class="muted">${escapeHtml(detail)}</span>
       </div>`;
