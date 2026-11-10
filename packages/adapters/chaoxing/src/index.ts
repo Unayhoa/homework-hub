@@ -84,6 +84,17 @@ export interface ChaoxingEndpointMap {
    * 每门课一个页面，条目是 <li>：状态（未交/已交）、标题（<p>）、
    * 截止信息（span.fr，形如「剩余24小时30分钟」）。
    */
+  /**
+   * 作业列表（HTML）。
+   *
+   * **实证形态**（HAR `mooc-ans.chaoxing.com.har`，2026-11-10 重新核对）：
+   * `mooc1.chaoxing.com/mooc2/work/list?courseId=&classId=&cpi=&ut=s&t=<ms>&stuenc=<enc>&enc=<签名>`
+   *
+   * 两个必须点（之前都没有，所以必然 403）：
+   *   1. **`stuenc` 必须带**，它等于课程列表里的 `enc`（HAR 里两者值完全相同）；
+   *   2. **Referer 必须是课程页** `mooc2-ans.chaoxing.com/mooc2-ans/mycourse/stu?...`，
+   *      不是 API 根域 —— 平台按来源页判定，跨域直接回那个 `<html><head><meta no-cache>` 拒绝页。
+   */
   workTaskList: string;
   /** 作业列表（旧版 JSON 备用）。部分环境返回 JSON，作为回退尝试。 */
   workList: string;
@@ -135,9 +146,9 @@ export const ChaoxingEndpoints: ChaoxingEndpointMap = {
   courseCatalog: 'https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/studentcourse',
   courseData: 'https://mooc1-api.chaoxing.com/mycourse/backclazzdata?view=json&rss=1',
   courseList: 'https://mooc1-2.chaoxing.com/visit/interaction',
-  workTaskList: 'https://mooc1-api.chaoxing.com/work/task-list',
+  workTaskList: 'https://mooc1.chaoxing.com/mooc2/work/list',
   workList: 'https://mooc1-api.chaoxing.com/mooc-ans/work/getAllWork',
-  examTaskList: 'https://mooc1-api.chaoxing.com/mooc-ans/exam/phone/task-list',
+  examTaskList: 'https://mooc1.chaoxing.com/exam-ans/mooc2/exam/exam-list',
   userInfo: 'https://passport2.chaoxing.com/api/logged',
 };
 
@@ -621,11 +632,18 @@ export class ChaoxingAdapter implements PlatformAdapter {
         courseErrs.push(msg);
       }
       if (workItems.length === 0) {
+        // 回退：再用**不带 enc 的 HTML 变体**试一次。
+        //
+        // 为什么不再走原来的 `#fetchPerCourse`（POST getAllWork）：HAR 实证表明那个
+        // 接口不是超星的真实形态（真实的是 GET mooc2/work/list 返回 HTML）。
+        // 打一个不存在的地址只会稳定地 403，然后把它当成"会话失效"报给用户 ——
+        // 真机 2026-11-10 的误导性 403 就是这么来的。
+        // 有些环境只要带 stuenc、不要 enc，所以这里换一个变体而不是换一个接口。
         try {
-          workItems = await this.#fetchPerCourse(http, this.#ep.workList, course, 'homework');
+          workItems = await this.#fetchTaskListHtmlNoEnc(http, course);
           jsonFallbackCourses += 1;
         } catch (e) {
-          const msg = `${course.name}/作业(JSON): ${(e as Error).message}`;
+          const msg = `${course.name}/作业(HTML-无enc): ${(e as Error).message}`;
           errors.push(msg);
           diag.push(msg);
           courseErrs.push(msg);
@@ -886,20 +904,36 @@ export class ChaoxingAdapter implements PlatformAdapter {
    */
   async #fetchTaskListHtml(
     http: SessionHttpClient,
-    course: { courseId: string; classId: string; cpi?: string; name: string },
+    course: { courseId: string; classId: string; cpi?: string; enc?: string; name: string },
     /** 作业与考试是**同构的两个页面**，只有地址不同 —— 解析器可以共用 */
     kind: 'homework' | 'exam' = 'homework',
   ): Promise<string> {
+    const now = Date.now();
     const params = new URLSearchParams({
       courseId: course.courseId,
       classId: course.classId,
+      ut: 's',
+      t: String(now),
     });
     if (course.cpi) params.set('cpi', course.cpi);
+    // 【stuenc 必须带】HAR 实证：作业/考试列表都要求 `stuenc`，其值就等于课程列表里
+    // 的 `enc`。缺了它平台直接回拒绝页（2026-11-10 的 403 就是这个）。
+    if (course.enc) {
+      params.set('stuenc', course.enc);
+      // 作业列表还要一个独立的 `enc` 签名；HAR 里它与 stuenc 不同。
+      // 拿不到就只带 stuenc —— 至少比完全不带更接近真实请求。
+      if (kind === 'homework') params.set('enc', course.enc);
+    }
     const base = kind === 'exam' ? this.#ep.examTaskList : this.#ep.workTaskList;
-    // 【Referer 必须与目标域一致】
-    // 作业与考试现在都在 mooc1-api.chaoxing.com（考试已改回实证路径），
-    // 所以两者用同一个 Referer。真机 2026-11-10：跨域 Referer 会被判成非预期来源 → 403。
-    const referer = 'https://mooc1-api.chaoxing.com/';
+    // 【Referer 必须是课程页】HAR 里 Referer 是 mooc2-ans 的 mycourse/stu（带 courseid/clazzid/cpi/enc）。
+    // 之前发 API 根域会被判成非预期来源 → 那个 no-cache 拒绝页。
+    const referer =
+      'https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/stu' +
+      `?courseid=${encodeURIComponent(course.courseId)}` +
+      `&clazzid=${encodeURIComponent(course.classId)}` +
+      (course.cpi ? `&cpi=${encodeURIComponent(course.cpi)}` : '') +
+      (course.enc ? `&enc=${encodeURIComponent(course.enc)}` : '') +
+      `&t=${now}`;
     const res = await http.request({
       url: `${base}?${params.toString()}`,
       method: 'GET',
@@ -1026,6 +1060,60 @@ export class ChaoxingAdapter implements PlatformAdapter {
     const start = pick('开始时间');
     const end = pick('结束时间');
     return { ...(start ? { start } : {}), ...(end ? { end } : {}) };
+  }
+
+  /**
+   * 作业列表的「无 enc」变体：只带 stuenc（不带独立的 enc 签名）。
+   *
+   * 存在理由：HAR 里真实请求同时带 stuenc 与 enc，但不同环境/课程对 enc 的校验不一致；
+   * 主路径返回空时用它再试一次。它打的仍然是**真实的** mooc2/work/list，
+   * 只是参数少一个 —— 而不是去打一个从未存在过的 getAllWork 接口。
+   */
+  async #fetchTaskListHtmlNoEnc(
+    http: SessionHttpClient,
+    course: { courseId: string; classId: string; cpi?: string; enc?: string; name: string },
+  ): Promise<PlatformTask[]> {
+    const now = Date.now();
+    const params = new URLSearchParams({
+      courseId: course.courseId,
+      classId: course.classId,
+      ut: 's',
+      t: String(now),
+    });
+    if (course.cpi) params.set('cpi', course.cpi);
+    if (course.enc) params.set('stuenc', course.enc);
+    const referer =
+      'https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/stu' +
+      `?courseid=${encodeURIComponent(course.courseId)}` +
+      `&clazzid=${encodeURIComponent(course.classId)}` +
+      (course.cpi ? `&cpi=${encodeURIComponent(course.cpi)}` : '') +
+      (course.enc ? `&enc=${encodeURIComponent(course.enc)}` : '') +
+      `&t=${now}`;
+    const res = await http.request({
+      url: `${this.#ep.workTaskList}?${params.toString()}`,
+      method: 'GET',
+      headers: { Referer: referer },
+    });
+    const html = await res.text();
+    if (looksLikeAuthWall(html)) {
+      throw new HubError('AUTH_REQUIRED', '作业列表(无enc)返回登录页，会话已失效', {
+        platformId: this.id,
+        requiresUserAction: true,
+      });
+    }
+    const parsed = parseTaskListHtml(html, new Date(now));
+    return parsed.map((w) => ({
+      platformTaskId: w.platformTaskId,
+      courseId: course.courseId,
+      courseName: course.name,
+      kind: 'homework' as const,
+      title: w.title,
+      status: w.status,
+      ...(w.statusText ? { statusRaw: w.statusText } : {}),
+      deadline: w.deadline,
+      sourceUrl: chaoxingCourseUrl(course),
+      raw: { source: 'task-list-noenc', title: w.title },
+    }));
   }
 
   async #fetchPerCourse(
