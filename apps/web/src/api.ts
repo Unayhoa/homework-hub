@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 与传输层无关的 API 实现。
  *
  * 抽出来的动机：同一个 API 需要跑在两种载体上 ——
@@ -245,7 +245,13 @@ export interface ApiDeps {
    * 由手机端注入（桌面端没有 CookieManager，不注入即可）。用途：WebView 显示已登录、
    * 原生请求却 403 时，用它区分「cookie 没进 CookieManager」还是「域不匹配」。
    */
-  cookieNames?: (url: string) => string[] | null;}
+  cookieNames?: (url: string) => string[] | null;
+  /**
+   * 最近一次真实请求实际带上的 cookie 概况（只名字）。
+   *
+   * 比按 URL 查更可靠：它来自真实请求链路，永远可读，直接回答"请求带没带 cookie"。
+   */
+  lastCookieInfo?: () => string;}
 
 export interface ApiRequest {
   method: string;
@@ -354,6 +360,33 @@ export function createApiHandler(deps: ApiDeps): ApiHandler {
     return out;
   }
 
+  /**
+   * 【诊断】把「真实请求带上的 cookie」+「按域查询结果」合成一段可读文本。
+   *
+   * 前者是主证据（永远可读）；后者只作补充，且明确标注它在非应用页会失效 ——
+   * 免得用户把 `__diagnose_off_app_page__` 误读成"这个域没有 cookie"。
+   */
+  function cookieDiagnostics(platformId: string): string {
+    const lines: string[] = [];
+    if (deps.lastCookieInfo) {
+      try {
+        lines.push(`真实请求实际带的 cookie：${deps.lastCookieInfo()}`);
+      } catch (e) {
+        lines.push(`真实请求 cookie 读取失败：${String((e as Error).message ?? e).slice(0, 80)}`);
+      }
+    }
+    const perHost = probeCookieNames(platformId);
+    if (perHost) {
+      lines.push(
+        '按域查询（仅供参考；非应用页调用会失败）：\n' +
+          Object.entries(perHost)
+            .map(([host, names]) => `  ${host} → ${names.length ? names.join(', ') : '（空）'}`)
+            .join('\n'),
+      );
+    }
+    return lines.join('\n');
+  }
+
   function summarize(report: SyncReport) {
     return {
       ok: report.totals.failed === 0,
@@ -377,7 +410,7 @@ export function createApiHandler(deps: ApiDeps): ApiHandler {
         // 【诊断】认证失败时，附上原生 CookieManager 里该平台关键域可见的 cookie **名字**。
         // 用来一眼区分「cookie 没进 CookieManager」和「进了但域不匹配」——
         // WebView 显示已登录、原生请求却 403 时，这两者的修法完全不同。
-        ...(x.status === 'auth-required' ? { cookieProbe: probeCookieNames(x.platformId) } : {}),
+        ...(x.status === 'auth-required' ? { cookieProbe: cookieDiagnostics(x.platformId) } : {}),
       })),
     };
   }
@@ -1126,7 +1159,7 @@ export function createApiHandler(deps: ApiDeps): ApiHandler {
             : {}),
           // 【诊断】认证失败的记录，附上原生 CookieManager 里该平台关键域的 cookie 名字。
           // 这是「WebView 已登录但原生 403」唯一能一次说清根因的证据，所以放在日志页可展开处。
-          ...(e.status === 'auth-required' ? { cookieProbe: probeCookieNames(e.platformId) } : {}),
+          ...(e.status === 'auth-required' ? { cookieProbe: cookieDiagnostics(e.platformId) } : {}),
         }));
         return { status: 200, body: { log: trimmed } };
       }
@@ -1474,4 +1507,5 @@ function hostOf(url: string): string {
     return '';
   }
 }
+
 

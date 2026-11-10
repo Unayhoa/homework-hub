@@ -2752,9 +2752,11 @@ async function renderLog() {
             ? `<details class="log-detail"><summary>排查信息</summary><div class="muted">${escapeHtml(e.detail ?? '')}${
                 e.cookieProbe
                   ? `${e.detail ? '\n\n' : ''}原生 CookieManager 可见的 cookie（只列名字）：\n${escapeHtml(
-                      Object.entries(e.cookieProbe)
-                        .map(([host, names]) => `${host} → ${names.length ? names.join(', ') : '（空）'}`)
-                        .join('\n'),
+                      typeof e.cookieProbe === 'string'
+                        ? e.cookieProbe
+                        : Object.entries(e.cookieProbe)
+                            .map(([host, names]) => `${host} → ${names.length ? names.join(', ') : '（空）'}`)
+                            .join('\n'),
                     )}`
                   : ''
               }${window.__hhBridgeCheck ? `\n\n桥自检：${escapeHtml(window.__hhBridgeCheck)}` : ''}</div></details>`

@@ -54,6 +54,14 @@ interface AndroidBridgeHost {
    * 「cookie 没进 CookieManager」还是「进了但域不匹配」——两者修法完全不同。
    */
   cookieNames?: (url: string) => string;
+  /**
+   * 最近一次真实请求实际带上的 cookie 概况（只名字）。
+   *
+   * 为什么用它而不是另开一个按 URL 查询的诊断方法：它来自**真实请求链路**，
+   * 不存在"在非注入页调用"的限制（真机 2026-11-10：按 URL 查时全报 non-injected，
+   * 诊断自己失效，反而看不出问题）。这条能直接回答"请求到底带没带 cookie"。
+   */
+  lastCookieInfo?: () => string;
   /** 上报日志到 logcat，便于真机排查 */
   log?: (level: string, message: string) => void;
 }
@@ -156,17 +164,6 @@ export function hasNativeBridge(): boolean {
  */
 export function nativeCookieNames(url: string): string[] {
   if (typeof window === 'undefined') return ['__no_window__'];
-  // 桥只在**应用页**注入。若此刻 WebView 正停在平台页（刚登录返回、或浏览中），
-  // 调用会抛 "Java bridge method can't be invoked on a non-injected..."。
-  // 先自查页面来源，直接给出可读结论，而不是把一条 WebView 内部报错塞进日志。
-  try {
-    const origin = window.location?.origin ?? '';
-    if (origin && !/^https?:\/\/(appassets\.androidplatform\.net|localhost|127\.0\.0\.1)/.test(origin)) {
-      return [`__not_on_app_page__:${origin}`];
-    }
-  } catch {
-    /* 取不到 origin 就继续尝试 */
-  }
   const fn = window.Android?.cookieNames;
   if (typeof fn !== 'function') return ['__no_bridge__'];
   try {
@@ -176,7 +173,29 @@ export function nativeCookieNames(url: string): string[] {
     if (!Array.isArray(parsed)) return ['__bad_shape__'];
     return parsed.map((x) => String(x));
   } catch (e) {
-    return [`__error__:${String((e as Error).message ?? e).slice(0, 80)}`];
+    // 典型：在非注入页（平台页）调用 → "can't be invoked on a non-injected"。
+    // 这**不是**会话结论，只是诊断位置不对；用简短标记表达，别让用户以为 cookie 有问题。
+    const msg = String((e as Error).message ?? e);
+    if (/non-inject/i.test(msg)) return ['__diagnose_off_app_page__'];
+    return [`__error__:${msg.slice(0, 60)}`];
+  }
+}
+
+/**
+ * 【诊断】最近一次真实请求实际带上的 cookie 概况（只名字，含是否走了父域回退）。
+ *
+ * 与 nativeCookieNames 的分工：那个是"按 URL 去问 CookieManager"（在平台页会失败），
+ * 这个是"读真实请求链路上记下的结果"——永远可用，且直接回答"请求到底带没带 cookie"。
+ */
+export function nativeLastCookieInfo(): string {
+  if (typeof window === 'undefined') return '__no_window__';
+  const fn = window.Android?.lastCookieInfo;
+  if (typeof fn !== 'function') return '__no_bridge__';
+  try {
+    const s = fn();
+    return s && s.trim() ? s : '__no_request_yet__';
+  } catch (e) {
+    return `__error__:${String((e as Error).message ?? e).slice(0, 60)}`;
   }
 }
 

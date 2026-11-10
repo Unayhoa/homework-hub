@@ -412,13 +412,19 @@ public class HttpBridge {
             // 浏览器能工作是因为这些 cookie 带 Domain=.chaoxing.com。
             // 这里补一层：目标域取不到就退到父域再取一次（只回退到注册域，不跨站）。
             String cookie = cookieManager.getCookie(currentUrl);
+            boolean usedParentFallback = false;
             if (cookie == null || cookie.isEmpty()) {
                 String parent = registrableDomain(currentUrl);
                 if (parent != null) {
                     cookie = cookieManager.getCookie("https://" + parent + "/");
+                    usedParentFallback = cookie != null && !cookie.isEmpty();
                 }
             }
             if (cookie != null && !cookie.isEmpty()) conn.setRequestProperty("Cookie", cookie);
+            // 【诊断】记录这次请求**实际发出去的 cookie 名字**（不含值）。
+            // 比另开一个桥方法可靠：它就是真实请求的一部分，不存在"在非注入页调用"的问题。
+            // 认证失败时 JS 侧读它，就能区分「没带上 cookie」和「带上了但平台不认」。
+            lastCookieDebug = describeCookies(currentUrl, cookie, usedParentFallback);
 
             // 雨课堂（Django 系）的 API 要求 x-csrftoken 头与会话配对，
             // 值就在它自己种的 csrftoken cookie 里 —— 网页 XHR 由框架自动带，原生请求要自己补。
@@ -649,6 +655,39 @@ public class HttpBridge {
         } catch (Exception e) {
             return null;
         }
+    }
+
+    /**
+     * 最近一次请求实际带上的 cookie 概况（只名字，不含值）。
+     * 认证失败时 JS 侧读它 —— 它来自真实请求链路，比单独调诊断桥可靠。
+     */
+    private static volatile String lastCookieDebug = "";
+
+    private static String describeCookies(String url, String cookie, boolean fallback) {
+        try {
+            StringBuilder sb = new StringBuilder();
+            sb.append(url.replaceAll("\\?.*$", ""));
+            sb.append(fallback ? "（用父域回退）" : "（直接命中）");
+            if (cookie == null || cookie.isEmpty()) {
+                sb.append(" cookie=空");
+            } else {
+                java.util.List<String> names = new java.util.ArrayList<>();
+                for (String part : cookie.split(";")) {
+                    String n = part.split("=")[0].trim();
+                    if (!n.isEmpty()) names.add(n);
+                }
+                sb.append(" cookie=").append(names.size()).append("个[").append(String.join(",", names)).append("]");
+            }
+            return sb.toString();
+        } catch (Throwable t) {
+            return url + " cookie解析失败";
+        }
+    }
+
+    /** JS 侧查询最近一次请求的 cookie 概况（诊断用）。 */
+    @android.webkit.JavascriptInterface
+    public String lastCookieInfo() {
+        return lastCookieDebug == null ? "" : lastCookieDebug;
     }
 
     private static Map<String, String> parseHeaders(String json) {
