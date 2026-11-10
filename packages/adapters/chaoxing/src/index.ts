@@ -881,7 +881,12 @@ export class ChaoxingAdapter implements PlatformAdapter {
     // 作业走的是哪条路：HTML 与 JSON 回退的口径不同（状态词、时间格式都不一样），
     // 如果同一门课在两轮之间换过路，值就会跳 —— 这是"反复更新"的另一个可能来源。
     if (htmlPathCourses > 0 || jsonFallbackCourses > 0) {
-      adapterDetails.push(`作业抓取路径：HTML ${htmlPathCourses} 门${jsonFallbackCourses > 0 ? ` / JSON 回退 ${jsonFallbackCourses} 门` : ''}`);
+      // 计数是「作业+考试」两类各算一次，所以数字会大于课程数 —— 标签里写清楚，
+      // 否则用户看到"15 门课却 HTML 37 门"会以为重复抓取（真机 2026-11-10 提过）。
+      adapterDetails.push(
+        `抓取路径（作业+考试各计一次）：HTML ${htmlPathCourses} 次` +
+          `${jsonFallbackCourses > 0 ? ` / 无enc回退 ${jsonFallbackCourses} 次` : ''}`,
+      );
     }
     // 页面只给"剩余X小时"的作业：它们的截止时间是我们按当前时刻推算的。
     // 这说明**那一批**作业的日期本来就不是精确值 —— 判断"这条有没有被平台改期"时要扣掉这一层。

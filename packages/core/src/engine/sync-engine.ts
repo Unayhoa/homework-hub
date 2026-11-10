@@ -1796,7 +1796,14 @@ export class SyncEngine {
     if (collected.length > 0 && collected.every((t) => t.deadline === undefined || t.deadline === null || t.deadline === '')) {
       selfCheck.push({
         code: 'PARSE_EMPTY',
-        note: '这些作业都没有截止时间 —— 提醒不会生效（配置里的时间字段可能没对上）',
+        // 措辞要如实：这条自检**只说明"我们没拿到截止时间"**，不能断定是解析错。
+        // 真机 2026-11-10：超星作业列表页本身就不给截止时间（只有部分行有"剩余X小时"，
+        // 详情页 330KB 里也没有日期）。原来那句"配置里的时间字段可能没对上"会把排查
+        // 引向适配器配置，而实际是平台没提供 —— 归因错，下一步就全错。
+        note:
+          `这些任务都没有截止时间 —— 提醒不会生效。` +
+          `可能是该平台的列表页本来就不提供截止时间（如超星部分实验作业），也可能是解析字段没对上；` +
+          `展开「排查信息」看每门课的抓取结果再判断。`,
       });
     }
     if (!opts.dryRun) {
@@ -2626,29 +2633,30 @@ export class SyncEngine {
       cursor: JSON.stringify([...set]),
       updatedAt: this.#clock.now().toISOString(),
     });
-    // 取消勾选 = 记录一并清掉（软删除，重新勾选后恢复）。
+    // 取消勾选 = 记录一并清掉。
+    //
+    // 【为什么必须用 userDeletedAt 而不是 deletedAt】（真机 2026-11-10 用户反馈"没实现"）
+    // deletedAt 是「同步层：上游这次没返回」，下一轮同步看到上游还在就会**自动复活** ——
+    // 于是用户取消勾选后，记录下一轮又全回来了，看起来像功能没生效。
+    // 取消勾选是用户的**明确意图**（"这门课我不管了"），语义与「手动删除单条」一致，
+    // 所以用 userDeletedAt（合并层见到就不复活）。重新勾选时再把它清掉即可恢复。
     if (muted) {
       const tasks = (await this.#store.listTasks({ accountIds: [accountId], includeDeleted: true })).filter(
         (t) => t.courseId === courseId && !t.userDeletedAt,
       );
       if (tasks.length > 0) {
         const at = this.#clock.now().toISOString();
-        // 用 deletedAt（平台级软删除）而不是 userDeletedAt（用户明确删除）标记：
-        // 前者在下一次同步看到上游仍有该任务时会被自动恢复（见 merge 逻辑），
-        // 后者是用户的永久意图、同步永不复活它 —— 而「取消勾选」是可逆的临时操作，
-        // 必须能在重新勾选后自动恢复。
-        await this.#store.softDeleteTasks(tasks.map((t) => t.id), at);
+        await this.#store.upsertTasks(tasks.map((t) => ({ ...t, userDeletedAt: at })));
         await this.#refreshNotificationSchedule();
         this.#logger.info('取消勾选课程并清除其记录', { accountId, courseId, removed: tasks.length });
       }
     } else {
-      // 重新勾选：把之前因取消勾选而软删除的任务恢复（清掉 deletedAt），
-      // 这样即使这一轮同步还没跑，用户立刻就能看到记录回来。
+      // 重新勾选：清掉取消勾选时打的墓碑，记录立刻回来（不必等下一轮同步）。
       const tasks = (await this.#store.listTasks({ accountIds: [accountId], includeDeleted: true })).filter(
-        (t) => t.courseId === courseId && t.deletedAt,
+        (t) => t.courseId === courseId && t.userDeletedAt,
       );
       if (tasks.length > 0) {
-        await this.#store.upsertTasks(tasks.map((t) => ({ ...t, deletedAt: undefined })));
+        await this.#store.upsertTasks(tasks.map((t) => ({ ...t, userDeletedAt: undefined, deletedAt: undefined })));
         await this.#refreshNotificationSchedule();
         this.#logger.info('重新勾选课程并恢复其记录', { accountId, courseId, restored: tasks.length });
       }

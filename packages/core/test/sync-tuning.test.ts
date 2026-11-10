@@ -112,6 +112,34 @@ describe('取消勾选课程：不发请求，且清除该课记录', () => {
     }
   });
 
+  it('取消勾选后**再同步一轮**记录仍不复活（真机反馈"没实现"就是这个）', async () => {
+    const control = baseControl();
+    const { dir, store, engine } = await makeEngineWithClock(makeStubAdapter(control), new FixedClock(new Date()));
+    try {
+      const account = await engine.login('stub', 'u1', { password: 'p1' });
+      await engine.syncAll({});
+      const tasks = await store.listTasks({ accountIds: [account.id] });
+      assert.ok(tasks.length > 0);
+      const courseId = tasks[0]!.courseId;
+
+      await engine.setCourseMuted(account.id, courseId, true);
+      // 关键：再跑一轮同步。若用 deletedAt 标记，这里会被上游"复活"
+      await engine.syncAll({});
+      const after = await engine.upcoming({ withinDays: 365, includeOverdue: true });
+      assert.ok(
+        after.every((t) => t.courseId !== courseId),
+        '再同步一轮后，取消勾选的课仍不应出现在待办里',
+      );
+
+      // 重新勾选 → 记录回来
+      await engine.setCourseMuted(account.id, courseId, false);
+      const back = await engine.upcoming({ withinDays: 365, includeOverdue: true });
+      assert.ok(back.some((t) => t.courseId === courseId), '重新勾选后记录应恢复');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it('恢复同步后课程重新参与，任务被重新拉回', async () => {
     const control = baseControl();
     const { dir, store, engine } = await makeEngineWithClock(makeStubAdapter(control), new FixedClock(new Date()));
