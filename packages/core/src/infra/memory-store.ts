@@ -48,8 +48,29 @@ export class MemoryStore implements HubStore {
     // 真机踩过（2026-11-09）：智慧树接入后 raw 让整个 snapshot 逼近 V8 单字符串上限，
     // `JSON.stringify` 在**落盘这一步**抛 `Invalid string length`，
     // 表现为「同步请求 0 次就失败」，日志看不出任何原因。
-    // 这里保留一张白名单，其余 raw 一律丢弃 —— snapshot 从可能的几十 MB 降到几十 KB。
-    const RAW_KEEP = ['recruitId', 'secret', 'courseId', 'homepage'] as const;
+    // 【白名单】必须包含各适配器在**后续请求**里真正要用的字段。
+    //
+    // 这里踩过一个很隐蔽的坑（真机 2026-11-10）：白名单原本只有
+    // recruitId/secret/courseId/homepage，把超星的 classId/cpi/enc 也一并丢了。
+    // 后果不是"报错"，而是重启 App 后从 snapshot 恢复 → 课程缺 classId →
+    // 作业列表请求发不出 classId → 平台回「提示 无效的用户！」+ 1148 字节空页 →
+    // 表现为「15 门课全部 0 条」。**同步当场是好的，重启后才坏** ——
+    // 因为内存里 raw 是完整的，只有落盘这一趟被裁剪。
+    //
+    // 判据：字段小、且「丢了以后请求就发不对」的，必须留。
+    //   · 超星：classId / cpi / enc（作业与考试列表、任务点全依赖）
+    //   · 智慧树：recruitId / secret（判定共享课、拼学习页）
+    //   · 通用：courseId / homepage
+    const RAW_KEEP = [
+      'recruitId',
+      'secret',
+      'courseId',
+      'homepage',
+      'classId',
+      'cpi',
+      'enc',
+      'squareUrl',
+    ] as const;
     const slimRaw = (raw: unknown): unknown => {
       if (!raw || typeof raw !== 'object') return undefined;
       const out: Record<string, unknown> = {};

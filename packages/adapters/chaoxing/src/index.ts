@@ -492,8 +492,8 @@ export class ChaoxingAdapter implements PlatformAdapter {
   async fetchTasks(ctx: AdapterContext, session: Session, req: FetchTasksRequest): Promise<Page<PlatformTask>> {
     // 先拿课程（含 classId/cpi），再逐课程拉作业与考试。
     // 课程列表通常已由 engine 缓存并传入，避免重复请求。
-    const courses =
-      req.courses?.map((c) => {
+    const mapCourses = (list: UnifiedCourse[]) =>
+      list.map((c) => {
         const raw = (c.raw ?? {}) as { classId?: string; cpi?: string; enc?: string };
         return {
           courseId: c.platformCourseId,
@@ -502,7 +502,26 @@ export class ChaoxingAdapter implements PlatformAdapter {
           enc: raw.enc !== undefined ? String(raw.enc) : undefined,
           name: c.name,
         };
-      }) ?? [];
+      });
+    let courses = mapCourses(req.courses ?? []);
+
+    // 【自愈】传入的课程全部缺 classId = 本地缓存是被旧版 snapshot 裁剪过的
+    //（旧白名单丢了 classId/cpi/enc）。这时不能硬着头皮发请求 ——
+    // 平台会回「提示 无效的用户！」，看起来像会话失效，实际是参数缺失。
+    // 直接重新拉一次课程列表，把 classId/cpi/enc 补回来。
+    if (courses.length > 0 && courses.every((c) => !c.classId)) {
+      this.#resolveTrace.push('courses:缺classId→重新拉课程列表');
+      try {
+        const fresh = await this.fetchCourses(ctx, session, { forceRefresh: true } as never);
+        const freshCourses = mapCourses(fresh.items as unknown as UnifiedCourse[]);
+        if (freshCourses.some((c) => c.classId)) {
+          courses = freshCourses;
+          this.#resolveTrace.push(`courses:重新拉取成功(${freshCourses.length}门)`);
+        }
+      } catch (e) {
+        this.#resolveTrace.push(`courses:重新拉取失败 ${(e as Error).message.slice(0, 50)}`);
+      }
+    }
 
     if (courses.length === 0) {
       throw new HubError('UPSTREAM', '缺少课程列表，无法拉取作业（课程缓存可能为空）', {
