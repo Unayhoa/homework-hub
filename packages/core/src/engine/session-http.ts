@@ -80,10 +80,19 @@ export class SessionHttpClient {
       // 返回了 HTML —— 大概率是被风控拦到了验证码页或登录页。
       // 直接把片段放进错误信息里，这是排查线上问题的关键线索。
       if (raw.status === 401 || raw.status === 403) {
-        throw new HubError('AUTH_REQUIRED', `${this.#platformId} 返回 ${raw.status}，需要重新登录`, {
-          platformId: this.#platformId,
-          requiresUserAction: true,
-        });
+        // 与下面 JSON 分支保持一致：**必须带上平台原文**。
+        // 真机 2026-11-10：超星 403 回的是 HTML，走的就是这一支；原来这里只有一句
+        // 自己编的"需要重新登录"，把唯一能指向根因的线索丢掉了。
+        const snippet = text.replace(/\s+/g, ' ').slice(0, 300);
+        throw new HubError(
+          'AUTH_REQUIRED',
+          `${this.#platformId} 返回 ${raw.status}（响应：${snippet || '空'}）`,
+          {
+            platformId: this.#platformId,
+            requiresUserAction: true,
+            details: { httpStatus: raw.status, bodySnippet: snippet },
+          },
+        );
       }
       if (/login|登录|verify|验证|captcha/i.test(text.slice(0, 2000))) {
         throw new HubError('CAPTCHA_REQUIRED', `${this.#platformId} 疑似返回登录/验证页面`, {

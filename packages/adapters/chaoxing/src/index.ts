@@ -105,6 +105,17 @@ export interface ChaoxingEndpointMap {
    *
    * 注意参数名是全小写 `courseid`/`clazzid`（作业接口用的是驼峰 `courseId`/`classId`）。
    */
+  /**
+   * 考试列表。
+   *
+   * **真实形态来自 v0.2.19 的实证**（见 HANDOVER「超星考试数据的真实来源」）：
+   * `mooc1-api.chaoxing.com/mooc-ans/exam/phone/task-list` —— 与作业的
+   * `/mooc-ans/work/task-list` **完全同构**（同 host、同参数、同样返回 `<li>` 列表页）。
+   *
+   * 之前这里写的是 `mooc1.chaoxing.com/exam-ans/mooc2/exam/exam-list`，
+   * 那是一条**未验证的推断路径**，真机上直接 403（2026-11-10 定位到：
+   * cookie 带了 20 个仍 403，因为打的是一个不该打的地址）。
+   */
   examTaskList: string;
   /** 会话探测：读取当前登录用户信息，最轻量的接口。 */
   userInfo: string;
@@ -125,8 +136,8 @@ export const ChaoxingEndpoints: ChaoxingEndpointMap = {
   courseData: 'https://mooc1-api.chaoxing.com/mycourse/backclazzdata?view=json&rss=1',
   courseList: 'https://mooc1-2.chaoxing.com/visit/interaction',
   workTaskList: 'https://mooc1-api.chaoxing.com/work/task-list',
-  workList: 'https://mooc1.chaoxing.com/mooc-ans/work/getAllWork',
-  examTaskList: 'https://mooc1.chaoxing.com/exam-ans/mooc2/exam/exam-list',
+  workList: 'https://mooc1-api.chaoxing.com/mooc-ans/work/getAllWork',
+  examTaskList: 'https://mooc1-api.chaoxing.com/mooc-ans/exam/phone/task-list',
   userInfo: 'https://passport2.chaoxing.com/api/logged',
 };
 
@@ -886,11 +897,9 @@ export class ChaoxingAdapter implements PlatformAdapter {
     if (course.cpi) params.set('cpi', course.cpi);
     const base = kind === 'exam' ? this.#ep.examTaskList : this.#ep.workTaskList;
     // 【Referer 必须与目标域一致】
-    // 真机 2026-11-10：考试列表在 mooc1.chaoxing.com/exam-ans/…，而这里原本无论
-    // 作业还是考试都发 mooc1-api.chaoxing.com 作 Referer —— 跨域 Referer 被平台判成
-    // 非预期来源，直接回 403（诊断里 cookie 带了 20 个也照样 403，正是这个原因）。
-    // 三元原来两边写的是同一个值，等于考试那条从来没对过。
-    const referer = kind === 'exam' ? 'https://mooc1.chaoxing.com/' : 'https://mooc1-api.chaoxing.com/';
+    // 作业与考试现在都在 mooc1-api.chaoxing.com（考试已改回实证路径），
+    // 所以两者用同一个 Referer。真机 2026-11-10：跨域 Referer 会被判成非预期来源 → 403。
+    const referer = 'https://mooc1-api.chaoxing.com/';
     const res = await http.request({
       url: `${base}?${params.toString()}`,
       method: 'GET',
@@ -1039,10 +1048,11 @@ export class ChaoxingAdapter implements PlatformAdapter {
       // 占位符。超星这个参数实际不校验，鉴权全靠 cookie。
       ut: 's',
     }, {
-      // 【Referer 与目标域一致】真机 2026-11-10：这个 JSON 回退接口在
-      // mooc1.chaoxing.com 上，不带 Referer 会被判成非预期来源 → 403
-      // （日志里「作业(JSON)：chaoxing 返回 403」正是这条）。
-      headers: { Referer: 'https://mooc1.chaoxing.com/' },
+      // 【Referer 与目标域一致】workList 现在也在 mooc1-api.chaoxing.com。
+      // 真机 2026-11-10：这个 JSON 回退接口原来打的是 mooc1.chaoxing.com，
+      // 且不带 Referer，被平台判成非预期来源 → 403
+      //（日志里「作业(JSON)：chaoxing 返回 403」正是这条）。
+      headers: { Referer: 'https://mooc1-api.chaoxing.com/' },
     });
 
     const body = res.body ?? {};
