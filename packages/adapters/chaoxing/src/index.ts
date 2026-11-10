@@ -580,6 +580,18 @@ export class ChaoxingAdapter implements PlatformAdapter {
         const parsed = dedupeById(rawParsed);
         dupConflicts += parsed.conflicts;
         htmlPathCourses += 1;
+        // 【诊断】解析出 0 条时，把 HTML 的"长相"记下来。
+        // 真机 2026-11-10：403 修好后变成「15 门课全部 0 条」——分不清是
+        // 「平台真的没作业」还是「返回的不是列表页」。这几个特征一眼能分开：
+        //   goTask / overHidden2 存在 = 是列表页（那 0 条就是真没有）
+        //   都没有 = 拿到的是别的页面（拒绝页/空壳/重定向后的门户页）
+        if (rawParsed.length === 0) {
+          const hasList = /goTask|overHidden2|bottomList/i.test(html);
+          const head = html.replace(/\s+/g, ' ').slice(0, 160);
+          diag.push(
+            `${course.name}/作业(HTML): 解析0条 len=${html.length} 含列表特征=${hasList ? '是' : '否'} 首段=${head}`,
+          );
+        }
 
         // ---- 诊断：为什么同一条作业会"反复显示更新" ----
         //
@@ -781,7 +793,14 @@ export class ChaoxingAdapter implements PlatformAdapter {
         (firstErr ? `\n首门课错误：${firstErr}` : '') +
         (diag.filter((d) => /登录页|会话|验证|401|403/.test(d)).length
           ? `\n命中登录墙的课程：${diag.filter((d) => /登录页|会话|验证|401|403/.test(d)).slice(0, 5).join('；')}`
-          : '');
+          : '') +
+        // 【诊断】把「每门课的解析情况」和「签名获取情况」都带上。
+        // 0 条有两种完全不同的原因：平台真没作业 / 拿到的不是列表页 / 签名没取到。
+        // 只有把这三者分开，才不用下一轮再猜。
+        (diag.length ? `\n每门课结果：${diag.slice(0, 8).join('；')}` : '') +
+        (this.#resolveTrace.length
+          ? `\n签名获取：${this.#resolveTrace.slice(-6).join('；')}`
+          : '\n签名获取：（未产生记录）');
       throw new HubError(
         authLike ? 'AUTH_REQUIRED' : 'UPSTREAM',
         authLike
@@ -909,6 +928,12 @@ export class ChaoxingAdapter implements PlatformAdapter {
     kind: 'homework' | 'exam' = 'homework',
   ): Promise<string> {
     const now = Date.now();
+    // 【关键】作业列表需要**两个不同的**签名参数（HAR 实证 + 本文件 resolveTaskUrl 早已记录）：
+    //   stuenc = 课程页隐藏域 `enc`
+    //   enc    = 课程页隐藏域 `workEnc`      ← 与 stuenc **不是同一个值**
+    // 之前把两者都填成 course.enc，平台接受请求（不再 403）但返回的列表是空的
+    // —— 2026-11-10 的「15 门课全部 0 条」就是这么来的。
+    const sig = await this.#courseSignatures(http, course);
     const params = new URLSearchParams({
       courseId: course.courseId,
       classId: course.classId,
@@ -916,14 +941,8 @@ export class ChaoxingAdapter implements PlatformAdapter {
       t: String(now),
     });
     if (course.cpi) params.set('cpi', course.cpi);
-    // 【stuenc 必须带】HAR 实证：作业/考试列表都要求 `stuenc`，其值就等于课程列表里
-    // 的 `enc`。缺了它平台直接回拒绝页（2026-11-10 的 403 就是这个）。
-    if (course.enc) {
-      params.set('stuenc', course.enc);
-      // 作业列表还要一个独立的 `enc` 签名；HAR 里它与 stuenc 不同。
-      // 拿不到就只带 stuenc —— 至少比完全不带更接近真实请求。
-      if (kind === 'homework') params.set('enc', course.enc);
-    }
+    if (sig.stuenc) params.set('stuenc', sig.stuenc);
+    if (kind === 'homework' && sig.workEnc) params.set('enc', sig.workEnc);
     const base = kind === 'exam' ? this.#ep.examTaskList : this.#ep.workTaskList;
     // 【Referer 必须是课程页】HAR 里 Referer 是 mooc2-ans 的 mycourse/stu（带 courseid/clazzid/cpi/enc）。
     // 之前发 API 根域会被判成非预期来源 → 那个 no-cache 拒绝页。
@@ -932,7 +951,7 @@ export class ChaoxingAdapter implements PlatformAdapter {
       `?courseid=${encodeURIComponent(course.courseId)}` +
       `&clazzid=${encodeURIComponent(course.classId)}` +
       (course.cpi ? `&cpi=${encodeURIComponent(course.cpi)}` : '') +
-      (course.enc ? `&enc=${encodeURIComponent(course.enc)}` : '') +
+      (sig.stuenc ? `&enc=${encodeURIComponent(sig.stuenc)}` : '') +
       `&t=${now}`;
     const res = await http.request({
       url: `${base}?${params.toString()}`,
@@ -1074,6 +1093,7 @@ export class ChaoxingAdapter implements PlatformAdapter {
     course: { courseId: string; classId: string; cpi?: string; enc?: string; name: string },
   ): Promise<PlatformTask[]> {
     const now = Date.now();
+    const sig = await this.#courseSignatures(http, course);
     const params = new URLSearchParams({
       courseId: course.courseId,
       classId: course.classId,
@@ -1081,13 +1101,13 @@ export class ChaoxingAdapter implements PlatformAdapter {
       t: String(now),
     });
     if (course.cpi) params.set('cpi', course.cpi);
-    if (course.enc) params.set('stuenc', course.enc);
+    if (sig.stuenc) params.set('stuenc', sig.stuenc);
     const referer =
       'https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/stu' +
       `?courseid=${encodeURIComponent(course.courseId)}` +
       `&clazzid=${encodeURIComponent(course.classId)}` +
       (course.cpi ? `&cpi=${encodeURIComponent(course.cpi)}` : '') +
-      (course.enc ? `&enc=${encodeURIComponent(course.enc)}` : '') +
+      (sig.stuenc ? `&enc=${encodeURIComponent(sig.stuenc)}` : '') +
       `&t=${now}`;
     const res = await http.request({
       url: `${this.#ep.workTaskList}?${params.toString()}`,
@@ -1114,6 +1134,52 @@ export class ChaoxingAdapter implements PlatformAdapter {
       sourceUrl: chaoxingCourseUrl(course),
       raw: { source: 'task-list-noenc', title: w.title },
     }));
+  }
+
+  /**
+   * 取作业列表需要的两个签名（都来自课程页隐藏域）：
+   *   · `stuenc` = 隐藏域 `enc`
+   *   · `workEnc` = 隐藏域 `workEnc`
+   *
+   * 为什么必须从课程页现取（真机 2026-11-10）：
+   * 课程列表里的 `enc` 只能当 stuenc 用；列表接口的 `enc` 是**另一个**由课程页签发的值。
+   * 拿 course.enc 顶替它，平台不报错、但返回空列表 —— 表现为「15 门课全部 0 条」，
+   * 比 403 更难查。这里按 resolveTaskUrl 已有的实证链路取真实值。
+   *
+   * 拿不到时降级用 course.enc 当 stuenc（至少请求能过），并把情况记进 trace。
+   */
+  async #courseSignatures(
+    http: SessionHttpClient,
+    course: { courseId: string; classId: string; cpi?: string; enc?: string },
+  ): Promise<{ stuenc?: string; workEnc?: string }> {
+    const fallback = { ...(course.enc ? { stuenc: course.enc } : {}) };
+    if (!course.classId) return fallback;
+    try {
+      const url = chaoxingCourseUrl({
+        courseId: course.courseId,
+        classId: course.classId,
+        ...(course.cpi ? { cpi: course.cpi } : {}),
+        ...(course.enc ? { enc: course.enc } : {}),
+      });
+      const res = await http.request({ url, method: 'GET' });
+      const html = await res.text();
+      const enc =
+        firstGroup(html, /id=["']enc["'][^>]*value=["']([^"']+)["']/i) ??
+        firstGroup(html, /name=["']enc["'][^>]*value=["']([^"']+)["']/i);
+      const workEnc =
+        firstGroup(html, /id=["']workEnc["'][^>]*value=["']([^"']+)["']/i) ??
+        firstGroup(html, /name=["']workEnc["'][^>]*value=["']([^"']+)["']/i);
+      this.#resolveTrace.push(
+        `task-list:sig course=${course.courseId} enc=${Boolean(enc)} workEnc=${Boolean(workEnc)} len=${html.length}`,
+      );
+      return {
+        ...(enc ? { stuenc: enc } : fallback.stuenc ? { stuenc: fallback.stuenc } : {}),
+        ...(workEnc ? { workEnc } : {}),
+      };
+    } catch (e) {
+      this.#resolveTrace.push(`task-list:sig 课程页取签名失败：${(e as Error).message.slice(0, 60)}`);
+      return fallback;
+    }
   }
 
   async #fetchPerCourse(
