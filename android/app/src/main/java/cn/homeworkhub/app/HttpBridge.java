@@ -169,6 +169,14 @@ public class HttpBridge {
     public String cookieNames(final String url) {
         try {
             String raw = android.webkit.CookieManager.getInstance().getCookie(url);
+            // 目标域取不到就退到父域（与 perform() 的跨子域回退一致）——
+            // 否则诊断会显示"API 域没 cookie"，而其实 cookie 在主域上、请求也带得上。
+            if (raw == null || raw.isEmpty()) {
+                String parent = registrableDomain(url);
+                if (parent != null) {
+                    raw = android.webkit.CookieManager.getInstance().getCookie("https://" + parent + "/");
+                }
+            }
             if (raw == null || raw.isEmpty()) return "[]";
             org.json.JSONArray arr = new org.json.JSONArray();
             for (String part : raw.split(";")) {
@@ -177,7 +185,7 @@ public class HttpBridge {
             }
             return arr.toString();
         } catch (Throwable t) {
-            return "[\"__error__:" + String.valueOf(t.getMessage()).replace("\"", "'") + "\"]";
+            return "[\"__error__:" + String.valueOf(t.getMessage()).replace("\"", "'").replace("\n", " ") + "\"]";
         }
     }
 
@@ -396,7 +404,20 @@ public class HttpBridge {
             conn.setRequestProperty("User-Agent", userAgent);
 
             // 关键：把 CookieManager 里属于这个域的 cookie 带上。
+            //
+            // 【跨子域回退，2026-11-10 真机定位】超星的登录会话 cookie（_uid/fid/UID/xxtenc…）
+            // 是在 i.chaoxing.com 上种下的，而业务接口在 mooc1-api.chaoxing.com /
+            // mooc1.chaoxing.com / passport2.chaoxing.com。原生按**目标 URL** 取 cookie 时，
+            // 某些实现只做精确域匹配，于是"WebView 明明已登录、原生请求却 403"。
+            // 浏览器能工作是因为这些 cookie 带 Domain=.chaoxing.com。
+            // 这里补一层：目标域取不到就退到父域再取一次（只回退到注册域，不跨站）。
             String cookie = cookieManager.getCookie(currentUrl);
+            if (cookie == null || cookie.isEmpty()) {
+                String parent = registrableDomain(currentUrl);
+                if (parent != null) {
+                    cookie = cookieManager.getCookie("https://" + parent + "/");
+                }
+            }
             if (cookie != null && !cookie.isEmpty()) conn.setRequestProperty("Cookie", cookie);
 
             // 雨课堂（Django 系）的 API 要求 x-csrftoken 头与会话配对，
@@ -598,6 +619,35 @@ public class HttpBridge {
             return o.toString();
         } catch (Exception e) {
             return "{\"status\":500,\"url\":\"\",\"text\":\"\",\"error\":\"序列化响应失败\"}";
+        }
+    }
+
+    /**
+     * 取 URL 的「注册域」（如 mooc1-api.chaoxing.com → chaoxing.com）。
+     *
+     * 用途：CookieManager 按目标 URL 取不到 cookie 时，退到父域再取一次 ——
+     * 很多平台把会话 cookie 种在主域（Domain=.chaoxing.com），子域 API 依赖它。
+     *
+     * 只处理「最后两段」的常见形态，并对少数二级后缀（edu.cn / com.cn）多退一段，
+     * 不做完整 Public Suffix List —— 这里只用于**同站回退**，退错也只会取不到，不会串站。
+     */
+    private static String registrableDomain(String url) {
+        try {
+            String host = new java.net.URL(url).getHost();
+            if (host == null || host.isEmpty()) return null;
+            String[] parts = host.split("\\.");
+            if (parts.length < 3) return null; // 已经是裸域（chaoxing.com），无需回退
+            String last2 = parts[parts.length - 2] + "." + parts[parts.length - 1];
+            String last3 = parts.length >= 3
+                    ? parts[parts.length - 3] + "." + last2
+                    : last2;
+            if (last2.equals("edu.cn") || last2.equals("com.cn") || last2.equals("org.cn")
+                    || last2.equals("net.cn") || last2.equals("gov.cn")) {
+                return last3;
+            }
+            return last2;
+        } catch (Exception e) {
+            return null;
         }
     }
 

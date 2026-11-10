@@ -156,6 +156,17 @@ export function hasNativeBridge(): boolean {
  */
 export function nativeCookieNames(url: string): string[] {
   if (typeof window === 'undefined') return ['__no_window__'];
+  // 桥只在**应用页**注入。若此刻 WebView 正停在平台页（刚登录返回、或浏览中），
+  // 调用会抛 "Java bridge method can't be invoked on a non-injected..."。
+  // 先自查页面来源，直接给出可读结论，而不是把一条 WebView 内部报错塞进日志。
+  try {
+    const origin = window.location?.origin ?? '';
+    if (origin && !/^https?:\/\/(appassets\.androidplatform\.net|localhost|127\.0\.0\.1)/.test(origin)) {
+      return [`__not_on_app_page__:${origin}`];
+    }
+  } catch {
+    /* 取不到 origin 就继续尝试 */
+  }
   const fn = window.Android?.cookieNames;
   if (typeof fn !== 'function') return ['__no_bridge__'];
   try {
