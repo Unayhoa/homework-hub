@@ -335,6 +335,35 @@ export class SyncEngine {
     return account;
   }
 
+  /**
+   * 【临时·能力测试】用真实会话发一次超星只读列表请求，返回状态码与正文。
+   *
+   * 供「设置 → 超星查询能力测试」调用（见 apps/web/src/limits-probe.ts）。
+   * 之所以放在引擎里而不是 UI 层：AdapterContext（含 http / limiter / clock）
+   * 只有引擎能正确构造 —— 在 UI 层拼会绕过限流器与统计。
+   *
+   * 优化方案敲定后，本方法与 limits-probe.ts 一并删除。
+   */
+  async probeChaoxingReadOnly(
+    accountId: string,
+    course: { courseId: string; classId: string; cpi?: string; enc?: string },
+  ): Promise<{ status: number; body: string }> {
+    const account = await this.#store.getAccount(accountId);
+    if (!account) throw new HubError('AUTH_FAILED', `账号不存在：${accountId}`);
+    const adapter = this.#registry.require(account.platformId) as unknown as {
+      probeReadOnlyOnce?: (
+        ctx: AdapterContext,
+        session: Session,
+        c: { courseId: string; classId: string; cpi?: string; enc?: string },
+      ) => Promise<{ status: number; body: string }>;
+    };
+    if (!adapter.probeReadOnlyOnce) throw new HubError('UPSTREAM', '该平台不支持只读能力测试');
+    const session = await this.#vault.load(accountId);
+    if (!session) throw new HubError('AUTH_REQUIRED', '会话不存在，请先同步一次');
+    const ctx = this.#contextFor(account.platformId, accountId);
+    return adapter.probeReadOnlyOnce(ctx, session, course);
+  }
+
   async listAccounts(): Promise<PlatformAccount[]> {
     return this.#store.listAccounts();
   }
@@ -1860,7 +1889,12 @@ export class SyncEngine {
     // 注意：必须在拼 message 之前完成，否则这句话进不了本轮消息。
     try {
       const reconciled = await this.#reconcileMutedCourseRecords(account);
-      if (reconciled > 0) notes.push(`已按勾选状态对齐 ${reconciled} 条记录`);
+      // 【只进日志，不进弹窗】（用户 2026-11-10 明确要求）
+      // 「对齐 N 条记录」是**验证性**信息：用户翻一眼待办/记录就能确认结果，
+      // 而他真正需要知道的是「有没有影响我的东西」（比如作业没截止时间）。
+      // 多个平台各说一遍会把真正的重点挤没（真机：三个平台三条对齐提示，
+      // 把「超星没有截止时间」夹在中间，读不出来）。
+      if (reconciled > 0) details.push(`已按勾选状态对齐 ${reconciled} 条记录`);
     } catch (e) {
       // 收敛失败不影响同步结果：数据本身是对的，只是可见性没对齐
       log.warn('按勾选状态对齐记录失败', { error: describe(e) });

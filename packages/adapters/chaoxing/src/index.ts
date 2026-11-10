@@ -1533,6 +1533,54 @@ export class ChaoxingAdapter implements PlatformAdapter {
     return this.#resolveTrace.slice(0, 16);
   }
 
+  /**
+   * 【临时·能力测试】用真实课程发一次只读列表请求，返回状态码与正文。
+   *
+   * 供「设置 → 超星查询能力测试」调用（见 limits-probe.ts）。
+   * 只打作业列表这一个最便宜的只读接口，不做任何写操作 ——
+   * 即便测试被平台拦，损失也只是这一次请求。
+   *
+   * 优化方案敲定后，本方法与 limits-probe.ts 一并删除。
+   */
+  async probeReadOnlyOnce(
+    ctx: AdapterContext,
+    session: Session,
+    course: { courseId: string; classId: string; cpi?: string; enc?: string },
+  ): Promise<{ status: number; body: string }> {
+    const http = new SessionHttpClient(ctx, session);
+    const now = Date.now();
+    const params = new URLSearchParams({
+      courseId: course.courseId,
+      classId: course.classId,
+      ut: 's',
+      t: String(now),
+    });
+    if (course.cpi) params.set('cpi', course.cpi);
+    if (course.enc) {
+      params.set('stuenc', course.enc);
+      params.set('enc', course.enc);
+    }
+    const referer =
+      'https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/stu' +
+      `?courseid=${encodeURIComponent(course.courseId)}` +
+      `&clazzid=${encodeURIComponent(course.classId)}` +
+      (course.cpi ? `&cpi=${encodeURIComponent(course.cpi)}` : '') +
+      (course.enc ? `&enc=${encodeURIComponent(course.enc)}` : '') +
+      `&t=${now}`;
+    try {
+      const res = await http.request({
+        url: `${this.#ep.workTaskList}?${params.toString()}`,
+        method: 'GET',
+        headers: { Referer: referer },
+      });
+      const body = await res.text().catch(() => '');
+      return { status: res.status, body };
+    } catch (e) {
+      // 通道异常也要能被判定（当作失败样本），所以不抛，直接回 -1
+      return { status: -1, body: `请求异常：${String((e as Error).message ?? e).slice(0, 120)}` };
+    }
+  }
+
   buildCourseUrl(course: UnifiedCourse): string | undefined {
     const raw = (course.raw ?? {}) as { classId?: string; cpi?: string; enc?: string; squareUrl?: string };
     if (!course.platformCourseId || !raw.classId) return undefined;
