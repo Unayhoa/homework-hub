@@ -148,7 +148,11 @@ export async function runLimitTestStep(
     okCount,
     failCount,
     durationMs,
-    actualRps: Math.round((done / durationMs) * 1000 * 10) / 10,
+    // 【别报假的速率】被拦时只发了 1~2 个请求就停，用 done/duration 算出来的
+    // "实际 rps" 会是 9.9 这种荒谬值（1 个请求 / 0.1 秒），读起来像"跑得飞快"。
+    // 只在跑满预定请求数时才给实际速率，否则标 0 表示"未完成，速率无意义"。
+    actualRps:
+      stopped || done < step.total ? 0 : Math.round((done / durationMs) * 1000 * 10) / 10,
     statusCounts,
     blockedSamples,
     passed: failCount === 0,

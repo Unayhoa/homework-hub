@@ -1599,25 +1599,30 @@ export class ChaoxingAdapter implements PlatformAdapter {
     course: { courseId: string; classId: string; cpi?: string; enc?: string },
   ): Promise<{ status: number; body: string }> {
     const http = new SessionHttpClient(ctx, session);
+    // 【必须复用 #courseSignatures 取签名】（2026-11-10 真机踩过）
+    // 原来这里把 `enc` 和 `stuenc` 都填成 course.enc —— 而真实请求里
+    // `enc` 是课程页的 workEnc，与 stuenc 不是同一个值。参数错 → 平台回
+    // 「提示 无效的用户！」(1149 字节) → 测试面板把 A1 误判成"被风控拦"。
+    // 那种误判比没有数据更糟：会让人以为 4 rps 都不安全。
+    const sig = await this.#courseSignatures(http, course);
     const now = Date.now();
+    const t = sig.t ?? String(now);
     const params = new URLSearchParams({
       courseId: course.courseId,
       classId: course.classId,
       ut: 's',
-      t: String(now),
+      t,
     });
     if (course.cpi) params.set('cpi', course.cpi);
-    if (course.enc) {
-      params.set('stuenc', course.enc);
-      params.set('enc', course.enc);
-    }
+    if (sig.stuenc) params.set('stuenc', sig.stuenc);
+    if (sig.workEnc) params.set('enc', sig.workEnc);
     const referer =
       'https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/stu' +
       `?courseid=${encodeURIComponent(course.courseId)}` +
       `&clazzid=${encodeURIComponent(course.classId)}` +
       (course.cpi ? `&cpi=${encodeURIComponent(course.cpi)}` : '') +
-      (course.enc ? `&enc=${encodeURIComponent(course.enc)}` : '') +
-      `&t=${now}`;
+      (sig.stuenc ? `&enc=${encodeURIComponent(sig.stuenc)}` : '') +
+      `&t=${t}`;
     try {
       const res = await http.request({
         url: `${this.#ep.workTaskList}?${params.toString()}`,
