@@ -588,8 +588,18 @@ export class ChaoxingAdapter implements PlatformAdapter {
         if (rawParsed.length === 0) {
           const hasList = /goTask|overHidden2|bottomList/i.test(html);
           const head = html.replace(/\s+/g, ' ').slice(0, 160);
+          // 只给首段时，1148 字节的错误页看不出到底在说什么（首段全是 DOCTYPE）。
+          // 补一段**正文**：去掉标签后的文字，错误页的真话通常就在里面
+          //（"无效的参数" / "请重新登录" / "没有权限" 三者的修法完全不同）。
+          const bodyText = stripTags(
+            html.replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' '),
+          )
+            .replace(/\s+/g, ' ')
+            .trim()
+            .slice(0, 200);
           diag.push(
-            `${course.name}/作业(HTML): 解析0条 len=${html.length} 含列表特征=${hasList ? '是' : '否'} 首段=${head}`,
+            `${course.name}/作业(HTML): 解析0条 len=${html.length} 含列表特征=${hasList ? '是' : '否'} ` +
+              `正文=${bodyText || '（空）'}`,
           );
         }
 
@@ -799,7 +809,7 @@ export class ChaoxingAdapter implements PlatformAdapter {
         // 只有把这三者分开，才不用下一轮再猜。
         (diag.length ? `\n每门课结果：${diag.slice(0, 8).join('；')}` : '') +
         (this.#resolveTrace.length
-          ? `\n签名获取：${this.#resolveTrace.slice(-6).join('；')}`
+          ? `\n签名获取（共${this.#resolveTrace.length}条）：${this.#resolveTrace.slice(-8).join('；')}`
           : '\n签名获取：（未产生记录）');
       throw new HubError(
         authLike ? 'AUTH_REQUIRED' : 'UPSTREAM',
@@ -934,11 +944,13 @@ export class ChaoxingAdapter implements PlatformAdapter {
     // 之前把两者都填成 course.enc，平台接受请求（不再 403）但返回的列表是空的
     // —— 2026-11-10 的「15 门课全部 0 条」就是这么来的。
     const sig = await this.#courseSignatures(http, course);
+    // t 用课程页里的那个（与 stuenc/workEnc 配套）；拿不到才退回当前时间。
+    const t = sig.t ?? String(now);
     const params = new URLSearchParams({
       courseId: course.courseId,
       classId: course.classId,
       ut: 's',
-      t: String(now),
+      t,
     });
     if (course.cpi) params.set('cpi', course.cpi);
     if (sig.stuenc) params.set('stuenc', sig.stuenc);
@@ -952,7 +964,7 @@ export class ChaoxingAdapter implements PlatformAdapter {
       `&clazzid=${encodeURIComponent(course.classId)}` +
       (course.cpi ? `&cpi=${encodeURIComponent(course.cpi)}` : '') +
       (sig.stuenc ? `&enc=${encodeURIComponent(sig.stuenc)}` : '') +
-      `&t=${now}`;
+      `&t=${t}`;
     const res = await http.request({
       url: `${base}?${params.toString()}`,
       method: 'GET',
@@ -1094,11 +1106,12 @@ export class ChaoxingAdapter implements PlatformAdapter {
   ): Promise<PlatformTask[]> {
     const now = Date.now();
     const sig = await this.#courseSignatures(http, course);
+    const t = sig.t ?? String(now);
     const params = new URLSearchParams({
       courseId: course.courseId,
       classId: course.classId,
       ut: 's',
-      t: String(now),
+      t,
     });
     if (course.cpi) params.set('cpi', course.cpi);
     if (sig.stuenc) params.set('stuenc', sig.stuenc);
@@ -1108,7 +1121,7 @@ export class ChaoxingAdapter implements PlatformAdapter {
       `&clazzid=${encodeURIComponent(course.classId)}` +
       (course.cpi ? `&cpi=${encodeURIComponent(course.cpi)}` : '') +
       (sig.stuenc ? `&enc=${encodeURIComponent(sig.stuenc)}` : '') +
-      `&t=${now}`;
+      `&t=${t}`;
     const res = await http.request({
       url: `${this.#ep.workTaskList}?${params.toString()}`,
       method: 'GET',
@@ -1151,9 +1164,14 @@ export class ChaoxingAdapter implements PlatformAdapter {
   async #courseSignatures(
     http: SessionHttpClient,
     course: { courseId: string; classId: string; cpi?: string; enc?: string },
-  ): Promise<{ stuenc?: string; workEnc?: string }> {
+  ): Promise<{ stuenc?: string; workEnc?: string; t?: string }> {
     const fallback = { ...(course.enc ? { stuenc: course.enc } : {}) };
-    if (!course.classId) return fallback;
+    if (!course.classId) {
+      // 静默 return 是上一版的错误：诊断里显示「未产生记录」，
+      // 看不出是"没 classId"还是"根本没跑"。提前返回也必须留痕。
+      this.#resolveTrace.push(`task-list:sig 缺 classId，跳过课程页（course=${course.courseId}）`);
+      return fallback;
+    }
     try {
       const url = chaoxingCourseUrl({
         courseId: course.courseId,
@@ -1174,17 +1192,26 @@ export class ChaoxingAdapter implements PlatformAdapter {
       const workEnc =
         firstGroup(html, /id=["']workEnc["'][^>]*value=["']([^"']+)["']/i) ??
         firstGroup(html, /name=["']workEnc["'][^>]*value=["']([^"']+)["']/i);
+      // 【t 必须取课程页里的那个】
+      // 真机 2026-11-10：stuenc/workEnc 是与课程页 `t` 绑定的签名，用 Date.now() 去配
+      // 会签名对不上 —— 平台不报错、只回一个 1148 字节的通用页（列表为空）。
+      // HAR 里列表请求的 t 与课程页隐藏域 t 完全一致，所以这里必须原样搬。
+      const pageT =
+        firstGroup(html, /id=["']t["'][^>]*value=["']([^"']+)["']/i) ??
+        firstGroup(html, /name=["']t["'][^>]*value=["']([^"']+)["']/i);
       // 诊断要能回答"课程页到底拿到了什么"：长度、是否含关键隐藏域、最终落点。
       // 拿不到签名时，这里就是唯一线索（真机 2026-11-10 的 0 条正是卡在这一步）。
       const looksCoursePage = /workEnc|mycourse|courseId|courseid/i.test(html);
       this.#resolveTrace.push(
         `task-list:sig course=${course.courseId} HTTP=${res.status} len=${html.length} ` +
           `页面特征=${looksCoursePage ? '是' : '否'} enc=${Boolean(enc)} workEnc=${Boolean(workEnc)} ` +
+          `t=${Boolean(pageT)} ` +
           `落点=${String(res.url ?? '').replace(/^https?:\/\//, '').slice(0, 70)}`,
       );
       return {
         ...(enc ? { stuenc: enc } : fallback.stuenc ? { stuenc: fallback.stuenc } : {}),
         ...(workEnc ? { workEnc } : {}),
+        ...(pageT ? { t: pageT } : {}),
       };
     } catch (e) {
       this.#resolveTrace.push(`task-list:sig 课程页取签名失败：${(e as Error).message.slice(0, 60)}`);
