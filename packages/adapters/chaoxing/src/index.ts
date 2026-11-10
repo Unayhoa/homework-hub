@@ -1161,7 +1161,12 @@ export class ChaoxingAdapter implements PlatformAdapter {
         ...(course.cpi ? { cpi: course.cpi } : {}),
         ...(course.enc ? { enc: course.enc } : {}),
       });
-      const res = await http.request({ url, method: 'GET' });
+      const res = await http.request({
+        url,
+        method: 'GET',
+        // 课程页同样是"页面"，浏览器带的是同源 Referer；缺了可能拿到空壳/拒绝页。
+        headers: { Referer: 'https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/stu' },
+      });
       const html = await res.text();
       const enc =
         firstGroup(html, /id=["']enc["'][^>]*value=["']([^"']+)["']/i) ??
@@ -1169,8 +1174,13 @@ export class ChaoxingAdapter implements PlatformAdapter {
       const workEnc =
         firstGroup(html, /id=["']workEnc["'][^>]*value=["']([^"']+)["']/i) ??
         firstGroup(html, /name=["']workEnc["'][^>]*value=["']([^"']+)["']/i);
+      // 诊断要能回答"课程页到底拿到了什么"：长度、是否含关键隐藏域、最终落点。
+      // 拿不到签名时，这里就是唯一线索（真机 2026-11-10 的 0 条正是卡在这一步）。
+      const looksCoursePage = /workEnc|mycourse|courseId|courseid/i.test(html);
       this.#resolveTrace.push(
-        `task-list:sig course=${course.courseId} enc=${Boolean(enc)} workEnc=${Boolean(workEnc)} len=${html.length}`,
+        `task-list:sig course=${course.courseId} HTTP=${res.status} len=${html.length} ` +
+          `页面特征=${looksCoursePage ? '是' : '否'} enc=${Boolean(enc)} workEnc=${Boolean(workEnc)} ` +
+          `落点=${String(res.url ?? '').replace(/^https?:\/\//, '').slice(0, 70)}`,
       );
       return {
         ...(enc ? { stuenc: enc } : fallback.stuenc ? { stuenc: fallback.stuenc } : {}),

@@ -1621,7 +1621,15 @@ export class SyncEngine {
           ? `课程列表拉取失败（作业依赖它）：${rootCause.message}`
           : err.message;
         await this.#markAccount(account, 'failed', msg, rootCause.code);
-        return finish('failed', { courses: courses.length }, msg);
+        // 【诊断】失败分支也必须把适配器的 why 带出去。
+        // 真机 2026-11-10：学习通「15 门课全部 0 条」是 UPSTREAM 失败，不走 auth 分支，
+        // 于是精心收集的「每门课结果 / 签名获取」全被丢掉 —— 排查信息里只剩桥自检，
+        // 用户和我都看不出卡在哪一环。失败日志同样是排查现场，不能只留一句话。
+        const failDetail =
+          rootCause.details && typeof rootCause.details.why === 'string'
+            ? String(rootCause.details.why)
+            : undefined;
+        return finish('failed', { courses: courses.length, ...(failDetail ? { detail: failDetail } : {}) }, msg);
       }
 
       // 拿到了部分数据：合并已获取部分，但禁用删除判定（complete 仍为 false）
@@ -1662,7 +1670,13 @@ export class SyncEngine {
     if (!pageError && collected.length === 0 && (declaredTotal ?? 0) > 0) {
       const err = schemaDrift(account.platformId, `上游声明 ${declaredTotal} 条任务，实际解析出 0 条`);
       await this.#markAccount(account, 'failed', err.message, err.code);
-      return finish('failed', { courses: courses.length }, err.message);
+      const driftDetail =
+        err.details && typeof err.details.why === 'string' ? String(err.details.why) : undefined;
+      return finish(
+        'failed',
+        { courses: courses.length, ...(driftDetail ? { detail: driftDetail } : {}) },
+        err.message,
+      );
     }
 
     // ---- 归一化 + 合并 ----
