@@ -1853,6 +1853,19 @@ export class SyncEngine {
       if (notes.join('；').length + n.length > 1200) break; // 消息是给人读的，不是日志倾倒口
       notes.push(n);
     }
+    // 收尾：把「课程勾选状态」与「记录可见性」对齐（见 #reconcileMutedCourseRecords）。
+    // 放在这里而不是只在 setCourseMuted 里做：这样**存量数据**（老版本升级、
+    // 换机恢复、账号重登后继承的课程）也能在下一轮同步自动对齐，用户不必手动
+    // "勾上再取消"去触发。纯本地扫描，不发请求。
+    // 注意：必须在拼 message 之前完成，否则这句话进不了本轮消息。
+    try {
+      const reconciled = await this.#reconcileMutedCourseRecords(account);
+      if (reconciled > 0) notes.push(`已按勾选状态对齐 ${reconciled} 条记录`);
+    } catch (e) {
+      // 收敛失败不影响同步结果：数据本身是对的，只是可见性没对齐
+      log.warn('按勾选状态对齐记录失败', { error: describe(e) });
+    }
+
     const message = notes.length > 0 ? notes.join('；') : undefined;
     await this.#markAccount(account, status, message);
 
@@ -2601,6 +2614,64 @@ export class SyncEngine {
   }
 
   /**
+   * 【状态收敛】让「课程勾选状态」与「记录是否可见」始终一致。
+   *
+   * 为什么需要它（2026-11-10 用户提出的设计问题）：
+   * 之前的实现把删除绑在**操作发生的那一刻**（勾 → 不勾），于是出现一个洞：
+   * 只要记录是在新逻辑之前就存在的（老版本升级、换机恢复、账号重登后课程继承），
+   * 那些课程**从未发生过勾选变化**，就永远不会被清理 —— 用户必须手动"勾上再取消"
+   * 才能触发一次。用户的心智是「**没勾的课不该有记录**」，这是**状态约束**，
+   * 不是一次性动作。
+   *
+   * 做法：每轮同步收尾扫一遍本地任务（无网络请求，毫秒级）：
+   *   · 未勾选课程的任务 → 打 userDeletedAt（永不复活）
+   *   · 已勾选课程里被上面误打的 → 清掉（用户重新勾选即恢复）
+   *
+   * 幂等：没变化时一条都不写，不会每轮产生无谓的写盘。
+   */
+  async #reconcileMutedCourseRecords(account: PlatformAccount): Promise<number> {
+    let muted: string[] = [];
+    try {
+      const c = await this.#store.getCursor(account.id, 'course-mute');
+      if (c?.cursor) muted = JSON.parse(c.cursor) as string[];
+    } catch {
+      muted = [];
+    }
+    const mutedSet = new Set(muted);
+    const all = await this.#store.listTasks({ accountIds: [account.id], includeDeleted: true });
+    if (all.length === 0) return 0;
+    const at = this.#clock.now().toISOString();
+    // 【只动"因取消勾选而隐藏"的那些，绝不碰用户手动删除的】
+    // 用 raw.mutedHidden 作为来源标记（真机 2026-11-10：不加区分时，
+    // 收敛会把「用户删除单条」「删整课」的墓碑一起清掉，那三条测试当场就红了）。
+    const isMutedHidden = (t: { raw?: unknown }) =>
+      Boolean((t.raw as { mutedHidden?: boolean } | undefined)?.mutedHidden);
+    const toHide = all.filter((t) => mutedSet.has(t.courseId) && !t.userDeletedAt);
+    const toRestore = all.filter((t) => !mutedSet.has(t.courseId) && t.userDeletedAt && isMutedHidden(t));
+    if (toHide.length > 0) {
+      await this.#store.upsertTasks(
+        toHide.map((t) => ({
+          ...t,
+          userDeletedAt: at,
+          raw: { ...(t.raw as object | undefined), mutedHidden: true },
+        })),
+      );
+    }
+    if (toRestore.length > 0) {
+      await this.#store.upsertTasks(toRestore.map((t) => ({ ...t, userDeletedAt: undefined })));
+    }
+    if (toHide.length > 0 || toRestore.length > 0) {
+      await this.#refreshNotificationSchedule();
+      this.#logger.info('课程勾选状态与记录已收敛', {
+        accountId: account.id,
+        hidden: toHide.length,
+        restored: toRestore.length,
+      });
+    }
+    return toHide.length + toRestore.length;
+  }
+
+  /**
    * 把某门课设为「不再同步」（课程栏取消勾选）。
    *
    * 语义（2026-11-09 用户明确要求变更）：**取消勾选 = 这门课与我无关，记录一并清掉**。
@@ -2646,14 +2717,26 @@ export class SyncEngine {
       );
       if (tasks.length > 0) {
         const at = this.#clock.now().toISOString();
-        await this.#store.upsertTasks(tasks.map((t) => ({ ...t, userDeletedAt: at })));
+        // 打来源标记 mutedHidden：将来"重新勾选"和"同步收敛"只恢复自己打的墓碑，
+        // 不会把用户手动删除（deleteTask/deleteCourse）的也一并复活。
+        await this.#store.upsertTasks(
+          tasks.map((t) => ({
+            ...t,
+            userDeletedAt: at,
+            raw: { ...(t.raw as object | undefined), mutedHidden: true },
+          })),
+        );
         await this.#refreshNotificationSchedule();
         this.#logger.info('取消勾选课程并清除其记录', { accountId, courseId, removed: tasks.length });
       }
     } else {
-      // 重新勾选：清掉取消勾选时打的墓碑，记录立刻回来（不必等下一轮同步）。
+      // 重新勾选：只清掉**因取消勾选而打**的墓碑（mutedHidden），
+      // 用户手动删除的记录保持删除状态。
       const tasks = (await this.#store.listTasks({ accountIds: [accountId], includeDeleted: true })).filter(
-        (t) => t.courseId === courseId && t.userDeletedAt,
+        (t) =>
+          t.courseId === courseId &&
+          t.userDeletedAt &&
+          Boolean((t.raw as { mutedHidden?: boolean } | undefined)?.mutedHidden),
       );
       if (tasks.length > 0) {
         await this.#store.upsertTasks(tasks.map((t) => ({ ...t, userDeletedAt: undefined, deletedAt: undefined })));

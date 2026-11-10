@@ -561,6 +561,8 @@ export class ChaoxingAdapter implements PlatformAdapter {
     let emptyExamHtml = '';
     /** 只进日志的诊断（抓取路径、多日期、相对推算、考试页骨架…） */
     const adapterDetails: string[] = [];
+    // 签名缓存只在**本轮**有效：t 可能短命，跨轮复用会拿到过期签名
+    this.#sigCache.clear();
     /** 作业这一轮走的是哪条路（html / json 回退），以及各走了几门课 */
     let htmlPathCourses = 0;
     let jsonFallbackCourses = 0;
@@ -586,8 +588,17 @@ export class ChaoxingAdapter implements PlatformAdapter {
       checkedCourses += 1;
       /** 本课程的失败信息（用于判定是否「返回登录页」） */
       const courseErrs: string[] = [];
-      // 顺序请求而不是并发：超星风控对并发很敏感，
-      // 而且限流器是按平台共享的，并发也快不了多少。
+      // 顺序请求而不是并发。
+      //
+      // 【证据等级要说清（2026-11-10 用户质询后核实）】
+      // 原来这里写的是"超星风控对并发很敏感"，但项目里**没有任何一次**"并发→被拦"
+      // 的实测记录 —— 那是推断，却被当成事实用来否决了并发方案。
+      // 实际有实证的只有两条：
+      //   ① 登录环节会出现滑块验证（用户真机截图）；
+      //   ② 401/403 重试不会变好（多处实测）。
+      // 只读请求的并发/速率上限**从未测过**，4 rps 是按"尽量少打扰平台"保守取的。
+      // 所以：保持顺序是**保守选择**，不是已知上限；要提速应先减少请求数
+      //（签名缓存已做，见 #sigCache），而不是提高并发。
 
       // 作业：主路径 work/task-list（HTML），失败回退旧版 getAllWork（JSON）
       let workItems: PlatformTask[] = [];
@@ -1185,10 +1196,26 @@ export class ChaoxingAdapter implements PlatformAdapter {
    *
    * 拿不到时降级用 course.enc 当 stuenc（至少请求能过），并把情况记进 trace。
    */
+  /**
+   * 本轮同步内的签名缓存（courseId → 签名）。
+   *
+   * 【为什么必须缓存】（真机 2026-11-10 提速排查）
+   * 作业列表和考试列表**都要** stuenc/workEnc/t，而它们是同一次同步里先后取的。
+   * 不缓存就要为每门课发两次课程页请求（15 门课 = 白扔 15 个请求）。
+   * 超星 4 rps 的限流下，这 15 个请求就是 ~4 秒的纯浪费。
+   *
+   * 生命周期：每次 fetchTasks 开始时清空（`#sigCache.clear()`）。
+   * 不跨轮缓存 —— 签名里的 `t` 可能短命，跨轮复用会拿到过期签名，
+   * 那种失败比多一个请求更难查（平台只回"无效的用户"）。
+   */
+  #sigCache = new Map<string, { stuenc?: string; workEnc?: string; t?: string }>();
+
   async #courseSignatures(
     http: SessionHttpClient,
     course: { courseId: string; classId: string; cpi?: string; enc?: string },
   ): Promise<{ stuenc?: string; workEnc?: string; t?: string }> {
+    const cached = this.#sigCache.get(course.courseId);
+    if (cached) return cached;
     const fallback = { ...(course.enc ? { stuenc: course.enc } : {}) };
     if (!course.classId) {
       // 静默 return 是上一版的错误：诊断里显示「未产生记录」，
@@ -1232,11 +1259,13 @@ export class ChaoxingAdapter implements PlatformAdapter {
           `t=${Boolean(pageT)} ` +
           `落点=${String(res.url ?? '').replace(/^https?:\/\//, '').slice(0, 70)}`,
       );
-      return {
+      const result = {
         ...(enc ? { stuenc: enc } : fallback.stuenc ? { stuenc: fallback.stuenc } : {}),
         ...(workEnc ? { workEnc } : {}),
         ...(pageT ? { t: pageT } : {}),
       };
+      this.#sigCache.set(course.courseId, result);
+      return result;
     } catch (e) {
       this.#resolveTrace.push(`task-list:sig 课程页取签名失败：${(e as Error).message.slice(0, 60)}`);
       return fallback;

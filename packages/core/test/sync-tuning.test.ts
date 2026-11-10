@@ -140,6 +140,61 @@ describe('取消勾选课程：不发请求，且清除该课记录', () => {
     }
   });
 
+  it('存量数据自动收敛：记录先于勾选状态存在时，下一轮同步自动对齐（不必手动勾上再取消）', async () => {
+    const control = baseControl();
+    const { dir, store, engine } = await makeEngineWithClock(makeStubAdapter(control), new FixedClock(new Date()));
+    try {
+      const account = await engine.login('stub', 'u1', { password: 'p1' });
+      await engine.syncAll({});
+      const tasks = await store.listTasks({ accountIds: [account.id] });
+      assert.ok(tasks.length > 0);
+      const courseId = tasks[0]!.courseId;
+
+      // 模拟"老数据"：直接把课程写进 course-mute，**不经过** setCourseMuted，
+      // 也就是记录从未被那次"操作"清理过 —— 这正是老版本升级/换机恢复的形态。
+      await store.setCursor({
+        accountId: account.id,
+        kind: 'course-mute',
+        cursor: JSON.stringify([courseId]),
+        updatedAt: new Date().toISOString(),
+      });
+      const before = await engine.upcoming({ withinDays: 365, includeOverdue: true });
+      assert.ok(before.some((t) => t.courseId === courseId), '前提：此刻记录还在');
+
+      // 下一轮同步应收敛掉它
+      await engine.syncAll({});
+      const after = await engine.upcoming({ withinDays: 365, includeOverdue: true });
+      assert.ok(
+        after.every((t) => t.courseId !== courseId),
+        '未勾选课程的历史记录应在下一轮同步被自动隐藏',
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('收敛不碰用户手动删除的墓碑', async () => {
+    const control = baseControl();
+    const { dir, store, engine } = await makeEngineWithClock(makeStubAdapter(control), new FixedClock(new Date()));
+    try {
+      const account = await engine.login('stub', 'u1', { password: 'p1' });
+      await engine.syncAll({});
+      const tasks = await store.listTasks({ accountIds: [account.id] });
+      const victim = tasks[0]!;
+      await engine.deleteTask(account.id, victim.id);
+
+      // 该课是"已勾选"状态 → 收敛不该把它复活
+      await engine.syncAll({});
+      const after = await engine.upcoming({ withinDays: 365, includeOverdue: true });
+      assert.ok(
+        after.every((t) => t.id !== victim.id),
+        '用户手动删除的任务不能被"勾选状态收敛"复活',
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it('恢复同步后课程重新参与，任务被重新拉回', async () => {
     const control = baseControl();
     const { dir, store, engine } = await makeEngineWithClock(makeStubAdapter(control), new FixedClock(new Date()));
