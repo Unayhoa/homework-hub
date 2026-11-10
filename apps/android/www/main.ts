@@ -34,7 +34,7 @@ import {
   memoryStorage,
   nativeKvStorage,
   nativeCookieNames,
-  nativeLastCookieInfo,
+  lastCookieDebug,
 } from '#web-kit';
 import type { NativeKvBridge, WebStorage } from '#web-kit';
 import { createApiHandler } from '#api';
@@ -264,7 +264,7 @@ const handleApi = createApiHandler({
   // WebView 显示已登录、原生请求却 403 时，这是唯一能区分「没进 CookieManager」
   // 与「进了但域不匹配」的证据（两者修法完全不同）。
   cookieNames: (url: string) => nativeCookieNames(url),
-  lastCookieInfo: () => nativeLastCookieInfo(),
+  lastCookieInfo: () => lastCookieDebug(),
   buildTransport: async (kind, payload) => {
     if (kind === 'attach') return unsupportedAttach;
     const har = String(payload.har ?? '');
@@ -363,5 +363,6 @@ window.Android?.log?.('info', '引擎已就绪');
 // 启动时就下发一次探活配置：重装后原生侧的配置是空的，
 // 而"后台探测"这件事恰恰等不到用户手动点同步（那时他已经打开了 App，探测就不需要了）。
 void syncKeepAlive();
+
 
 

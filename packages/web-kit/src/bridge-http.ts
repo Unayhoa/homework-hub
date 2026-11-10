@@ -182,21 +182,28 @@ export function nativeCookieNames(url: string): string[] {
 }
 
 /**
- * 【诊断】最近一次真实请求实际带上的 cookie 概况（只名字，含是否走了父域回退）。
+ * 【诊断】从 HTTP 响应头里读「这次请求实际带上的 cookie 概况」。
  *
- * 与 nativeCookieNames 的分工：那个是"按 URL 去问 CookieManager"（在平台页会失败），
- * 这个是"读真实请求链路上记下的结果"——永远可用，且直接回答"请求到底带没带 cookie"。
+ * 为什么走响应头而不是另开桥方法：同步期间调用额外的 @JavascriptInterface 方法
+ * 会被 WebView 拒成 "can't be invoked on a non-injected page"（真机 2026-11-10 连踩两次），
+ * 诊断自己失效。而响应头是**已经回到 JS 的那条数据**的一部分，永远可用。
+ *
+ * 原生侧在每次请求时写入 `x-hh-cookie-debug`：域名 + 是否走了父域回退 + cookie 名字列表。
  */
-export function nativeLastCookieInfo(): string {
-  if (typeof window === 'undefined') return '__no_window__';
-  const fn = window.Android?.lastCookieInfo;
-  if (typeof fn !== 'function') return '__no_bridge__';
-  try {
-    const s = fn();
-    return s && s.trim() ? s : '__no_request_yet__';
-  } catch (e) {
-    return `__error__:${String((e as Error).message ?? e).slice(0, 60)}`;
-  }
+export const COOKIE_DEBUG_HEADER = 'x-hh-cookie-debug';
+
+/** 最近一次原生请求带上的 cookie 概况（由 BridgeHttpClient 写入）。 */
+let lastCookieDebugGlobal = '';
+
+/** 读最近一次请求的 cookie 诊断串（供同步日志的「排查信息」使用）。 */
+export function lastCookieDebug(): string {
+  return lastCookieDebugGlobal;
+}
+
+/** 从一个已归一化（小写 header 名）的响应头里取 cookie 诊断串；没有则返回空串。 */
+export function cookieDebugOf(headers: Record<string, string> | undefined): string {
+  if (!headers) return '';
+  return headers[COOKIE_DEBUG_HEADER] ?? '';
 }
 
 export class BridgeHttpClient implements HttpClient {
@@ -276,6 +283,11 @@ export class BridgeHttpClient implements HttpClient {
     const text = result.text ?? '';
     const normalizedHeaders: Record<string, string> = {};
     for (const [k, v] of Object.entries(result.headers ?? {})) normalizedHeaders[k.toLowerCase()] = v;
+
+    // 【诊断】记下最近一次请求的 cookie 概况（原生写在 x-hh-cookie-debug 里）。
+    // 存全局而不是实例字段：api.ts 在另一层，拿不到这个实例。
+    const dbg = cookieDebugOf(normalizedHeaders);
+    if (dbg) lastCookieDebugGlobal = dbg;
 
     return {
       status: result.status,

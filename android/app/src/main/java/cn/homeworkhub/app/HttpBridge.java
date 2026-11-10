@@ -391,6 +391,8 @@ public class HttpBridge {
         String contentType = null;
         Map<String, String> responseHeaders = new HashMap<>();
         byte[] payload;
+        /** 【诊断】本次请求实际带上的 cookie 概况（随响应回传，见 toJson） */
+        String cookieDebug = "";
 
         for (int hop = 0; hop <= MAX_REDIRECTS; hop++) {
             HttpURLConnection conn = (HttpURLConnection) new URL(currentUrl).openConnection();
@@ -422,9 +424,9 @@ public class HttpBridge {
             }
             if (cookie != null && !cookie.isEmpty()) conn.setRequestProperty("Cookie", cookie);
             // 【诊断】记录这次请求**实际发出去的 cookie 名字**（不含值）。
-            // 比另开一个桥方法可靠：它就是真实请求的一部分，不存在"在非注入页调用"的问题。
-            // 认证失败时 JS 侧读它，就能区分「没带上 cookie」和「带上了但平台不认」。
-            lastCookieDebug = describeCookies(currentUrl, cookie, usedParentFallback);
+            // 用局部变量随响应回传，不用 static 字段 —— 并发请求会互相覆盖，
+            // 而且另开桥方法在同步期间会被 WebView 拒成 non-injected（真机连踩两次）。
+            cookieDebug = describeCookies(currentUrl, cookie, usedParentFallback);
 
             // 雨课堂（Django 系）的 API 要求 x-csrftoken 头与会话配对，
             // 值就在它自己种的 csrftoken cookie 里 —— 网页 XHR 由框架自动带，原生请求要自己补。
@@ -516,7 +518,10 @@ public class HttpBridge {
                     || contentType.toLowerCase().contains("javascript")
                     || contentType.toLowerCase().contains("xml"));
             String binaryBase64 = isText ? null : android.util.Base64.encodeToString(payload, android.util.Base64.NO_WRAP);
-            return toJson(status, currentUrl, responseHeaders, isText ? decode(payload, contentType) : "", binaryBase64);
+            return toJson(
+                    status, currentUrl, responseHeaders,
+                    isText ? decode(payload, contentType) : "", binaryBase64,
+                    cookieDebug);
         }
         throw new IllegalStateException("重定向次数超过 " + MAX_REDIRECTS + " 次，可能存在登录死循环");
     }
@@ -604,10 +609,16 @@ public class HttpBridge {
     }
 
     private static String toJson(int status, String url, Map<String, String> headers, String text) {
-        return toJson(status, url, headers, text, null);
+        return toJson(status, url, headers, text, null, null);
     }
 
     private static String toJson(int status, String url, Map<String, String> headers, String text, String binaryBase64) {
+        return toJson(status, url, headers, text, binaryBase64, null);
+    }
+
+    private static String toJson(
+            int status, String url, Map<String, String> headers, String text,
+            String binaryBase64, String cookieDebug) {
         try {
             JSONObject o = new JSONObject();
             o.put("status", status);
@@ -618,6 +629,13 @@ public class HttpBridge {
                 if (e.getKey().equalsIgnoreCase("set-cookie")) continue;
                 h.put(e.getKey(), e.getValue());
             }
+            // 【诊断】把「这次请求实际带的 cookie 概况」作为**响应头**回传。
+            //
+            // 为什么用响应头而不是另开一个桥方法（真机 2026-11-10 连踩两次）：
+            // 同步期间调用额外的 @JavascriptInterface 方法会被 WebView 拒成
+            // "can't be invoked on a non-injected page"，诊断自己失效、什么也看不到。
+            // 而响应头是**已经回到 JS 的那条数据**的一部分，永远可用，且不必改 HttpResponse 接口。
+            if (cookieDebug != null && !cookieDebug.isEmpty()) h.put("x-hh-cookie-debug", cookieDebug);
             o.put("headers", h);
             o.put("text", text);
             if (binaryBase64 != null) o.put("binaryBase64", binaryBase64);
@@ -658,11 +676,10 @@ public class HttpBridge {
     }
 
     /**
-     * 最近一次请求实际带上的 cookie 概况（只名字，不含值）。
-     * 认证失败时 JS 侧读它 —— 它来自真实请求链路，比单独调诊断桥可靠。
+     * 描述一次请求实际带上的 cookie（只名字，不含值）。
+     * 结果随 HTTP 响应体一起回传（见 toJson 的 cookieDebug 字段），
+     * 不依赖额外的桥调用 —— 那个在同步期间会被 WebView 拒成 non-injected。
      */
-    private static volatile String lastCookieDebug = "";
-
     private static String describeCookies(String url, String cookie, boolean fallback) {
         try {
             StringBuilder sb = new StringBuilder();
@@ -682,12 +699,6 @@ public class HttpBridge {
         } catch (Throwable t) {
             return url + " cookie解析失败";
         }
-    }
-
-    /** JS 侧查询最近一次请求的 cookie 概况（诊断用）。 */
-    @android.webkit.JavascriptInterface
-    public String lastCookieInfo() {
-        return lastCookieDebug == null ? "" : lastCookieDebug;
     }
 
     private static Map<String, String> parseHeaders(String json) {

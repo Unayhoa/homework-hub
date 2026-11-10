@@ -16,7 +16,8 @@ export { PersistentStore, assertImplementsHubStore } from './persistent-store.ts
 export type { PersistentStoreOptions } from './persistent-store.ts';
 export { WebCryptoVault } from './webcrypto-vault.ts';
 export type { WebCryptoVaultOptions } from './webcrypto-vault.ts';
-export { BridgeHttpClient, hasNativeBridge, ensureBridgeCallbacks, nativeCookieNames, nativeLastCookieInfo } from './bridge-http.ts';
+export { BridgeHttpClient, hasNativeBridge, ensureBridgeCallbacks, nativeCookieNames, lastCookieDebug } from './bridge-http.ts';
 export type { BridgeHttpOptions } from './bridge-http.ts';
+
 
 
