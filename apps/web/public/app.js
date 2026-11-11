@@ -1895,6 +1895,64 @@ async function renderKeepAlive() {
         .join('；')
     : '';
 
+  /**
+   * 【失效剖析】把「为什么掉线」从猜测变成判断。
+   *
+   * 只看"会话失效"分不出三种根因，而它们的处置完全不同：
+   *   · cookie 没了      → 浏览器侧过期，可以延长/刷新
+   *   · cookie 还在但失效 → 服务端会话过期，探活也续不了，只能重新登录
+   *   · 失效前有一串断网  → 手机深睡没网，闲置超时
+   * 这里把最近几次失效的这三个数字汇总成一句话。
+   */
+  const failureAnatomy = (() => {
+    const auths = (Array.isArray(st.log) ? st.log : []).filter((e) => e && e.kind === 'auth');
+    if (auths.length === 0) return '';
+    const byPlatform = new Map();
+    for (const e of auths) {
+      const pid = String(e.platformId ?? '');
+      if (!byPlatform.has(pid)) byPlatform.set(pid, []);
+      byPlatform.get(pid).push(e);
+    }
+    const lines = [];
+    for (const [pid, list] of byPlatform) {
+      const recent = list.slice(-3);
+      const cookieVals = recent.map((e) => e.cookies).filter((v) => typeof v === 'number');
+      const sinceVals = recent.map((e) => e.sinceLastOkMs).filter((v) => typeof v === 'number' && v > 0);
+      const gapVals = recent.map((e) => e.gapsBefore).filter((v) => typeof v === 'number');
+      const parts = [];
+      if (cookieVals.length) {
+        const maxCookie = Math.max(...cookieVals);
+        parts.push(maxCookie === 0 ? 'cookie 已消失' : `cookie 仍在（${maxCookie} 个）`);
+      }
+      if (sinceVals.length) {
+        const avg = sinceVals.reduce((a, b) => a + b, 0) / sinceVals.length;
+        parts.push(`平均存活 ${fmtSpan(avg)}`);
+      }
+      if (gapVals.length) {
+        const totalGaps = gapVals.reduce((a, b) => a + b, 0);
+        parts.push(totalGaps > 0 ? `失效前共断网 ${totalGaps} 次` : '失效前无断网');
+      }
+      if (parts.length) lines.push(`${platformDisplayName(pid)}：${parts.join(' · ')}`);
+    }
+    if (lines.length === 0) return '';
+    // 给出判读结论（有依据才说，不硬猜）
+    const allHaveCookie = [...byPlatform.values()]
+      .flatMap((l) => l.slice(-3))
+      .filter((e) => typeof e.cookies === 'number')
+      .every((e) => e.cookies > 0);
+    const hasCookieData = [...byPlatform.values()]
+      .flatMap((l) => l.slice(-3))
+      .some((e) => typeof e.cookies === 'number');
+    let verdict = '';
+    if (hasCookieData && allHaveCookie) {
+      verdict = '→ 判读：cookie 一直在，是**服务端会话过期**（探活续不了，只能重新登录）';
+    } else if (hasCookieData) {
+      verdict = '→ 判读：cookie 会消失，是**浏览器侧 cookie 过期**（可以延长/刷新）';
+    }
+    lines.push(verdict || '→ 判读：样本还少，等下一轮');
+    return lines.join('\n');
+  })();
+
   // 电池优化白名单：它和应用级的「自启动 / 允许后台运行 / 不优化耗电」是**两套机制**
   // （真机上那几个开关全部放行，夜里请求仍然发不出去）。
   let batteryRow = '';
@@ -1938,10 +1996,30 @@ async function renderKeepAlive() {
       const pname = pid ? platformDisplayName(pid) : '（旧记录·未标平台）';
       const label = kind === 'ok' ? '会话正常' : kind === 'auth' ? '会话失效' : '未测成：网络不通';
       const cls = kind === 'ok' ? 'ka-ok' : kind === 'auth' ? 'ka-bad' : 'ka-warn';
+      // 【决定性诊断】cookie 数 + 距上次成功 + 中间断网次数
+      //
+      // 这三个数字把「为什么掉线」从猜测变成判断：
+      //   cookie=0        → 浏览器侧 cookie 没了（可刷新/延长）
+      //   cookie>0 但失效 → 服务端会话失效，cookie 再有效也没用（只能重登）
+      //   距上次成功 ≈14h 且断网 0 次 → 硬 TTL
+      //   断网次数多     → 闲置超时（手机深睡没网）
+      const fmtSpan = (ms) => {
+        const n = Number(ms);
+        if (!Number.isFinite(n) || n <= 0) return '';
+        const h = Math.floor(n / 3600000);
+        const m = Math.round((n % 3600000) / 60000);
+        return h > 0 ? `${h}h${m}m` : `${m}m`;
+      };
+      const diag = [];
+      if (typeof e?.cookies === 'number') {
+        diag.push(e.cookies < 0 ? 'cookie 读不到' : `cookie ${e.cookies} 个`);
+      }
+      if (e?.sinceLastOkMs) diag.push(`距上次成功 ${fmtSpan(e.sinceLastOkMs)}`);
+      if (typeof e?.gapsBefore === 'number' && e.gapsBefore > 0) diag.push(`中途断网 ${e.gapsBefore} 次`);
       const detail =
         kind === 'ok'
           ? ''
-          : [e?.status ? `HTTP ${e.status}` : '', e?.note ?? ''].filter(Boolean).join(' · ');
+          : [e?.status ? `HTTP ${e.status}` : '', ...diag, e?.note ?? ''].filter(Boolean).join(' · ');
       return `<div class="ka-row">
         <span>${escapeHtml(t)}</span>
         <span class="ka-plat">${escapeHtml(pname)}</span>
@@ -1962,6 +2040,7 @@ async function renderKeepAlive() {
       不会因为长时间没有请求而失效。关掉后不再有任何后台请求。</div>
     <div class="ka-stat">${escapeHtml(whichText)} ${escapeHtml(stat)}</div>
     ${streakLines ? `<div class="ka-stat">${escapeHtml(streakLines)}</div>` : ''}
+    ${failureAnatomy ? `<div class="ka-stat" style="white-space:pre-wrap">${escapeHtml(failureAnatomy)}</div>` : ''}
     ${batteryRow}
     <div class="ka-action"><button class="ka-btn" id="kaSysSettings">打开电池设置</button></div>
     ${tip}

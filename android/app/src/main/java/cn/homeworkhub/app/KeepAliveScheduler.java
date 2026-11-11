@@ -302,8 +302,33 @@ final class KeepAliveScheduler {
                 if (note.length() > 120) note = note.substring(0, 120);
                 kind = KIND_UNREACHABLE;
             }
-            appendLog(ctx, platformId, kind, status, note, nowMs);
-            Log.i(TAG, "保活探测 " + platformId + " kind=" + kind + " status=" + status);
+            // 【决定性诊断】记录探测那一刻 CookieManager 里还有没有 cookie。
+            //
+            // 为什么必须分开记（2026-11-11 智慧树反复掉线，两个假设无法区分）：
+            //   · cookie 不见了      → 是**浏览器侧 cookie 过期**（可延长/可刷新）
+            //   · cookie 还在但 401/403 → 是**服务端会话失效**（硬 TTL 或闲置超时，
+            //                            cookie 再有效也没用，只能重新登录）
+            // 原来只有「会话失效 HTTP 200」这一句，两种根因长得一模一样，
+            // 于是只能在"没网"和"平台策略"之间反复猜。
+            int cookieCount = cookieCountFor(url);
+            appendLog(ctx, platformId, kind, status, note, nowMs, cookieCount);
+            Log.i(TAG, "保活探测 " + platformId + " kind=" + kind + " status=" + status
+                    + " cookies=" + cookieCount);
+        }
+    }
+
+    /** 探测 URL 在 CookieManager 里可见的 cookie 数量（只数个数，不读值）。 */
+    private static int cookieCountFor(String url) {
+        try {
+            String raw = android.webkit.CookieManager.getInstance().getCookie(url);
+            if (raw == null || raw.isEmpty()) return 0;
+            int n = 0;
+            for (String part : raw.split(";")) {
+                if (!part.trim().isEmpty()) n += 1;
+            }
+            return n;
+        } catch (Throwable t) {
+            return -1; // -1 = 读不到（与"0 个"区分开）
         }
     }
 
@@ -311,6 +336,20 @@ final class KeepAliveScheduler {
 
     private static synchronized void appendLog(
             Context ctx, String platformId, String kind, int status, String note, long atMs) {
+        appendLog(ctx, platformId, kind, status, note, atMs, -2);
+    }
+
+    /**
+     * @param cookieCount 探测时该域可见的 cookie 数（-1 读不到，-2 未知/旧调用）
+     *
+     * 另外：一次 auth 失效时，顺带算出「距上次成功多久」和「中间断网几次」。
+     * 这两个数字是区分「硬 TTL」与「闲置超时」的直接证据：
+     *   · 每次失效都稳定在 ~14h、且中途没有断网 → 硬 TTL（探活也续不了）
+     *   · 失效前的间隔里有一串「未测成」→ 闲置超时（手机深睡没网）
+     * 不记这两个数，就只能看着"又失效了"却分不出是哪一种。
+     */
+    private static synchronized void appendLog(
+            Context ctx, String platformId, String kind, int status, String note, long atMs, int cookieCount) {
         try {
             JSONArray arr = new JSONArray(loadLog(ctx));
             JSONObject e = new JSONObject();
@@ -321,6 +360,26 @@ final class KeepAliveScheduler {
             e.put("ok", KIND_OK.equals(kind));
             e.put("status", status);
             if (!note.isEmpty()) e.put("note", note);
+            if (cookieCount != -2) e.put("cookies", cookieCount);
+            if (KIND_AUTH.equals(kind)) {
+                // 往回扫：找该平台最近一次 ok，并数中间有多少次"未测成"
+                long sinceLastOk = -1;
+                int gaps = 0;
+                for (int i = arr.length() - 1; i >= 0; i--) {
+                    JSONObject p = arr.optJSONObject(i);
+                    if (p == null) continue;
+                    if (!platformId.equals(p.optString("platformId", ""))) continue;
+                    String k = p.optString("kind", "");
+                    if (KIND_OK.equals(k)) {
+                        long t = p.optLong("t", 0L);
+                        if (t > 0 && atMs > t) sinceLastOk = atMs - t;
+                        break;
+                    }
+                    if (KIND_UNREACHABLE.equals(k)) gaps += 1;
+                }
+                if (sinceLastOk > 0) e.put("sinceLastOkMs", sinceLastOk);
+                e.put("gapsBefore", gaps);
+            }
             arr.put(e);
             // 滚动窗口：只留最近 KEEP_LOG 条
             int drop = arr.length() - KEEP_LOG;
