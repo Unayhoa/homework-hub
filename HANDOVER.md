@@ -18,7 +18,27 @@
 
 - 源码：`packages/`（core 引擎 + 各平台适配器）、`apps/web`（界面 + 本地 API）、`apps/android`（WebView 壳）
 - 数据全在手机上，没有服务端；加密保险箱存平台会话
-- 当前版本 **1.0.1**，五个平台：超星学习通 / 长江雨课堂 / iSmart / PTA（拼题A）/ 智慧树
+- 当前版本 **1.1.0**，五个平台：超星学习通 / 长江雨课堂 / iSmart / PTA（拼题A）/ 智慧树
+
+---
+
+## 0.1 1.1.0 定论（2026-11-14，改之前先读）
+
+这几条是 1.1.0 期间**用真机反复踩坑才定下来的**，代码里看不出来：
+
+1. **快照 `raw` 白名单必须包含"后续请求要用的参数"**（`memory-store.ts` 的 `RAW_KEEP`）。
+   1.0.1 曾只留 `recruitId/secret/courseId/homepage`，把超星的 `classId/cpi/enc` 裁掉了 ——
+   后果是**重启 App 后**作业列表全空、平台回「无效的用户」，而同步当场完全正常。
+   凡"丢了以后请求就发不对"的小字段，必须留。
+2. **原生回调上限必须 ≥ 响应体上限**（`HttpBridge.MAX_CALLBACK_BYTES` ≥ `MAX_RESPONSE_BYTES`）。
+   曾出现响应 553KB 能读进来、却被 512KB 回调上限拦掉 → 超星作业定位"有时成功有时失败"。
+3. **保活探针 URL 里的时间参数必须用 `{now}` 占位符**，由原生每次替换。
+   写死 `time=1` 被超星当成异常请求回「未登录」→ 好会话被误判成掉线（历史最长只到 14h，
+   改占位符后连续 68h+、0 次误报）。
+4. **限流值要有实测依据**：`chaoxing` 现在 8 rps 是按"一次同步 46 个请求" +
+   真机 A1–B3 阶梯测试（8 rps / 40 请求全过）定的，不是拍脑袋。
+5. **「分步同步」只允许延后展示性细节**（考试开考时间），**绝不能跳过任何一条作业/考试**。
+   适配器契约是 `skipDetails` + `refreshTaskDetails`，补丁只许改 `startsAt`/缺失 `deadline`。
 
 ---
 
@@ -72,7 +92,7 @@
 - **超星（学习通）点作业名 = 点击时现解析最终地址**（v0.2.54）：课程页 enc **不能只信 `stuenc` / `studentcourse` 隐藏 enc**（真机 2026-11-05：两者拼出的课程页都是 781 字节「无效的参数」）。正确来源是浏览器真正点课程用的 **`mooc2-ans/visit/courselistdata` POST**（返回课程卡片，链接为 `mooc1.chaoxing.com/visit/stucoursemiddle?courseid=&clazzid=&cpi=`，该链接 302 到带新鲜 `enc/t` 的课程页）。解析顺序：studentcourse 隐藏 enc → `courseSquareUrl` → **courselistdata API 的 stucoursemiddle 链接** → raw.enc → 无 enc；每步都验证页面里真有 `workEnc`/`enc` 隐藏域。命中后**按 `pageHeader` 落到对应标签页**（0=任务、1=章节、8=作业 —— 这是浏览器课程页 HTML 实证；作业点进「作业」、任务点点进「章节」）。再走 `mooc2/work/list` → `workId` 的 `work/task?…&enc=` → 302 到 `work/dowork`。失败时 `resolveDebug()` 输出 `list:… | course:seeds=… | page:… | student:…`。
 - **任务点卡片可点击**：点击时同样先解析课程页（`buildCourseUrl` 只作兜底）；没有课程页能力的平台保持纯展示。
 - PTA 已交完的作业**留在待办页**（绿条 + 降透明 + 同组末尾），但**不排任何截止提醒**。
-- **任务点统计（超星）**见 [`docs/任务点统计方案-v1.md`](./docs/任务点统计方案-v1.md)。schema 6 起有 `availableNow`（「现在可做 N 个」）：只统计**已开放且还有未完成点**的章节；`done/total` 的差不能当"可做"（它含着未开放/已关闭的章节）。前端不自己算，认不出章节归属就不显示这个数。
+- **任务点统计（超星）**见 [`docs/任务点统计方案-v1.md`](./docs/任务点统计方案-v1.md)。schema 9 起有 `availableNow`（「现在可做 N 个」）：只统计**已开放且还有未完成点**的章节；`done/total` 的差不能当"可做"（它含着未开放/已关闭的章节）。前端不自己算，认不出章节归属就不显示这个数。
 - **PTA 进度条逐题着色**：有 `subtasks` 时按**题目顺序**一题一格（绿 = AC、灰 = 未提交、橙 = 已交未 AC），没有逐题明细才退回按数量堆叠的旧画法。否则「第 3 题没 AC」会被画成「最后几题没 AC」。
 - **同步按钮的旋转类名是 `.spinning`，绝不能改回 `.busy`**：`.busy` 是全屏遮罩（`position:fixed; inset:0`），套到按钮上会让按钮瞬移到页面左上角、正好盖住「课」logo —— 真机和无头浏览器都复现过（2026-11-05）。全局类名不能复用成组件状态。
 
@@ -330,3 +350,4 @@ npm run android:apk      # → android/app/build/outputs/apk/debug/app-debug.apk
 **③ 测试全绿 ≠ 修好了。**
 本项目多次出现「单测 379 全过、真机依然坏」（跳转功能连修四轮）。
 涉及平台交互的改动，**必须真机验证并核对产物**（`aapt dump badging` 看版本、解包 grep 关键符号）。
+

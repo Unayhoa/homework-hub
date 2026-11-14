@@ -2306,14 +2306,13 @@ async function renderSettings() {
 
     <details class="set-item" data-set="syncfast"${opened('syncfast')}>
       <summary>
-        <span class="set-name">先出待办，后台补细节</span>
+        <span class="set-name">分步同步</span>
         <span class="set-now">${fastFirst ? '已开启' : '已关闭'}</span>
       </summary>
       <div class="set-body">
         <p class="muted">
-          <b>开启后</b>：同步只抓决定待办的内容（作业/考试的标题、状态、截止时间），
-          点完很快就能看到完整待办；<b>开考时间</b>这类要点进详情页才有的信息，
-          会在后台补上并自动刷新。
+          <b>同步分两步</b>：先出完整待办（作业/考试的标题、状态、截止时间），
+          再在后台补「开考时间」这类要点进详情页才有的信息，补上后自动刷新。
         </p>
         <p class="muted">
           <b>代价</b>：刚同步完的一小段时间里，部分考试的「开考时间」可能是空的，
@@ -2332,57 +2331,6 @@ async function renderSettings() {
         <span class="set-now" id="kaSummary"></span>
       </summary>
       <div class="set-body" id="keepAliveCard"></div>
-    </details>
-
-    <!-- 【临时】超星查询能力测试。优化方案敲定后整块删除（含 limits-probe.ts 与
-         /api/limits-test 端点）。放在设置页而不是藏起来，是因为它要由用户在真机上
-         逐档点击、逐档反馈数据。 -->
-    <details class="set-item" data-set="limits"${opened('limits')}>
-      <summary>
-        <span class="set-name">超星查询能力测试（临时）</span>
-        <span class="set-now" id="limitsSummary">未测试</span>
-      </summary>
-      <div class="set-body">
-        <p class="muted">
-          用途：测出超星在**只读请求**上到底能承受多快的速率 / 多少并发。
-          项目里「超星风控很敏感」长期只是推断，没有实测数据，这个面板就是把推断换成数字。
-          只发 GET 只读请求，只打作业列表，任何一档出现拦截信号会立刻停下。
-        </p>
-        <p class="muted">
-          <b>建议顺序</b>：先固定并发 1，把 rps 依次试 4 → 6 → 8 → 12 → 16；
-          某一档失败就停在上一档，并把失败那行的「判据」发回来。
-          每档之间请间隔 5 分钟以上，避免累积触发。
-        </p>
-        <div class="seg" id="limitsPresets">
-          <button class="seg-btn" data-limits-rps="4" data-limits-conc="1" data-limits-total="40">
-            <b>A1 · 4 rps</b><span>基线 · 40 请求</span>
-          </button>
-          <button class="seg-btn" data-limits-rps="6" data-limits-conc="1" data-limits-total="40">
-            <b>A2 · 6 rps</b><span>40 请求</span>
-          </button>
-          <button class="seg-btn" data-limits-rps="8" data-limits-conc="1" data-limits-total="40">
-            <b>A3 · 8 rps</b><span>40 请求</span>
-          </button>
-          <button class="seg-btn" data-limits-rps="12" data-limits-conc="1" data-limits-total="40">
-            <b>A4 · 12 rps</b><span>40 请求</span>
-          </button>
-          <button class="seg-btn" data-limits-rps="16" data-limits-conc="1" data-limits-total="40">
-            <b>A5 · 16 rps</b><span>40 请求</span>
-          </button>
-        </div>
-        <div class="seg" id="limitsConcurrency">
-          <button class="seg-btn" data-limits-rps="8" data-limits-conc="2" data-limits-total="40">
-            <b>B1 · 并发 2</b><span>8 rps</span>
-          </button>
-          <button class="seg-btn" data-limits-rps="8" data-limits-conc="3" data-limits-total="40">
-            <b>B2 · 并发 3</b><span>8 rps</span>
-          </button>
-          <button class="seg-btn" data-limits-rps="8" data-limits-conc="4" data-limits-total="40">
-            <b>B3 · 并发 4</b><span>8 rps</span>
-          </button>
-        </div>
-        <div id="limitsLog" class="muted" style="margin-top:8px;white-space:pre-wrap;font-size:12px"></div>
-      </div>
     </details>`;
 
   // toggle 事件**不冒泡**，所以只能逐个绑定（委托接不到）
@@ -2882,54 +2830,6 @@ async function enableByText(text, name) {
 $('settingsList').addEventListener('click', async (e) => {
   const presetBtn = e.target.closest('[data-preset]');
   if (presetBtn) applyPreset(presetBtn.dataset.preset);
-
-  // 【临时】超星查询能力测试：点一档跑一档，结果追加到面板里。
-  const limitBtn = e.target.closest('[data-limits-rps]');
-  if (limitBtn) {
-    if (limitBtn.disabled) return;
-    const rps = Number(limitBtn.dataset.limitsRps);
-    const conc = Number(limitBtn.dataset.limitsConc);
-    const total = Number(limitBtn.dataset.limitsTotal);
-    const log = $('limitsLog');
-    const line = (t) => {
-      if (log) log.textContent += `${t}\n`;
-    };
-    limitBtn.disabled = true;
-    const label = `${rps} rps · 并发 ${conc}`;
-    line(`▶ ${label} 开始（${total} 请求）…`);
-    showSyncBar(`正在测试 ${label}…`);
-    try {
-      const r = await api('/api/limits-test', {
-        method: 'POST',
-        body: JSON.stringify({ rps, concurrency: conc, total }),
-      });
-      const statusText = Object.entries(r.statusCounts ?? {})
-        .map(([k, v]) => `${k}×${v}`)
-        .join(' ');
-      const verdict = r.passed
-        ? '✅ 全绿'
-        : `❌ 被拦：${(r.blockedSamples ?? []).join(' ｜ ')}`;
-      line(
-        `${label} → 实际 ${r.actualRps || '—'} rps · 完成 ${r.requests} 请求 · ` +
-          `耗时 ${(r.durationMs / 1000).toFixed(1)}s · 状态 ${statusText || '无'} · ${verdict}`,
-      );
-      // 测试自己出问题时要能看出来：把首个请求的 URL 与签名状态也打出来。
-      // 否则「参数错」会被误读成「被风控拦」，结论就反了。
-      if (r.firstUrl) {
-        const sig = r.firstSig ? JSON.stringify(r.firstSig) : '无';
-        line(`   首个请求：${r.firstUrl.slice(0, 180)}`);
-        line(`   签名：${sig}`);
-      }
-      const sum = $('limitsSummary');
-      if (sum) sum.textContent = r.passed ? `通过 ${rps} rps` : `上限 < ${rps} rps`;
-      showSyncBar(r.passed ? `${label} 通过` : `${label} 被拦`, r.passed ? 'done' : 'error', 6000);
-    } catch (err) {
-      line(`${label} → 测试失败：${err.message}`);
-      showSyncBar(`测试失败：${err.message}`, 'error', 8000);
-    } finally {
-      limitBtn.disabled = false;
-    }
-  }
 });
 $('settingsList').addEventListener('change', (e) => {
   const id = e.target.id;
@@ -2939,7 +2839,7 @@ $('settingsList').addEventListener('change', (e) => {
     const on = e.target.checked;
     api('/api/settings', { method: 'POST', body: JSON.stringify({ fastFirstSync: on }) })
       .then(() => {
-        toast(on ? '已开启：先出待办，后台补细节' : '已关闭：恢复完整同步', 4000);
+        toast(on ? '已开启分步同步' : '已关闭分步同步（恢复一次性同步）', 4000);
         renderSettings();
       })
       .catch((err) => {

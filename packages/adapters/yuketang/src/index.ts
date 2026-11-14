@@ -43,7 +43,12 @@ import { mapLimit } from '#core/engine/http-pipeline.ts';
 
 /** 见 ChaoxingEndpointMap 的说明：显式 interface 而不是 as const，便于覆盖。 */
 export interface YuketangEndpointMap {
-  /** 主站登录。TODO(verify)：部分学校走 sso，需要先跳转拿 ticket。 */
+  /**
+   * 主站登录。
+   * 结论（2026-09-28 真机验证）：密码登录**不可行** —— 走 SSO + 密码加密，
+   * 且需要腾讯 turing 点选验证码的 ticket/randstr，属于设计上拦截自动化。
+   * 正确用法：掉登录后到「应用内登录」点一次（人过一次验证码，cookie 继续用）。
+   */
   login: string;
   /** 长江雨课堂登录。 */
   changjiangLogin: string;

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 超星学习通适配器（experimental）。
  *
  * ⚠️ 重要前提，请先读完再用：
@@ -55,6 +55,7 @@ import {
 /**
  * 端点表。平台改版时只需要改这里。
  * 标注 TODO(verify) 的是我根据公开信息推断、最需要你用真实账号确认的路径。
+ * → 2026-11-14：1.0.1 收尾时已全部在真机验证通过，无待确认项。
  *
  * 用显式 interface 而不是 `as const`：`as const` 会把每个字段收窄成字面量类型，
  * 于是 `{ ...ChaoxingEndpoints, ...用户覆盖 }` 的推断类型就对不上了
@@ -203,7 +204,7 @@ export class ChaoxingAdapter implements PlatformAdapter {
   #count(label: string): void {
     this.#reqCounts.set(label, (this.#reqCounts.get(label) ?? 0) + 1);
   }
-  /** 【错误定位，调试期保留】最近一次「作业/考试列表返回登录页」的具体特征（HTTP 状态 + 响应片段） */
+  /** 【诊断】最近一次「作业/考试列表返回登录页」的具体特征（HTTP 状态 + 响应片段） */
   #lastAuthWallHint = '';
 
   readonly capabilities: AdapterCapabilities = {
@@ -319,7 +320,7 @@ export class ChaoxingAdapter implements PlatformAdapter {
     try {
       parsed = JSON.parse(text) as typeof parsed;
     } catch {
-      // 【错误定位，调试期保留】把登录接口的 HTTP 状态与响应首段一并抛出，
+      // 【诊断】把登录接口的 HTTP 状态与响应首段一并抛出，
       // 区分「密码错」「验证码」「接口改版」—— 否则只有一句"登录失败"。
       const head = text.replace(/\s+/g, ' ').slice(0, 160);
       // 返回 HTML 说明大概率被验证码/风控拦住了。这是超星最常见的失败形态，
@@ -1074,7 +1075,7 @@ export class ChaoxingAdapter implements PlatformAdapter {
       // 这里比下面那条"解析 0 条"的分支更早命中（会直接抛错），
       // 所以必须单独加一次，否则坏签名会一直被跨轮复用。
       this.#invalidateSig(course.courseId);
-      // 【错误定位，调试期保留】把 HTTP 状态、响应长度、首段特征写进 lastAuthWallHint，
+      // 【诊断】把 HTTP 状态、响应长度、首段特征写进 lastAuthWallHint，
       // 供上层把「疑似会话失效」细化成「HTTP 200 + 验证码页 / 302 / 登录页」。
       const head = text.replace(/\s+/g, ' ').slice(0, 120);
       const sig = authWallSignal(text);
@@ -1150,7 +1151,7 @@ export class ChaoxingAdapter implements PlatformAdapter {
       });
       const text = await res.text();
       if (looksLikeAuthWall(text)) {
-        // 【错误定位，调试期保留】考试列表也记录实测特征，覆盖「作业没墙、考试被墙」的情况
+        // 【诊断】考试列表也记录实测特征，覆盖「作业没墙、考试被墙」的情况
         const head = text.replace(/\s+/g, ' ').slice(0, 120);
         this.#lastAuthWallHint =
           `考试列表：HTTP ${res.status} len=${text.length} ` +
@@ -1671,28 +1672,7 @@ export class ChaoxingAdapter implements PlatformAdapter {
   }
 
   /**
-   * 【临时·能力测试】用真实课程发一次只读列表请求，返回状态码与正文。
-   *
-   * 供「设置 → 超星查询能力测试」调用（见 limits-probe.ts）。
-   * 只打作业列表这一个最便宜的只读接口，不做任何写操作 ——
-   * 即便测试被平台拦，损失也只是这一次请求。
-   *
-   * 优化方案敲定后，本方法与 limits-probe.ts 一并删除。
-   */
-  /**
-   * 【临时·能力测试】用真实课程发一次只读列表请求，返回状态码与正文。
-   *
-   * 供「设置 → 超星查询能力测试」调用（见 apps/web/src/limits-probe.ts）。
-   * 只打作业列表这一个最便宜的只读接口，不做任何写操作 ——
-   * 即便测试被平台拦，损失也只是这一次请求。
-   *
-   * 返回里带上 `url` 与签名状态：**测试本身出问题时必须能看出来**，
-   * 否则「参数错」会被误读成「被风控拦」，结论就反了（真机 2026-11-10 连踩两次）。
-   *
-   * 优化方案敲定后，本方法与 limits-probe.ts 一并删除。
-   */
-  /**
-   * 【先出待办，后台补细节】只补「考试开考时间」。
+   * 【分步同步】只补「考试开考时间」。
    *
    * 为什么只补这一项：超星的待办本身（标题/状态/截止时间）在列表页里全都有，
    * 唯一藏在详情页的是「开考时间」。而详情页是**一个考试一个请求、单页 300KB** 的重页面，
@@ -1751,66 +1731,6 @@ export class ChaoxingAdapter implements PlatformAdapter {
       this.#resolveTrace.push(`deep:考试详情 ${fetched} 个，补到 ${patches.length} 条`);
     }
     return patches;
-  }
-
-  async probeReadOnlyOnce(
-    ctx: AdapterContext,
-    session: Session,
-    course: { courseId: string; classId: string; cpi?: string; enc?: string },
-  ): Promise<{ status: number; body: string; url: string; sig: { stuenc: boolean; workEnc: boolean; fromPage: boolean } }> {
-    const http = new SessionHttpClient(ctx, session);
-    // 【必须复用 #courseSignatures 取签名】（2026-11-10 真机踩过）
-    // 原来这里把 `enc` 和 `stuenc` 都填成 course.enc —— 而真实请求里
-    // `enc` 是课程页的 workEnc，与 stuenc 不是同一个值。参数错 → 平台回
-    // 「提示 无效的用户！」(1149 字节) → 测试面板把 A1 误判成"被风控拦"。
-    // 那种误判比没有数据更糟：会让人以为 4 rps 都不安全。
-    const before = this.#sigCacheCross.get(course.courseId);
-    const sig = await this.#courseSignatures(http, course);
-    // 课程页诊断：签名到底是从课程页取到的，还是退化成 course.enc 了？
-    // 这是"测试被判被拦"的最可能原因 —— 必须能看见。
-    const sigTrace = this.#resolveTrace.filter((t) => t.startsWith('task-list:sig')).slice(-2);
-    const now = Date.now();
-    const t = sig.t ?? String(now);
-    const params = new URLSearchParams({
-      courseId: course.courseId,
-      classId: course.classId,
-      ut: 's',
-      t,
-    });
-    if (course.cpi) params.set('cpi', course.cpi);
-    if (sig.stuenc) params.set('stuenc', sig.stuenc);
-    if (sig.workEnc) params.set('enc', sig.workEnc);
-    const referer =
-      'https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/stu' +
-      `?courseid=${encodeURIComponent(course.courseId)}` +
-      `&clazzid=${encodeURIComponent(course.classId)}` +
-      (course.cpi ? `&cpi=${encodeURIComponent(course.cpi)}` : '') +
-      (sig.stuenc ? `&enc=${encodeURIComponent(sig.stuenc)}` : '') +
-      `&t=${t}`;
-    const url = `${this.#ep.workTaskList}?${params.toString()}`;
-    const sigInfo = {
-      stuenc: Boolean(sig.stuenc),
-      workEnc: Boolean(sig.workEnc),
-      fromPage: Boolean(before) || Boolean(sig.workEnc),
-      trace: sigTrace.join(' | '),
-    };
-    try {
-      const res = await http.request({
-        url,
-        method: 'GET',
-        headers: { Referer: referer },
-      });
-      const body = await res.text().catch(() => '');
-      return { status: res.status, body, url, sig: sigInfo };
-    } catch (e) {
-      // 通道异常也要能被判定（当作失败样本），所以不抛，直接回 -1
-      return {
-        status: -1,
-        body: `请求异常：${String((e as Error).message ?? e).slice(0, 120)}`,
-        url,
-        sig: sigInfo,
-      };
-    }
   }
 
   buildCourseUrl(course: UnifiedCourse): string | undefined {
@@ -2968,5 +2888,6 @@ export function parseCookieHeader(input: string): Record<string, string> {
   }
   return out;
 }
+
 
 

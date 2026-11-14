@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 极简 HTML 提取工具。
  *
  * 为什么需要：不是所有平台都提供 JSON。超星的课程列表、
@@ -81,7 +81,7 @@ export function looksLikeAuthWall(html: string): boolean {
 }
 
 /**
- * 【错误定位，调试期保留】说明 looksLikeAuthWall 到底是被哪个特征触发的。
+ * 【诊断】说明 looksLikeAuthWall 到底是被哪个特征触发的。
  * 强特征（登录输入框 / 安全验证 / 滑块）几乎必然是登录墙；
  * 弱特征（正文里出现「登录」二字）可能是正常页面误判 —— 两者的处置完全不同。
  */
@@ -92,3 +92,4 @@ export function authWallSignal(html: string): 'input' | 'verify' | 'weak-login' 
   if (/登录/.test(head)) return 'weak-login';
   return '';
 }
+

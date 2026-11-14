@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 与传输层无关的 API 实现。
  *
  * 抽出来的动机：同一个 API 需要跑在两种载体上 ——
@@ -1246,80 +1246,6 @@ export function createApiHandler(deps: ApiDeps): ApiHandler {
           }
           throw e;
         }
-      }
-
-      // ---- 【临时】超星只读查询能力测试（优化方案敲定后删除） ----
-      //
-      // 为什么需要它：项目里「超星风控对并发/请求量敏感」这条结论**没有实测支撑**
-      //（2026-11-10 核查确认是推断）。这里用真实只读请求做阶梯实验，把推断换成数据。
-      // 只发 GET、只打作业列表、任何一档失败立刻停、结果不写入任何正式配置。
-      if (method === 'POST' && path === '/api/limits-test') {
-        const body = parseBody();
-        const rps = Number(body.rps ?? 4);
-        const concurrency = Number(body.concurrency ?? 1);
-        const total = Number(body.total ?? 40);
-        if (!Number.isFinite(rps) || rps <= 0 || rps > 60) throw new Error('rps 需在 1~60 之间');
-        if (!Number.isFinite(concurrency) || concurrency < 1 || concurrency > 10) {
-          throw new Error('并发需在 1~10 之间');
-        }
-        if (!Number.isFinite(total) || total < 1 || total > 200) throw new Error('请求数需在 1~200 之间');
-
-        const accounts = await deps.engine.listAccounts();
-        const account = accounts.find((a) => a.platformId === 'chaoxing');
-        if (!account) throw new Error('没有学习通账号，无法测试');
-        const session = await deps.vault.load(account.id);
-        if (!session) throw new Error('学习通会话不存在，请先同步一次');
-
-        // 取一门有 classId 的课作为靶子
-        //
-        // 【优先选"有作业"的课】（2026-11-10 真机踩过）
-        // 空课程返回的是 7306 字节的空列表页骨架，响应更小、更省服务端力气，
-        // 用它测出来的上限会**偏乐观**（真实同步要打的是 19KB+ 的有内容页）。
-        // 所以优先挑库里有 pending 任务的那门课。
-        let courses = await deps.store.listCourses([account.id]);
-        const pickTarget = (list: typeof courses) => {
-          const withClassId = list.filter((c) =>
-            Boolean((c.raw as { classId?: string } | undefined)?.classId),
-          );
-          if (withClassId.length === 0) return undefined;
-          return withClassId[0];
-        };
-        let target = pickTarget(courses);
-        if (!target) {
-          // 强制刷新一次课程列表（引擎会写回 store），再试
-          await deps.engine.syncAll({ accountIds: [account.id], refreshCourses: 'always' as const, maxPages: 1 });
-          courses = await deps.store.listCourses([account.id]);
-          target = pickTarget(courses);
-        }
-        if (!target) {
-          throw new Error(
-            '没有可用课程（课程缓存缺 classId，且刷新后仍未取到）。请先点一次「同步」再试。',
-          );
-        }
-
-        const raw = (target.raw ?? {}) as { classId?: string; cpi?: string; enc?: string };
-        const courseArg = {
-          courseId: target.platformCourseId,
-          classId: String(raw.classId),
-          ...(raw.cpi ? { cpi: raw.cpi } : {}),
-          ...(raw.enc ? { enc: raw.enc } : {}),
-        };
-        const accountId = account.id;
-        // 【临时】超星只读查询能力测试（优化方案敲定后删除）
-        //
-        // 为什么需要它：项目里「超星风控对并发/请求量敏感」这条结论**没有实测支撑**
-        //（2026-11-10 核查确认是推断）。这里用真实只读请求做阶梯实验，把推断换成数据。
-        // 只发 GET、只打作业列表、任何一档失败立刻停、结果不写入任何正式配置。
-        const { runLimitTestStep } = await import('./limits-probe.ts');
-        const result = await runLimitTestStep(
-          { rps, concurrency, total },
-          () => deps.engine.probeChaoxingReadOnly(accountId, courseArg),
-          { cooldownMs: 0 },
-        );
-        return {
-          status: 200,
-          body: { ...result, course: target.name, platformId: 'chaoxing' },
-        };
       }
 
       if (method === 'POST' && path === '/api/login') {

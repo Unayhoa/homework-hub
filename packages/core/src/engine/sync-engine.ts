@@ -347,35 +347,6 @@ export class SyncEngine {
   }
 
   /**
-   * 【临时·能力测试】用真实会话发一次超星只读列表请求，返回状态码与正文。
-   *
-   * 供「设置 → 超星查询能力测试」调用（见 apps/web/src/limits-probe.ts）。
-   * 之所以放在引擎里而不是 UI 层：AdapterContext（含 http / limiter / clock）
-   * 只有引擎能正确构造 —— 在 UI 层拼会绕过限流器与统计。
-   *
-   * 优化方案敲定后，本方法与 limits-probe.ts 一并删除。
-   */
-  async probeChaoxingReadOnly(
-    accountId: string,
-    course: { courseId: string; classId: string; cpi?: string; enc?: string },
-  ): Promise<{ status: number; body: string; url?: string; sig?: unknown }> {
-    const account = await this.#store.getAccount(accountId);
-    if (!account) throw new HubError('AUTH_FAILED', `账号不存在：${accountId}`);
-    const adapter = this.#registry.require(account.platformId) as unknown as {
-      probeReadOnlyOnce?: (
-        ctx: AdapterContext,
-        session: Session,
-        c: { courseId: string; classId: string; cpi?: string; enc?: string },
-      ) => Promise<{ status: number; body: string; url?: string; sig?: unknown }>;
-    };
-    if (!adapter.probeReadOnlyOnce) throw new HubError('UPSTREAM', '该平台不支持只读能力测试');
-    const session = await this.#vault.load(accountId);
-    if (!session) throw new HubError('AUTH_REQUIRED', '会话不存在，请先同步一次');
-    const ctx = this.#contextFor(account.platformId, accountId);
-    return adapter.probeReadOnlyOnce(ctx, session, course);
-  }
-
-  /**
    * 【先出待办，后台补细节】同步结束后，后台把"延后也无害"的细节补上。
    *
    * 与 `fetchTasks({skipDetails:true})` 配对：
@@ -893,7 +864,7 @@ export class SyncEngine {
       const msg = `自动重新登录失败（${loginErr.code}）：${loginErr.message ?? String(e)}`;
       this.#logger.warn('自动重新登录失败', { platformId: account.platformId, error: msg });
       await this.#markAccount(account, 'auth-required', msg, loginErr.code).catch(() => {});
-      // 【错误定位，调试期保留】把登录失败的实测细节放进 detail 并**重新写一条日志**，
+      // 【诊断】把登录失败的实测细节放进 detail 并**重新写一条日志**，
       // 否则用户看到的还是首轮那条（无 detail）——这就是"没有可展开的排查信息"的原因之一。
       const failedReport = { ...report, message: msg, ...(why ? { detail: why } : {}) };
       await this.#recordLog(failedReport).catch(() => {});
@@ -3253,4 +3224,5 @@ function rank(task: UnifiedTask, now: Date, includeOverdue: boolean): { bucket: 
   }
   return { bucket: 2, ms: Number.MAX_SAFE_INTEGER };
 }
+
 

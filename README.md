@@ -2,7 +2,7 @@
 
 跨平台汇总自己的作业、考试信息 —— 学习通 / 雨课堂（含长江雨课堂）/ iSmart / PTA 拼题A / 智慧树。
 
-**当前版本：1.0.1（首个开源版本 1.0.0）**
+**当前版本：1.1.0（首个开源版本 1.0.0）**
 
 ```
 $ node apps/cli/src/main.ts demo
@@ -11,7 +11,7 @@ $ node apps/cli/src/main.ts demo
 
 $ npm test
 ...
-tests 623 / pass 623 / fail 0
+tests 615 / pass 615 / fail 0
 ```
 
 ## 功能与验证状态
@@ -200,8 +200,8 @@ node apps/cli/src/main.ts attach chaoxing --port 9222
 ```bash
 npm install            # 只为拿 typescript
 npm run android:apk:user   # 生成前端资源 + 打面向用户的 APK
-# 产物：release/homework-hub-1.0.1-user-debug.apk（约 867 KB）
-adb install -r release/homework-hub-1.0.1-user-debug.apk
+# 产物：release/homework-hub-1.1.0-user-debug.apk（约 867 KB）
+adb install -r release/homework-hub-1.1.0-user-debug.apk
 ```
 
 也可以用 Android Studio 打开 `android/` 目录直接 Run。
@@ -285,7 +285,7 @@ cd homework-hub
 # 复现改版、限流、会话失效、任务增删改，逐条断言引擎的处理是否正确
 node apps/cli/src/main.ts demo
 
-# 单元测试（623 项）
+# 单元测试（615 项）
 npm test
 
 # 查看支持的平台与能力矩阵
@@ -443,6 +443,7 @@ HH_LOG=debug HH_TRACE=1 node apps/cli/src/main.ts sync --dry-run
 3. **删除判定必须能容忍上游抖动。**
    分页请求失败、临时风控都会让某一轮「少看到」任务，立刻删库会让作业一闪一闪。
    → 连续缺席 N 轮才软删除；数据不完整时整轮禁用删除判定。
+
 
 
 
