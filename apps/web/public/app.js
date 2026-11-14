@@ -1890,7 +1890,15 @@ async function renderKeepAlive() {
           const name = platformDisplayName(pid);
           const cur = fmtSpan(v?.currentStreakMs);
           const best = fmtSpan(v?.bestStreakMs);
-          return `${name}：当前连续 ${cur}（历史最长 ${best}）`;
+          const gaps = Number(v?.gapsInStreak ?? 0);
+          // 【必须显示"距上次成功多久"】
+          // 2026-11-14 真机：14:27 会话已失效，但面板显示"智慧树 当前连续 68 小时"，
+          // 因为最后一次成功是 13:53、之后只有一次"未测成"——若不暴露这个"陈旧度"，
+          // 用户会以为一切正常，直到同步失败才发现。坏消息不能被说成好消息。
+          const since = Number(v?.sinceLastOkMs ?? 0);
+          const sinceTxt = since > 0 ? `，最近成功 ${fmtSpan(since)}前` : '';
+          const gapTxt = gaps > 0 ? `，其中断网 ${gaps} 次` : '';
+          return `${name}：当前连续 ${cur}（历史最长 ${best}${gapTxt}${sinceTxt}）`;
         })
         .join('；')
     : '';

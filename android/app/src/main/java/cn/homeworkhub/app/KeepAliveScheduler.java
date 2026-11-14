@@ -46,6 +46,19 @@ final class KeepAliveScheduler {
     private static final String KEY_LOG = "log";
     private static final String KEY_UA = "ua";
     private static final String KEY_NEXT = "nextAt";
+    /**
+     * 【快速重试】网络抖一下不该让会话白死一整个周期。
+     *
+     * 真机 2026-11-14：13:53 探活成功 → 14:13 DNS 解析失败（手机没网）→ 14:27 同步时
+     * 智慧树已失效。中间只有一次失败，但下一次闹钟要等到 14:33 —— **整整 20 分钟的
+     * 空档，足够服务端把会话判成闲置作废**。
+     * 所以在「未测成」之后不按常规间隔排期，而是 2 分钟后重试（最多 3 次），
+     * 网络恢复后能立刻续上，不用等下一个周期。
+     */
+    private static final String KEY_RETRY_AT = "retryAt";
+    private static final String KEY_RETRY_N = "retryN";
+    private static final long RETRY_DELAY_MS = 2 * 60 * 1000L;
+    private static final int RETRY_MAX = 3;
 
     static final String ACTION_PROBE = "cn.homeworkhub.app.KEEPALIVE";
 
@@ -64,9 +77,12 @@ final class KeepAliveScheduler {
      * 而用户要判断的是「智慧树能不能连续活过 9–10 小时」——
      * 窗口比观测期还短，等于无法自证（结论只能是"最近 6.7 小时内没掉"）。
      * 400 条 ≈ 66 小时（2.7 天），足以覆盖一整夜的掉线判断。
-     * 每条只有 t/platformId/kind/status/note 几个小字段，体积可以忽略。
+     *
+     * 2026-11-14 再提到 600：智慧树探活间隔从 20 分钟缩到 15 分钟，
+     * 400 条只能覆盖 50 小时了（400÷2×15min）。600 条回到 75 小时，
+     * 保住"能看清一整段连续存活"这个用途。每条只有几个小字段，体积可忽略。
      */
-    private static final int KEEP_LOG = 400;
+    private static final int KEEP_LOG = 600;
 
     /**
      * 记录格式版本。v3 修正了 v2 迁移的一个错：v2 只用 status 判断类别，
@@ -184,7 +200,13 @@ final class KeepAliveScheduler {
     static void scheduleNext(Context ctx) {
         AlarmManager am = ctx.getSystemService(AlarmManager.class);
         if (am == null) return;
-        long at = System.currentTimeMillis() + intervalMs(ctx);
+        long delay = intervalMs(ctx);
+        // 「未测成」后的快速重试：用更短的间隔补一次，别让网络抖动吃掉整个周期
+        long retryAt = prefs(ctx).getLong(KEY_RETRY_AT, 0L);
+        if (retryAt > System.currentTimeMillis()) {
+            delay = Math.max(60_000L, retryAt - System.currentTimeMillis());
+        }
+        long at = System.currentTimeMillis() + delay;
         try {
             am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, probePendingIntent(ctx));
             prefs(ctx).edit().putLong(KEY_NEXT, at).apply();
@@ -241,6 +263,9 @@ final class KeepAliveScheduler {
         if (cfg == null) return;
         JSONArray probes = cfg.optJSONArray("probes");
         if (probes == null || probes.length() == 0) return;
+
+        /** 本轮是否有「未测成」（网络不通）—— 决定要不要 2 分钟后快速重试 */
+        boolean anyUnreachable = false;
 
         String ua = userAgent(ctx);
         long nowMs = System.currentTimeMillis();
@@ -311,9 +336,28 @@ final class KeepAliveScheduler {
             // 原来只有「会话失效 HTTP 200」这一句，两种根因长得一模一样，
             // 于是只能在"没网"和"平台策略"之间反复猜。
             int cookieCount = cookieCountFor(url);
+            if (KIND_UNREACHABLE.equals(kind)) anyUnreachable = true;
             appendLog(ctx, platformId, kind, status, note, nowMs, cookieCount);
             Log.i(TAG, "保活探测 " + platformId + " kind=" + kind + " status=" + status
                     + " cookies=" + cookieCount);
+        }
+
+        // 【快速重试】本轮有「未测成」→ 2 分钟后再补一次（最多 3 次）。
+        // 依据：2026-11-14 真机，13:53 成功 → 14:13 断网 → 14:27 会话已失效，
+        // 而下一班闹钟在 14:33 —— 20 分钟空档足够服务端判定闲置。
+        // 网络一恢复就重试，能把这段空档从 20 分钟压到 2 分钟。
+        if (anyUnreachable) {
+            int n = prefs(ctx).getInt(KEY_RETRY_N, 0);
+            if (n < RETRY_MAX) {
+                prefs(ctx).edit()
+                        .putLong(KEY_RETRY_AT, System.currentTimeMillis() + RETRY_DELAY_MS)
+                        .putInt(KEY_RETRY_N, n + 1)
+                        .apply();
+                Log.i(TAG, "本轮有未测成，2 分钟后重试（第 " + (n + 1) + "/" + RETRY_MAX + " 次）");
+            }
+        } else {
+            // 全部成功 → 清掉重试计数
+            prefs(ctx).edit().remove(KEY_RETRY_AT).remove(KEY_RETRY_N).apply();
         }
     }
 
@@ -510,6 +554,8 @@ final class KeepAliveScheduler {
                 long earliestAt = 0;
                 long bestStreak = 0;
                 long streakStart = 0;
+                int gapsInCurrent = 0;
+                long lastAuthForGaps = 0;
                 for (int i = 0; i < log.length(); i++) {
                     JSONObject e = log.optJSONObject(i);
                     if (e == null || !pid.equals(e.optString("platformId", ""))) continue;
@@ -519,14 +565,20 @@ final class KeepAliveScheduler {
                     if (earliestAt == 0 || t < earliestAt) earliestAt = t;
                     if (KIND_AUTH.equals(kind)) {
                         lastAuthAt = t;
+                        lastAuthForGaps = t;
                         streakStart = 0;
+                        gapsInCurrent = 0;
                     } else if (KIND_OK.equals(kind)) {
                         lastOkAt = t;
                         if (streakStart == 0) streakStart = t;
                         long len = t - streakStart;
                         if (len > bestStreak) bestStreak = len;
+                    } else if (KIND_UNREACHABLE.equals(kind)) {
+                        // 「未测成」不打断存活计时（没测成 ≠ 掉线），但必须**计入**——
+                        // 否则一段断网之后会话死了，面板还会显示"连续 68 小时"，
+                        // 把坏消息说成好消息（2026-11-14 真机就这么误导过）。
+                        if (t > lastAuthForGaps) gapsInCurrent += 1;
                     }
-                    // unreachable 不打断连续（没测成 ≠ 掉线）
                 }
                 JSONObject s = new JSONObject();
                 long from = lastAuthAt > 0 ? lastAuthAt : earliestAt;
@@ -535,6 +587,14 @@ final class KeepAliveScheduler {
                 s.put("bestStreakMs", bestStreak);
                 s.put("lastAuthAtMs", lastAuthAt);
                 s.put("windowFromMs", earliestAt);
+                // 【关键】最近一次成功距今多久 —— 面板必须能看到"这条连续有多旧"。
+                // 14:27 会话已死，但最后一次成功是 13:53，若只显示"连续 68 小时"，
+                // 用户会以为一切正常。
+                if (lastOkAt > 0) {
+                    s.put("lastOkAtMs", lastOkAt);
+                    s.put("sinceLastOkMs", Math.max(0, System.currentTimeMillis() - lastOkAt));
+                }
+                s.put("gapsInStreak", gapsInCurrent);
                 streaks.put(pid, s);
             }
             o.put("streaks", streaks);

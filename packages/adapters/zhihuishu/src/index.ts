@@ -186,7 +186,17 @@ export class ZhihuishuAdapter implements PlatformAdapter {
     url: 'https://onlineservice-api.zhihuishu.com/gateway/f/v1/login/getLoginUserInfo?time={now}',
     method: 'GET' as const,
     alivePattern: '"uuid":"[^"]+"',
-    intervalMs: 20 * 60 * 1000,
+    /**
+     * 【20 → 15 分钟】（2026-11-14 真机取证）
+     *
+     * 时间线：13:53 探活成功 → 14:13 DNS 解析失败（手机没网）→ 14:27 同步时已失效。
+     * 也就是说**一次漏探（约 20 分钟空档）就足以让服务端把会话判成闲置作废**，
+     * 推断 idle timeout 约 30 分钟。
+     * 原来 20 分钟一次，只剩 10 分钟余量；任何一次网络抖动都会踩线。
+     * 改到 15 分钟（这是 MIN_INTERVAL_MS 允许的下限），余量提到 15 分钟。
+     * 代价：每天多 48 个只读请求 —— 相对"掉线后要人工重登"完全不值一提。
+     */
+    intervalMs: 15 * 60 * 1000,
   };
 
   /**
