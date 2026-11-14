@@ -190,6 +190,17 @@ export interface NotifyPrefs {
   dailyHour?: number;
   /** 每日汇总排未来几天，默认 7（1–14） */
   dailyDays?: number;
+  /**
+   * 【先出待办，后台补细节】开关。
+   *
+   * 不是提醒设置 —— 只是本项目**只有这一份用户偏好对象**（core 里唯一），
+   * 为它单开一套 prefs 会多出第二处键名定义，而"两份配置必然漂移"是这个项目反复吃过的亏。
+   * 所以借这里存，键名与默认值仍只有这一处。
+   *
+   * 打开后：同步只抓决定待办内容的部分（标题/状态/截止时间），
+   * 考试开考时间这类重详情页在同步结束后由后台补上。
+   */
+  fastFirstSync?: boolean;
 }
 
 export interface NotifyScheduleOptions {

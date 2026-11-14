@@ -2171,6 +2171,8 @@ async function renderSettings() {
   const pointsHours = Number(s.taskPointDailyHours) > 0 ? Number(s.taskPointDailyHours) : 6;
   const pointsLeadDays = (25 / pointsHours).toFixed(1);
   const quietOn = s.quietEnabled !== false;
+  /** 【先出待办，后台补细节】默认关，保持升级前行为 */
+  const fastFirst = s.fastFirstSync === true;
   presetCache = presets;
 
   const task = s.task ?? { firstHours: 24, lastHours: 12, times: 2 };
@@ -2299,6 +2301,28 @@ async function renderSettings() {
         </label>
         <p class="muted"><b>护栏</b>：顺延后如果已经过了截止时间，这条提醒直接丢弃 ——
           提醒的意义是「还来得及」，迟到的提醒只会制造焦虑。</p>
+      </div>
+    </details>
+
+    <details class="set-item" data-set="syncfast"${opened('syncfast')}>
+      <summary>
+        <span class="set-name">先出待办，后台补细节</span>
+        <span class="set-now">${fastFirst ? '已开启' : '已关闭'}</span>
+      </summary>
+      <div class="set-body">
+        <p class="muted">
+          <b>开启后</b>：同步只抓决定待办的内容（作业/考试的标题、状态、截止时间），
+          点完很快就能看到完整待办；<b>开考时间</b>这类要点进详情页才有的信息，
+          会在后台补上并自动刷新。
+        </p>
+        <p class="muted">
+          <b>代价</b>：刚同步完的一小段时间里，部分考试的「开考时间」可能是空的，
+          几秒到几十秒后自动填上。<b>不会漏任何一条作业或考试</b> —— 优化的只是细节的到达顺序。
+        </p>
+        <label class="set-row">
+          <span>开启（仅影响支持该能力的平台，目前是超星）</span>
+          <input type="checkbox" id="setFastFirst"${fastFirst ? ' checked' : ''}>
+        </label>
       </div>
     </details>
 
@@ -2910,6 +2934,19 @@ $('settingsList').addEventListener('click', async (e) => {
 $('settingsList').addEventListener('change', (e) => {
   const id = e.target.id;
   if (id === 'setPointsHours') saveSettings({ taskPointDailyHours: Number(e.target.value) });
+  else if (id === 'setFastFirst') {
+    // 这一项不影响提醒排期，所以不走 saveSettings（它的提示语是"提醒已重新排期"）
+    const on = e.target.checked;
+    api('/api/settings', { method: 'POST', body: JSON.stringify({ fastFirstSync: on }) })
+      .then(() => {
+        toast(on ? '已开启：先出待办，后台补细节' : '已关闭：恢复完整同步', 4000);
+        renderSettings();
+      })
+      .catch((err) => {
+        e.target.checked = !on; // 回滚，别让界面说谎
+        toast(`保存失败：${err.message}`, 5000);
+      });
+  }
   else if (id === 'setDailyOn') saveSettings({ daily: e.target.checked });
   else if (id === 'setDailyHour') saveSettings({ dailyHour: Number(e.target.value) });
   else if (id === 'setDailyDays') saveSettings({ dailyDays: Number(e.target.value) });
@@ -3139,6 +3176,29 @@ async function doSync() {
         openPlatformLogin(pid, loginUrl, needLogin.accountId);
       }
     }
+    // 【先出待办，后台补细节】深度通道正在补开考时间 —— 补完后自动刷新界面。
+    // 不弹进度条：同步结果条还在显示，抢掉它反而让用户看不到"新增/更新几条"。
+    // 只有真的补到了东西才用一句 toast 提一下。
+    if (r.deepPass?.running) {
+      const startedAt = Date.now();
+      const poll = async () => {
+        try {
+          const st = await api('/api/state');
+          if (!st.deepPass?.running) {
+            await refresh();
+            if (Number(st.deepPass?.patched) > 0) {
+              toast(`后台补齐 ${st.deepPass.patched} 条开考时间`, 3500);
+            }
+            return;
+          }
+        } catch {
+          /* 轮询失败就算了，用户下次刷新也能看到 */
+        }
+        if (Date.now() - startedAt < 45000) setTimeout(poll, 2500);
+      };
+      setTimeout(poll, 1500);
+    }
+
     // 返回报告：调用方（例如「刚启用一个平台」）要据此判断首同步是否真的成功。
     // 只看状态条是判断不了的 —— 用户看不到，代码也读不到。
     return r;

@@ -35,6 +35,8 @@ export const DEFAULT_NOTIFY_PREFS: Required<NotifyPrefs> = {
   quietEnabled: true,
   quietFromHour: 22,
   quietToHour: 8,
+  // 默认关：保持升级前行为。用户想试「先出待办、后台补细节」时自己在设置里打开。
+  fastFirstSync: false,
 };
 
 export interface PrefsStorage {
@@ -108,6 +110,9 @@ export function normalizeNotifyPrefs(raw: unknown): Required<NotifyPrefs> {
     quietEnabled: o.quietEnabled === undefined ? DEFAULT_NOTIFY_PREFS.quietEnabled : Boolean(o.quietEnabled),
     quietFromHour,
     quietToHour,
+    // 「先出待办、后台补细节」：明确写了才覆盖默认（默认关 = 升级后行为不变）
+    fastFirstSync:
+      o.fastFirstSync === undefined ? DEFAULT_NOTIFY_PREFS.fastFirstSync : Boolean(o.fastFirstSync),
   };
 }
 
@@ -150,3 +155,4 @@ export const NOTIFY_LEVEL_LABELS: Record<NotifyLevel, string> = {
   standard: '标准',
   tight: '紧凑',
 };
+

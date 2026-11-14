@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 同步引擎 —— 整个应用的大脑。
  *
  * 职责：把「账号 → 适配器 → 限流 HTTP → 归一化 → 幂等合并 → 提醒」串成一条流水线，
@@ -36,6 +36,7 @@ import { TokenBucket, defaultLimitsFor } from '../infra/token-bucket.ts';
 import { createHttpStats, createResilientHttpClient, mapLimit } from './http-pipeline.ts';
 import type { HttpStats, RetryPolicy } from './http-pipeline.ts';
 import { DEFAULT_MERGE_OPTIONS, materializeTask, mergeTasks, describeUpdates } from './merge.ts';
+import { normalizeDeadline } from '../domain/deadline.ts';
 import type { TaskEvent } from './merge.ts';
 import { DEFAULT_REMINDER_RULES, planReminders } from './reminder.ts';
 import { buildNotificationSchedule } from './notify-schedule.ts';
@@ -122,6 +123,16 @@ export interface SyncOptions {
   skipCompletedCourses?: boolean;
   /** 上条开关的 TTL，默认 6 小时 */
   completedCourseTtlMs?: number;
+  /**
+   * 【先出待办，后台补细节】
+   *
+   * 置真时本轮只抓决定"待办内容"的部分（标题/状态/截止时间），
+   * 把纯展示性的重详情页（超星：考试开考时间）留给 `refreshTaskDetailsQuietly`
+   * 在同步结束后后台补。界面先拿到完整待办，细节随后自动填上。
+   *
+   * 由 `/api/sync` 按用户设置 `fastFirstSync` 传入。默认 false（行为与旧版一致）。
+   */
+  skipDetails?: boolean;
   /**
    * 会话失效时，允许用保险箱里保存的密码自动重新登录并重试一轮（一键同步）。
    * 默认 true —— 但只有「账号密码登录且勾选了记住密码」的账号才有凭据可登；
@@ -362,6 +373,66 @@ export class SyncEngine {
     if (!session) throw new HubError('AUTH_REQUIRED', '会话不存在，请先同步一次');
     const ctx = this.#contextFor(account.platformId, accountId);
     return adapter.probeReadOnlyOnce(ctx, session, course);
+  }
+
+  /**
+   * 【先出待办，后台补细节】同步结束后，后台把"延后也无害"的细节补上。
+   *
+   * 与 `fetchTasks({skipDetails:true})` 配对：
+   *   · 快速通道已经让用户看到完整待办（标题/状态/截止时间）；
+   *   · 这里只补开考时间这类展示性字段，补到了就刷新界面，补不到也不影响待办。
+   *
+   * 安全边界：
+   *   · **只改 startsAt / 缺失的 deadline**，绝不改状态或标题 —— 后台补写不能把待办改没了；
+   *   · 单个账号失败不影响其它账号；
+   *   · 整个过程不写同步日志（它是补充，不是一次同步），只写调试日志。
+   */
+  async refreshTaskDetailsQuietly(accountIds?: string[]): Promise<{ patched: number }> {
+    let patched = 0;
+    const accounts = await this.#store.listAccounts();
+    for (const account of accounts) {
+      if (accountIds && !accountIds.includes(account.id)) continue;
+      const adapter = this.#registry.get(account.platformId);
+      if (!adapter?.refreshTaskDetails) continue;
+      try {
+        const session = await this.#vault.load(account.id);
+        if (!session) continue;
+        const courses = await this.#store.listCourses([account.id]);
+        const tasks = await this.#store.listTasks({ accountIds: [account.id] });
+        if (tasks.length === 0) continue;
+        const ctx = this.#contextFor(account.platformId, account.id);
+        const patches = await adapter.refreshTaskDetails(ctx, session, { tasks, courses });
+        if (patches.length === 0) continue;
+        // 只按 platformTaskId 定位，且只写允许的字段
+        const byPlatformId = new Map(tasks.filter((t) => t.platformTaskId).map((t) => [t.platformTaskId!, t]));
+        const updates = [];
+        for (const p of patches) {
+          const t = byPlatformId.get(p.platformTaskId);
+          if (!t) continue;
+          if (p.courseId && t.courseId !== p.courseId) continue;
+          updates.push({
+            ...t,
+            ...(p.startsAt ? { startsAt: p.startsAt } : {}),
+            // deadline 是 branded 类型，必须过 normalizeDeadline（不能直接塞字符串）
+            ...(p.deadline && !t.deadline ? { deadline: normalizeDeadline(p.deadline, this.#clock.now()) } : {}),
+            updatedAt: this.#clock.now().toISOString(),
+          });
+        }
+        if (updates.length > 0) {
+          await this.#store.upsertTasks(updates);
+          patched += updates.length;
+          this.#logger.debug('后台补齐任务细节', { accountId: account.id, count: updates.length });
+        }
+      } catch (e) {
+        // 补细节失败绝不影响待办：用户已经看到主要内容了
+        this.#logger.debug('后台补细节失败', {
+          accountId: account.id,
+          error: (e as Error).message.slice(0, 120),
+        });
+      }
+    }
+    if (patched > 0) await this.#refreshNotificationSchedule();
+    return { patched };
   }
 
   async listAccounts(): Promise<PlatformAccount[]> {
@@ -1592,6 +1663,9 @@ export class SyncEngine {
             fullDiagnostics,
             quietCourseIds,
             ...(knownStartsAt ? { knownStartsAt } : {}),
+            // 【先出待办，后台补细节】开了这个开关时，本轮只抓待办本身，
+            // 把考试开考时间之类的重详情页留给 refreshTaskDetailsQuietly 在后台补
+            ...(opts.skipDetails ? { skipDetails: true } : {}),
           };
         const page = await adapter.fetchTasks(ctx, session, req);
         declaredTotal = page.declaredTotal ?? declaredTotal;
@@ -3179,3 +3253,4 @@ function rank(task: UnifiedTask, now: Date, includeOverdue: boolean): { bucket: 
   }
   return { bucket: 2, ms: Number.MAX_SAFE_INTEGER };
 }
+

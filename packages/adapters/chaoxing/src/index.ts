@@ -31,10 +31,11 @@ import type {
   FetchTasksRequest,
   Page,
   PlatformAdapter,
+  TaskDetailPatch,
 } from '#core/ports/adapter.ts';
 import type { PlatformCourse, TaskPointWindow, UnifiedCourse } from '#core/domain/course.ts';
 import { normalizeDeadline } from '#core/domain/deadline.ts';
-import type { PlatformTask, TaskKind, TaskStatus } from '#core/domain/task.ts';
+import type { PlatformTask, TaskKind, TaskStatus, UnifiedTask } from '#core/domain/task.ts';
 import type { Credentials, Session } from '#core/ports/vault.ts';
 import type { ReadOnlyPolicy } from '#core/ports/read-only.ts';
 import { HubError, schemaDrift } from '#core/domain/errors.ts';
@@ -766,7 +767,13 @@ export class ChaoxingAdapter implements PlatformAdapter {
             //    （真机 2026-11-02：期中考试在已完成栏里被显示成"截止 11:40"）
             let startsAt: string | undefined = w.platformTaskId ? knownStarts[w.platformTaskId] : undefined;
             const wantsStart = w.status === 'pending' || w.status === 'expired';
-            if (!startsAt && wantsStart && w.platformTaskId && examDetailFetches < EXAM_TIME_LIMIT) {
+            if (
+              !req.skipDetails &&
+              !startsAt &&
+              wantsStart &&
+              w.platformTaskId &&
+              examDetailFetches < EXAM_TIME_LIMIT
+            ) {
               examDetailFetches += 1;
               try {
                 const times = await this.#examDetailTimes(http, course, w.platformTaskId);
@@ -1631,6 +1638,68 @@ export class ChaoxingAdapter implements PlatformAdapter {
    *
    * 优化方案敲定后，本方法与 limits-probe.ts 一并删除。
    */
+  /**
+   * 【先出待办，后台补细节】只补「考试开考时间」。
+   *
+   * 为什么只补这一项：超星的待办本身（标题/状态/截止时间）在列表页里全都有，
+   * 唯一藏在详情页的是「开考时间」。而详情页是**一个考试一个请求、单页 300KB** 的重页面，
+   * 它正是整轮同步里最慢的那一截 —— 把它挪到后台，用户就能先看到完整待办。
+   *
+   * 边界：只补 `startsAt` / 缺失的 `deadline`，绝不改状态或标题。
+   * 拿不到就跳过（退化成"只显示截止时间"，与改动前一致），不报错、不影响待办。
+   */
+  async refreshTaskDetails(
+    ctx: AdapterContext,
+    session: Session,
+    req: { tasks: UnifiedTask[]; courses: UnifiedCourse[] },
+  ): Promise<TaskDetailPatch[]> {
+    const http = new SessionHttpClient(ctx, session);
+    // 内部课程 id → 平台参数（classId/cpi 在 raw 里）
+    const byCourseId = new Map<
+      string,
+      { courseId: string; classId: string; cpi?: string; enc?: string }
+    >();
+    for (const c of req.courses) {
+      const raw = (c.raw ?? {}) as { classId?: string; cpi?: string; enc?: string };
+      if (!raw.classId) continue;
+      byCourseId.set(c.id, {
+        courseId: c.platformCourseId,
+        classId: String(raw.classId),
+        ...(raw.cpi ? { cpi: String(raw.cpi) } : {}),
+        ...(raw.enc ? { enc: String(raw.enc) } : {}),
+      });
+    }
+
+    const patches: TaskDetailPatch[] = [];
+    let fetched = 0;
+    for (const t of req.tasks) {
+      if (t.kind !== 'exam') continue;
+      if (t.startsAt) continue; // 已经有了
+      if (!t.platformTaskId) continue; // 定位不到这场考试
+      if (fetched >= EXAM_TIME_LIMIT) break;
+      const course = byCourseId.get(t.courseId);
+      if (!course) continue;
+      fetched += 1;
+      try {
+        const times = await this.#examDetailTimes(http, course, t.platformTaskId);
+        if (times.start || (!t.deadline && times.end)) {
+          patches.push({
+            platformTaskId: t.platformTaskId,
+            courseId: t.courseId,
+            ...(times.start ? { startsAt: times.start } : {}),
+            ...(!t.deadline && times.end ? { deadline: times.end } : {}),
+          });
+        }
+      } catch {
+        // 补细节失败不影响待办：这条考试继续只显示截止时间
+      }
+    }
+    if (fetched > 0) {
+      this.#resolveTrace.push(`deep:考试详情 ${fetched} 个，补到 ${patches.length} 条`);
+    }
+    return patches;
+  }
+
   async probeReadOnlyOnce(
     ctx: AdapterContext,
     session: Session,

@@ -273,6 +273,18 @@ export type ApiHandler = (req: ApiRequest) => Promise<ApiResponse>;
 
 export function createApiHandler(deps: ApiDeps): ApiHandler {
   let inFlight: Promise<SyncReport> | undefined;
+  /**
+   * 【先出待办，后台补细节】深度通道的进度。
+   *
+   * 为什么要暴露给界面：同步返回时细节还没到，用户看到的是"开考时间空着"。
+   * 界面需要知道"还在补 / 补完了 / 补了几条"，才能给出正确的反馈，
+   * 否则用户会以为那些空就是平台没有。
+   */
+  let deepPass: { running: boolean; patched: number; startedAt: number } = {
+    running: false,
+    patched: 0,
+    startedAt: 0,
+  };
 
   /**
    * 同步之后顺手更新任务点：**不 await、不报错**。
@@ -306,12 +318,16 @@ export function createApiHandler(deps: ApiDeps): ApiHandler {
    * 同步必须串行。不只是省资源：两个并发同步会在合并阶段互相干扰
    * 「消失/恢复」的判定。所以复用进行中的同步，而不是排队两个。
    */
-  function runSync(opts: { allowRelogin?: boolean; refreshCourses?: boolean } = {}): Promise<SyncReport> {
+  function runSync(
+    opts: { allowRelogin?: boolean; refreshCourses?: boolean; skipDetails?: boolean } = {},
+  ): Promise<SyncReport> {
     if (inFlight) return inFlight;
     inFlight = deps.engine
       .syncAll({
         allowRelogin: opts.allowRelogin !== false,
         ...(opts.refreshCourses ? { refreshCourses: 'always' as const } : {}),
+        // 【先出待办，后台补细节】只抓待办本身，重详情页留给后台
+        ...(opts.skipDetails ? { skipDetails: true } : {}),
       })
       .finally(() => {
         inFlight = undefined;
@@ -610,6 +626,8 @@ export function createApiHandler(deps: ApiDeps): ApiHandler {
             },
             diag,
             syncing: inFlight !== undefined,
+            // 【先出待办，后台补细节】深度通道进度，界面据此提示「细节补齐中/已补齐 N 条」
+            deepPass,
             lastSyncAt: accounts.map((x) => x.lastSyncAt).filter(Boolean).sort().at(-1) ?? null,
             platforms: platformSummaries(deps.registry),
             reminders: deps.reminders.slice(0, 20).map((r) => ({
@@ -1172,13 +1190,30 @@ export function createApiHandler(deps: ApiDeps): ApiHandler {
       // ---- 写 ----
       if (method === 'POST' && path === '/api/sync') {
         const body = parseBody();
+        // 【先出待办，后台补细节】用户设置决定这次同步走不走"快速通道"
+        const fastFirst = prefsOf().read().fastFirstSync === true;
         const report = await runSync({
           allowRelogin: body.allowRelogin !== false,
           refreshCourses: body.refreshCourses === true,
+          skipDetails: fastFirst,
         });
         // 不 await：同步该多快还多快，任务点在后台补（过期才抓）
         void refreshTaskPointsQuietly();
-        return { status: 200, body: summarize(report) };
+        // 【先出待办，后台补细节】同步一返回就启动深度通道。
+        // 用户此刻已经能看到完整待办（标题/状态/截止时间），
+        // 这里只补考试开考时间这类重详情页，补到后界面自己会刷新。
+        if (fastFirst) {
+          deepPass = { running: true, patched: 0, startedAt: Date.now() };
+          void deps.engine
+            .refreshTaskDetailsQuietly()
+            .then((r) => {
+              deepPass = { running: false, patched: r.patched, startedAt: deepPass.startedAt };
+            })
+            .catch(() => {
+              deepPass = { running: false, patched: 0, startedAt: deepPass.startedAt };
+            });
+        }
+        return { status: 200, body: { ...summarize(report), deepPass } };
       }
 
       if (method === 'POST' && path === '/api/relogin') {

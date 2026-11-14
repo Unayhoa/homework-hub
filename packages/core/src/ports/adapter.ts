@@ -15,7 +15,7 @@
  */
 import type { Clock } from '../domain/time.ts';
 import type { PlatformCourse, UnifiedCourse, CourseGradeSummary } from '../domain/course.ts';
-import type { PlatformTask } from '../domain/task.ts';
+import type { PlatformTask, UnifiedTask } from '../domain/task.ts';
 import type { HttpClient } from './http.ts';
 import type { Limiter } from './limiter.ts';
 import type { Logger } from './logger.ts';
@@ -213,6 +213,34 @@ export interface FetchTasksRequest {
    * 以本次抓到的为准。
    */
   knownStartsAt?: Record<string, string>;
+
+  /**
+   * 【先出待办，后台补细节】跳过"延后也无害"的补充请求。
+   *
+   * 置真时适配器**只抓决定待办内容的部分**（标题、状态、截止时间），
+   * 把纯展示性的细节（超星：考试开考时间，藏在详情页、一个考试一个请求、
+   * 而且详情页是 300KB 的重页面）留给 `refreshTaskDetails` 在后台补。
+   *
+   * 语义边界（很重要）：**只能跳过"少一条信息"，不能跳过"少一条待办"**。
+   * 一条作业/考试本身绝不能被跳过 —— 那叫漏数据，不叫补细节。
+   */
+  skipDetails?: boolean;
+}
+
+/**
+ * 后台补细节时回传的补丁。
+ *
+ * 只允许改**补充展示字段**，不允许改状态/标题/截止时间这类决定"要不要做"的字段 ——
+ * 后台补写如果能把一条待办"改没了"，那就是在用性能换正确性。
+ */
+export interface TaskDetailPatch {
+  platformTaskId: string;
+  /** 内部课程 id（引擎的 makeCourseId 生成的），用于定位任务 */
+  courseId?: string;
+  /** 开考时刻（ISO，考试专用） */
+  startsAt?: string;
+  /** 结束/截止时刻（ISO）—— 仅在顺带抓到、且原来没有时补 */
+  deadline?: string;
 }
 
 export interface PlatformAdapter {
@@ -319,6 +347,25 @@ export interface PlatformAdapter {
   fetchCourses(ctx: AdapterContext, session: Session, req?: FetchCoursesRequest): Promise<Page<PlatformCourse>>;
 
   fetchTasks(ctx: AdapterContext, session: Session, req: FetchTasksRequest): Promise<Page<PlatformTask>>;
+
+  /**
+   * 【先出待办，后台补细节】只抓"延后也无害"的补充信息，返回补丁。
+   *
+   * 与 `fetchTasks({skipDetails:true})` 配对使用：
+   *   · 快速通道：fetchTasks 跳过细节 → 用户先看到完整待办（标题/状态/截止）
+   *   · 深度通道：本方法在后台补上开考时间之类的展示性细节
+   *
+   * 为什么单独一个方法、而不是再跑一次 fetchTasks：
+   * 重跑一次会把**全部**请求再打一遍（含作业/考试列表），等于把省下的又还回去。
+   * 这里只打真正缺的那几个详情页。
+   *
+   * 可选能力：不实现 = 该平台没有可延后的细节，快速通道对它等同于普通同步。
+   */
+  refreshTaskDetails?(
+    ctx: AdapterContext,
+    session: Session,
+    req: { tasks: UnifiedTask[]; courses: UnifiedCourse[] },
+  ): Promise<TaskDetailPatch[]>;
 
   /**
    * 抓「课程级任务点进度」。**可选能力** —— 不实现 = 该平台没有这个概念。
