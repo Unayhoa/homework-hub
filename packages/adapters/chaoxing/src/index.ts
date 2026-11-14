@@ -1944,6 +1944,12 @@ export class ChaoxingAdapter implements PlatformAdapter {
     const raw = (course.raw ?? {}) as { classId?: string; cpi?: string; enc?: string; squareUrl?: string };
     const seeds: Array<{ tag: string; url: string }> = [];
     // ① studentcourse 里的隐藏 enc
+    //
+    // 【注意：不要把它挪到后面】（2026-11-14 试过又撤回）
+    // 它是 HAR 实证链路的第一跳，且拿到的 enc 比本地 raw.enc **更新**。
+    // 一度想"省掉这次大请求"把它挪到最后，结果 resolve 测试立刻红了 ——
+    // 那条链路是有真实抓包依据的，不能为了省一个请求去动顺序。
+    // 它的大页面问题（553KB）由原生回调上限修复解决（512KB → 1.5MB）。
     const scEnc = await this.#studentCourseEnc(http, course);
     if (scEnc && raw.classId) {
       seeds.push({

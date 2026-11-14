@@ -549,7 +549,14 @@ public class HttpBridge {
      * 所以：超过这个字节数就**在原生侧就截断为一条结构化错误**（带 url / 字节数），
      * 让 JS 收到一条正常的小 JSON，而不是一个把错误盖掉的怪异常。
      */
-    private static final int MAX_CALLBACK_BYTES = 512 * 1024;
+    // 【512KB → 1.5MB】（2026-11-14 真机定位）
+    // 超星 studentcourse 课程页实测 553336 字节，撞上原来的 512KB 上限 →
+    // 「定位作业」报「响应体过大被拦截」，表现为"有时能定位、有时不能"
+    //（页面大小随课程/章节数变化）。
+    // 1.5MB 的依据：MAX_RESPONSE_BYTES 是 1MB，任何被接受的响应最多 1MB 文本；
+    // 回调上限 ≥ 响应上限，才不会出现"读进来却被回调拦掉"这种自相矛盾。
+    // Invalid string length 是几十 MB 级才触发，1MB 级别远够不到。
+    private static final int MAX_CALLBACK_BYTES = 1536 * 1024;
 
     private static boolean lastTruncated = false;
 
@@ -741,7 +748,8 @@ public class HttpBridge {
             Log.w(TAG, "回调体积超限 id=" + id + " kind=" + kind + " bytes=" + payloadBytes);
             out = "{\"status\":500,\"url\":\"\",\"text\":\"\",\"error\":\"响应体过大被拦截（"
                     + payloadBytes + " 字节，上限 " + MAX_CALLBACK_BYTES
-                    + "）。这是 Invalid string length 的根因定位点：请求返回的不是作业 JSON，而是大文件/流式页面。\"}";
+                    + "）。这通常说明这条请求拿到的是一个大页面（例如超星的课程页），"
+                    + "而不是小接口；若反复出现，请把这条发给开发者核对上限。\"}";
         }
         final String js = "window.__hhBridge&&window.__hhBridge." + kind + "("
                 + JSONObject.quote(id) + "," + JSONObject.quote(out) + ")";
