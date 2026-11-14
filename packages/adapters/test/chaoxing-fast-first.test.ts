@@ -162,8 +162,7 @@ describe('先出待办，后台补细节', () => {
     assert.ok(urls.some((u) => u.includes('examnotes')));
   });
 
-  it('已经有 startsAt 的考试不再重复请求（省请求）', async () => {
-    const adapter = new ChaoxingAdapter();
+  it('已经有 startsAt 的考试不再重复请求（省请求）', async () => {    const adapter = new ChaoxingAdapter();
     const { ctx, urls } = makeCtx(route);
     const tasks = [
       {
@@ -188,5 +187,48 @@ describe('先出待办，后台补细节', () => {
     });
     assert.equal(patches.length, 0);
     assert.equal(urls.filter((u) => u.includes('examnotes')).length, 0, '已知开考时间不应再请求');
+  });
+
+  it('考试列表优先用 stuenc 变体（每门课少一次必然失败的请求）', async () => {
+    // 真机日志：「考试列表走 stuenc 变体才返回数据（不带它时页面是空的）」。
+    // 原来顺序是 plain 先，于是每门课先打一次注定空的请求再换对的 = 15 个白请求。
+    const adapter = new ChaoxingAdapter();
+    const { ctx, urls } = makeCtx(route);
+    await adapter.fetchTasks(ctx, SESSION, {
+      courses: coursesArg(),
+      quietCourseIds: [],
+      skipDetails: true,
+    } as never);
+
+    const examUrls = urls.filter((u) => u.includes('exam-list'));
+    assert.ok(examUrls.length > 0, '应请求考试列表');
+    assert.match(examUrls[0]!, /stuenc=/, '第一次就该带 stuenc（而不是先试 plain）');
+  });
+
+  it('主路径已是真列表页时，空课程不再多打一次「无enc」请求', async () => {
+    // 这是"少打重复请求"，不是"少查课程"：
+    // 页面含 bottomList/goTask = 确实是列表页，0 条就是真没有，再换变体是纯浪费。
+    const adapter = new ChaoxingAdapter();
+    const EMPTY_REAL_LIST = `<ul class="bottomList"><li style="display:none"></li></ul>${'x'.repeat(3000)}`;
+    const { ctx, urls } = makeCtx((req) => {
+      const u = req.url;
+      if (u.includes('stucoursemiddle')) return COURSE_PAGE;
+      if (u.includes('work/list')) return EMPTY_REAL_LIST; // 真列表页，但 0 条
+      if (u.includes('exam-list')) return EXAM_LIST;
+      if (u.includes('examnotes')) return EXAM_DETAIL;
+      return '';
+    });
+
+    await adapter.fetchTasks(ctx, SESSION, {
+      courses: coursesArg(),
+      quietCourseIds: [],
+      skipDetails: true,
+    } as never);
+
+    assert.equal(
+      urls.filter((u) => u.includes('work/list')).length,
+      1,
+      '真列表页且 0 条时不应再打「无enc」变体',
+    );
   });
 });

@@ -187,6 +187,22 @@ export class ChaoxingAdapter implements PlatformAdapter {
    * 只进日志 / 界面的诊断提示，不参与业务判断；一次解析最多十几条。
    */
   #resolveTrace: string[] = [];
+
+  /**
+   * 【请求构成测量】本轮各类请求各发了多少次。
+   *
+   * 为什么需要（2026-11-14 用户质询"提速了吗"）：
+   * 之前只知道"这轮 186 个请求 / 35 秒"，但**不知道 186 花在哪**，
+   * 于是任何提速方案都只能靠猜 —— 而猜错过好几次（风控、编码、Referer）。
+   * 有了这张表，"该砍哪里"就是算术题。
+   *
+   * 只统计、不发请求，零风险。结果写进同步日志的「排查信息」。
+   */
+  #reqCounts = new Map<string, number>();
+
+  #count(label: string): void {
+    this.#reqCounts.set(label, (this.#reqCounts.get(label) ?? 0) + 1);
+  }
   /** 【错误定位，调试期保留】最近一次「作业/考试列表返回登录页」的具体特征（HTTP 状态 + 响应片段） */
   #lastAuthWallHint = '';
 
@@ -577,6 +593,10 @@ export class ChaoxingAdapter implements PlatformAdapter {
     const adapterDetails: string[] = [];
     // 签名缓存只在**本轮**有效：t 可能短命，跨轮复用会拿到过期签名
     this.#sigCache.clear();
+    // 请求构成统计也按轮清空
+    this.#reqCounts.clear();
+    // 请求构成统计也按轮清空
+    this.#reqCounts.clear();
     /** 作业这一轮走的是哪条路（html / json 回退），以及各走了几门课 */
     let htmlPathCourses = 0;
     let jsonFallbackCourses = 0;
@@ -616,8 +636,18 @@ export class ChaoxingAdapter implements PlatformAdapter {
 
       // 作业：主路径 work/task-list（HTML），失败回退旧版 getAllWork（JSON）
       let workItems: PlatformTask[] = [];
+      /**
+       * 主路径拿到的是不是**一张真正的列表页**（而不是空壳/错误页）。
+       *
+       * 用来决定要不要再试「无 enc」变体：
+       *   · 真列表页 + 0 条 → 这门课确实没有作业，**不必再打一次**（省 1 个请求）
+       *   · 空壳/错误页   → 必须换变体重试（否则会漏掉作业）
+       * 这是"少打重复请求"，不是"少查这门课" —— 覆盖一条都没减。
+       */
+      let htmlLooksRealList = false;
       try {
         const html = await this.#fetchTaskListHtml(http, course);
+        htmlLooksRealList = /bottomList|goTask|overHidden2/i.test(html);
         // 先留着**去重前**的原始解析结果：诊断要看"页面上一共给了几条、各有几个日期"，
         // 去重之后被合并掉的那条就看不见了。
         const rawParsed = parseTaskListHtml(html, now);
@@ -701,7 +731,7 @@ export class ChaoxingAdapter implements PlatformAdapter {
         diag.push(msg);
         courseErrs.push(msg);
       }
-      if (workItems.length === 0) {
+      if (workItems.length === 0 && !htmlLooksRealList) {
         // 回退：再用**不带 enc 的 HTML 变体**试一次。
         //
         // 为什么不再走原来的 `#fetchPerCourse`（POST getAllWork）：HAR 实证表明那个
@@ -923,6 +953,14 @@ export class ChaoxingAdapter implements PlatformAdapter {
           `${jsonFallbackCourses > 0 ? ` / 无enc回退 ${jsonFallbackCourses} 次` : ''}`,
       );
     }
+    // 【请求构成】本轮各类请求各几次 —— 提速必须先知道"该砍哪里"。
+    // 按次数从多到少排，一眼能看出大头在哪。
+    if (this.#reqCounts.size > 0) {
+      const parts = [...this.#reqCounts.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .map(([k, v]) => `${k} ${v}`);
+      adapterDetails.push(`请求构成：${parts.join(' · ')}`);
+    }
     // 页面只给"剩余X小时"的作业：它们的截止时间是我们按当前时刻推算的。
     // 这说明**那一批**作业的日期本来就不是精确值 —— 判断"这条有没有被平台改期"时要扣掉这一层。
     if (relativeOnly > 0) {
@@ -1024,6 +1062,7 @@ export class ChaoxingAdapter implements PlatformAdapter {
       (course.cpi ? `&cpi=${encodeURIComponent(course.cpi)}` : '') +
       (sig.stuenc ? `&enc=${encodeURIComponent(sig.stuenc)}` : '') +
       `&t=${t}`;
+    this.#count(kind === 'exam' ? '考试列表' : '作业列表');
     const res = await http.request({
       url: `${base}?${params.toString()}`,
       method: 'GET',
@@ -1088,11 +1127,22 @@ export class ChaoxingAdapter implements PlatformAdapter {
       return `${this.#ep.examTaskList}?${p.toString()}`;
     };
 
-    const order: Array<{ name: 'plain' | 'stuenc'; withEnc: boolean }> = [{ name: 'plain', withEnc: false }];
+    // 【变体顺序：有 enc 就先试 stuenc】（2026-11-14 提速，零信息损失）
+    //
+    // 原来的顺序是「plain 先、stuenc 后」。但真实日志明确写着
+    // 「考试列表走 stuenc 变体才返回数据（不带它时页面是空的）」——
+    // 也就是说每门课都先打一次**必然失败**的请求，再换对的。
+    // 15 门课 = 15 个纯浪费的请求 ≈ 3.7 秒（4 rps）。
+    //
+    // 这不是"减少覆盖"：只是把**已知更可能成功**的变体放前面，
+    // 失败仍会回落到 plain，任何一门课该有的考试都不会少。
+    const order: Array<{ name: 'plain' | 'stuenc'; withEnc: boolean }> = [];
     if (course.enc) order.push({ name: 'stuenc', withEnc: true });
+    order.push({ name: 'plain', withEnc: false });
 
     let last = '';
     for (const v of order) {
+      this.#count('考试列表');
       const res = await http.request({
         url: build(v.withEnc),
         method: 'GET',
@@ -1140,6 +1190,7 @@ export class ChaoxingAdapter implements PlatformAdapter {
       examId,
     });
     if (course.cpi) p.set('cpi', course.cpi);
+    this.#count('考试详情');
     const res = await http.request({
       url: `https://mooc1.chaoxing.com/exam-ans/exam/test/examcode/examnotes?${p.toString()}`,
       method: 'GET',
@@ -1185,6 +1236,7 @@ export class ChaoxingAdapter implements PlatformAdapter {
       (course.cpi ? `&cpi=${encodeURIComponent(course.cpi)}` : '') +
       (sig.stuenc ? `&enc=${encodeURIComponent(sig.stuenc)}` : '') +
       `&t=${t}`;
+    this.#count('作业列表(无enc)');
     const res = await http.request({
       url: `${this.#ep.workTaskList}?${params.toString()}`,
       method: 'GET',
@@ -1307,6 +1359,7 @@ export class ChaoxingAdapter implements PlatformAdapter {
         `&clazzid=${encodeURIComponent(course.classId)}` +
         (course.cpi ? `&cpi=${encodeURIComponent(course.cpi)}` : '') +
         '&ismooc2=1&v=2';
+      this.#count('课程页签名');
       const res = await http.request({
         url,
         method: 'GET',
@@ -2909,4 +2962,5 @@ export function parseCookieHeader(input: string): Record<string, string> {
   }
   return out;
 }
+
 
