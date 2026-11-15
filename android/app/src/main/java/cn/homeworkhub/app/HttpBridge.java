@@ -518,6 +518,11 @@ public class HttpBridge {
                     || contentType.toLowerCase().contains("javascript")
                     || contentType.toLowerCase().contains("xml"));
             String binaryBase64 = isText ? null : android.util.Base64.encodeToString(payload, android.util.Base64.NO_WRAP);
+            // 【诊断】这次请求实际走了几跳（每跳 = 一次真实网络往返）。
+            // JS 侧用它区分"请求数没变但越来越慢"的两种原因：
+            //   · 跳数变多 → 平台在把请求重定向到登录/刷新页（我们跟着跑了多趟）
+            //   · 跳数不变 → 纯粹是单次往返变慢（网络/服务端）
+            responseHeaders.put("x-hh-hops", String.valueOf(hop + 1));
             return toJson(
                     status, currentUrl, responseHeaders,
                     isText ? decode(payload, contentType) : "", binaryBase64,

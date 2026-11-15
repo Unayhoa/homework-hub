@@ -29,6 +29,25 @@ export interface HttpStats {
   throttledMs: number;
   statusCounts: Record<string, number>;
   lastError?: string;
+  /**
+   * 网络往返累计 / 单次最大（毫秒）—— 只算 `base.request()` 本身，不含限流等待。
+   *
+   * 为什么必须和 throttledMs 分开记（2026-11-15 真机）：
+   * 超星同步的**请求数一直是 45**，耗时却从 5.5s 涨到 13.3s。
+   * 只看"总耗时"无法判断是「等限流」还是「网络/服务端变慢」，
+   * 而这两者的处置完全相反：前者该调限流，后者只能等网络或查平台。
+   * 拆开记，一眼就能分辨。
+   */
+  rttTotalMs?: number;
+  rttMaxMs?: number;
+  /**
+   * 重定向跳数累计（原生侧 `x-hh-hops`）。
+   *
+   * 为什么要单独看它：原生桥会手动跟随最多 5 跳，**每跳都是一次真实网络往返**，
+   * 但在 JS 侧仍然算"1 个请求"。如果平台开始把请求先重定向到登录/刷新页，
+   * 请求数不变、耗时会成倍上涨 —— 这正是"请求数没变但越来越慢"的另一个可能原因。
+   */
+  hopsTotal?: number;
 }
 
 export interface ResilientHttpOptions {
@@ -69,6 +88,9 @@ export function createResilientHttpClient(base: HttpClient, opts: ResilientHttpO
     retries: 0,
     throttledMs: 0,
     statusCounts: {},
+    rttTotalMs: 0,
+    rttMaxMs: 0,
+    hopsTotal: 0,
   };
   const log = opts.logger.child({ platformId: opts.platformId, layer: 'http' });
 
@@ -82,7 +104,15 @@ export function createResilientHttpClient(base: HttpClient, opts: ResilientHttpO
         stats.requests += 1;
 
         try {
+          const rtt0 = Date.now();
           const res = await base.request(req, meta);
+          const rtt = Date.now() - rtt0;
+          stats.rttTotalMs = (stats.rttTotalMs ?? 0) + rtt;
+          stats.rttMaxMs = Math.max(stats.rttMaxMs ?? 0, rtt);
+          // 原生桥会把"这次请求实际走了几跳"放在 x-hh-hops 里（每跳 = 一次真实往返）。
+          // 拿不到（非原生环境）就按 1 跳算。
+          const hops = Number(res.headers['x-hh-hops'] ?? 1);
+          if (Number.isFinite(hops) && hops > 0) stats.hopsTotal = (stats.hopsTotal ?? 0) + hops;
           stats.statusCounts[String(res.status)] = (stats.statusCounts[String(res.status)] ?? 0) + 1;
 
           if (res.status === 429) {
@@ -137,7 +167,7 @@ export function createResilientHttpClient(base: HttpClient, opts: ResilientHttpO
 }
 
 export function createHttpStats(): HttpStats {
-  return { requests: 0, retries: 0, throttledMs: 0, statusCounts: {} };
+  return { requests: 0, retries: 0, throttledMs: 0, statusCounts: {}, rttTotalMs: 0, rttMaxMs: 0, hopsTotal: 0 };
 }
 
 /** 简单的并发池：用于并发同步多个账号，同时限制总并发避免带宽/CPU 打满。 */
@@ -161,3 +191,4 @@ export async function mapLimit<T, R>(
   await Promise.all(runners);
   return results;
 }
+

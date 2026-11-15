@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 同步引擎 —— 整个应用的大脑。
  *
  * 职责：把「账号 → 适配器 → 限流 HTTP → 归一化 → 幂等合并 → 提醒」串成一条流水线，
@@ -1936,6 +1936,35 @@ export class SyncEngine {
     // 于是自动接回成功时消息里会出现两遍「会话曾失效，已自动接回」。
     // 适配器"只进日志"的补充，同样去重后并进 detail
     for (const d of [...new Set(adapterDetails)]) details.push(d);
+
+    // 【耗时构成】把「总耗时」拆成三段：限流等待 / 网络往返 / 其它（解析、落库）。
+    //
+    // 为什么必须有这一行（2026-11-15 真机）：超星同步的**请求数一直是 45**，
+    // 耗时却从 5.5s 涨到 13.3s。没有这个拆分就只能猜"是不是变慢了"，
+    // 而三种原因的处置完全相反：
+    //   · 限流占比高 → 该调 rps（我们自己的配置）
+    //   · 网络占比高 → 网络/服务端变慢（不是我们能改的）
+    //   · 跳数变多   → 平台在把请求重定向（要查会话/接口）
+    if (stats.requests > 0) {
+      const elapsedMs = Math.max(1, this.#clock.nowMs() - startMs);
+      const waitMs = stats.throttledMs ?? 0;
+      const rttMs = stats.rttTotalMs ?? 0;
+      const otherMs = Math.max(0, elapsedMs - waitMs - rttMs);
+      const avgRtt = Math.round(rttMs / stats.requests);
+      const hops = stats.hopsTotal ?? stats.requests;
+      const hopNote = hops > stats.requests ? `（平均 ${(hops / stats.requests).toFixed(1)} 跳/请求）` : '';
+      const statusStr = Object.entries(stats.statusCounts ?? {})
+        .sort((a, b) => b[1] - a[1])
+        .map(([k, v]) => `${k}×${v}`)
+        .join(' ');
+      details.push(
+        `耗时构成：总 ${(elapsedMs / 1000).toFixed(1)}s = 限流等待 ${(waitMs / 1000).toFixed(1)}s` +
+          ` + 网络往返 ${(rttMs / 1000).toFixed(1)}s（平均 ${avgRtt}ms/次、最慢 ${stats.rttMaxMs ?? 0}ms）` +
+          ` + 其它 ${(otherMs / 1000).toFixed(1)}s · 请求 ${stats.requests} 次${hopNote}` +
+          ` · 重试 ${stats.retries} 次` +
+          (statusStr ? ` · 状态 ${statusStr}` : ''),
+      );
+    }
 
     for (const n of [...new Set(adapterNotes)]) {
       if (notes.join('；').length + n.length > 1200) break; // 消息是给人读的，不是日志倾倒口
