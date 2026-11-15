@@ -693,9 +693,15 @@ export class SyncEngine {
    * 表现为「平台明明登录了却什么都没有」（真机踩过）。
    */  async #clearCourseCursors(accountId: string): Promise<void> {
     const at = this.#clock.now().toISOString();
-    for (const kind of ['course-exclude', 'course-crawl']) {
+    // adapter-sig：适配器级的"跨进程签名缓存"（超星的 enc/workEnc）。
+    // 登录换了新会话，旧签名必然失效，必须一并清掉。
+    for (const [kind, empty] of [
+      ['course-exclude', '[]'],
+      ['course-crawl', '[]'],
+      ['adapter-sig', '{}'],
+    ] as const) {
       const c = await this.#store.getCursor(accountId, kind);
-      if (c) await this.#store.setCursor({ accountId, kind, cursor: '[]', updatedAt: at });
+      if (c) await this.#store.setCursor({ accountId, kind, cursor: empty, updatedAt: at });
     }
   }
 
@@ -1621,6 +1627,17 @@ export class SyncEngine {
       } catch {
         log.warn('读取已知开考时间失败，本轮按未知处理', { platformId: account.platformId });
       }
+      // 【跨进程签名缓存】把上一次同步存下的签名还给适配器。
+      // 超星的课程页签名是 15 次 ~100KB 的大请求，而 Android 经常杀后台进程，
+      // 纯内存缓存几乎每次都失效 —— 存进 store 才能真正常态复用。
+      try {
+        const sigCursor = await this.#store.getCursor(account.id, 'adapter-sig');
+        (
+          adapter as unknown as { importSigCache?: (j?: string) => void }
+        ).importSigCache?.(sigCursor?.cursor);
+      } catch {
+        log.warn('读取签名缓存失败，本轮按无缓存处理', { platformId: account.platformId });
+      }
       try {
         for (;;) {
           if (pages >= maxPages) {
@@ -1765,6 +1782,22 @@ export class SyncEngine {
         { courses: courses.length, ...(driftDetail ? { detail: driftDetail } : {}) },
         err.message,
       );
+    }
+
+    // 【跨进程签名缓存】把本轮取到的签名存下来，下次同步（含重开 App）直接复用。
+    // 只在体积合理时保存；超长就丢掉 —— 缓存的价值远不如"别把 store 撑坏"。
+    try {
+      const blob = (adapter as unknown as { exportSigCache?: () => string | undefined }).exportSigCache?.();
+      if (blob && blob.length <= 8192) {
+        await this.#store.setCursor({
+          accountId: account.id,
+          kind: 'adapter-sig',
+          cursor: blob,
+          updatedAt: this.#clock.now().toISOString(),
+        });
+      }
+    } catch {
+      // 缓存写失败不影响同步结果
     }
 
     // ---- 归一化 + 合并 ----

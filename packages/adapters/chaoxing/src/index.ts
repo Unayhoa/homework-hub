@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 超星学习通适配器（experimental）。
  *
  * ⚠️ 重要前提，请先读完再用：
@@ -1041,35 +1041,47 @@ export class ChaoxingAdapter implements PlatformAdapter {
     //   enc    = 课程页隐藏域 `workEnc`      ← 与 stuenc **不是同一个值**
     // 之前把两者都填成 course.enc，平台接受请求（不再 403）但返回的列表是空的
     // —— 2026-11-10 的「15 门课全部 0 条」就是这么来的。
-    const sig = await this.#courseSignatures(http, course);
-    // t 用课程页里的那个（与 stuenc/workEnc 配套）；拿不到才退回当前时间。
-    const t = sig.t ?? String(now);
-    const params = new URLSearchParams({
-      courseId: course.courseId,
-      classId: course.classId,
-      ut: 's',
-      t,
-    });
-    if (course.cpi) params.set('cpi', course.cpi);
-    if (sig.stuenc) params.set('stuenc', sig.stuenc);
-    if (kind === 'homework' && sig.workEnc) params.set('enc', sig.workEnc);
-    const base = kind === 'exam' ? this.#ep.examTaskList : this.#ep.workTaskList;
-    // 【Referer 必须是课程页】HAR 里 Referer 是 mooc2-ans 的 mycourse/stu（带 courseid/clazzid/cpi/enc）。
-    // 之前发 API 根域会被判成非预期来源 → 那个 no-cache 拒绝页。
-    const referer =
-      'https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/stu' +
-      `?courseid=${encodeURIComponent(course.courseId)}` +
-      `&clazzid=${encodeURIComponent(course.classId)}` +
-      (course.cpi ? `&cpi=${encodeURIComponent(course.cpi)}` : '') +
-      (sig.stuenc ? `&enc=${encodeURIComponent(sig.stuenc)}` : '') +
-      `&t=${t}`;
+    const buildReq = (s: { stuenc?: string; workEnc?: string; t?: string }) => {
+      const t = s.t ?? String(Date.now());
+      const params = new URLSearchParams({
+        courseId: course.courseId,
+        classId: course.classId,
+        ut: 's',
+        t,
+      });
+      if (course.cpi) params.set('cpi', course.cpi);
+      if (s.stuenc) params.set('stuenc', s.stuenc);
+      if (kind === 'homework' && s.workEnc) params.set('enc', s.workEnc);
+      const base = kind === 'exam' ? this.#ep.examTaskList : this.#ep.workTaskList;
+      const referer =
+        'https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/stu' +
+        `?courseid=${encodeURIComponent(course.courseId)}` +
+        `&clazzid=${encodeURIComponent(course.classId)}` +
+        (course.cpi ? `&cpi=${encodeURIComponent(course.cpi)}` : '') +
+        (s.stuenc ? `&enc=${encodeURIComponent(s.stuenc)}` : '') +
+        `&t=${t}`;
+      return { url: `${base}?${params.toString()}`, referer };
+    };
+
+    let sig = await this.#courseSignatures(http, course);
+    let req = buildReq(sig);
     this.#count(kind === 'exam' ? '考试列表' : '作业列表');
-    const res = await http.request({
-      url: `${base}?${params.toString()}`,
-      method: 'GET',
-      headers: { Referer: referer },
-    });
-    const text = await res.text();
+    let res = await http.request({ url: req.url, method: 'GET', headers: { Referer: req.referer } });
+    let text = await res.text();
+
+    // 【缓存失效重试】用了跨轮缓存的签名、但拿回来的不是列表页 → 多半签名过期。
+    // 作废缓存、现取一份新的，**重试一次**。有了这条，延长缓存 TTL 才是安全的：
+    // 命中旧签名失败时最多多花一次往返，不会让这门课整轮丢掉。
+    const looksRealList = /bottomList|goTask|goTest|overHidden2/i.test(text);
+    if (sig.fromCache && !looksLikeAuthWall(text) && !looksRealList) {
+      this.#invalidateSig(course.courseId);
+      this.#resolveTrace.push(`task-list:缓存签名失效→重取 course=${course.courseId}`);
+      sig = await this.#courseSignatures(http, course);
+      req = buildReq(sig);
+      this.#count(kind === 'exam' ? '考试列表' : '作业列表');
+      res = await http.request({ url: req.url, method: 'GET', headers: { Referer: req.referer } });
+      text = await res.text();
+    }
     if (looksLikeAuthWall(text)) {
       // 【安全阀】判定为登录墙/拒绝页 → 作废这门课的签名缓存。
       // 这里比下面那条"解析 0 条"的分支更早命中（会直接抛错），
@@ -1309,11 +1321,19 @@ export class ChaoxingAdapter implements PlatformAdapter {
    *     （HAR 里隔天抓的两份课程页，这两个值是一样的）。
    * 所以这里缓存它们，但**不缓存 `t`**（t 与请求时刻绑定，必须每次新取）。
    *
-   * 安全阀：TTL 30 分钟 + 任一列表请求判定失败时清掉该课缓存，
-   * 下次自然重取。宁可多一次请求，也不让过期签名把同步卡死。
+   * 安全阀：列表请求判定失败时清掉该课缓存 + **当场重取一次**。
+   * 有了这条，"延长 TTL"才是安全的：命中的旧签名若失效，最多多一次往返，
+   * 不会让这门课整轮丢掉。
+   *
+   * 【TTL 30 分钟 → 6 小时】（2026-11-15 真机实测）
+   * 同步耗时构成显示：**限流等待 0.0s、网络往返 11.0s（45 次 × 245ms）** ——
+   * 瓶颈完全是串行往返。而 15 个"课程页签名"是其中唯一的大页面（约 100KB HTML），
+   * 每轮都重取一遍。同步通常是几小时一次，30 分钟 TTL 几乎永远命中不了，
+   * 等于这 15 个大请求每次都要付。
+   * HAR 实证同一门课的 `enc/workEnc` 隔天抓取值相同，所以 6 小时是合理窗口。
    */
   #sigCacheCross = new Map<string, { stuenc?: string; workEnc?: string; at: number }>();
-  static readonly SIG_TTL_MS = 30 * 60 * 1000;
+  static readonly SIG_TTL_MS = 6 * 60 * 60 * 1000;
 
   /** 作废某门课的跨轮签名缓存（列表请求被判失败时调用）。 */
   #invalidateSig(courseId: string): void {
@@ -1322,10 +1342,48 @@ export class ChaoxingAdapter implements PlatformAdapter {
     this.#resolveTrace.push(`sig:作废 course=${courseId}`);
   }
 
+  /**
+   * 【跨进程签名缓存】导出/导入。
+   *
+   * 为什么需要持久化（2026-11-15 真机）：同步耗时构成显示
+   * **限流等待 0.0s、网络往返 11.0s（45 次 × 245ms）** —— 纯粹是串行往返。
+   * 其中 15 次是"课程页签名"（约 100KB 的大页面）。原来只有在**同一个 App 进程**
+   * 里才可能复用，而 Android 经常把后台进程杀掉，所以实际几乎每次都重取。
+   * 存进 store 后，重开 App 也能复用，直接把 45 次降到 30 次（≈7.4s）。
+   *
+   * 安全：TTL 6 小时；命中后若列表页判失败，会**当场重取并重试一次**（见 #fetchTaskListHtml）。
+   */
+  exportSigCache(): string | undefined {
+    if (this.#sigCacheCross.size === 0) return undefined;
+    const obj: Record<string, { s?: string; w?: string; at: number }> = {};
+    for (const [k, v] of this.#sigCacheCross) {
+      obj[k] = { ...(v.stuenc ? { s: v.stuenc } : {}), ...(v.workEnc ? { w: v.workEnc } : {}), at: v.at };
+    }
+    return JSON.stringify(obj);
+  }
+
+  importSigCache(json: string | undefined): void {
+    if (!json) return;
+    try {
+      const obj = JSON.parse(json) as Record<string, { s?: string; w?: string; at?: number }>;
+      this.#sigCacheCross.clear();
+      for (const [k, v] of Object.entries(obj)) {
+        if (!v || typeof v.at !== 'number') continue;
+        this.#sigCacheCross.set(k, {
+          ...(typeof v.s === 'string' ? { stuenc: v.s } : {}),
+          ...(typeof v.w === 'string' ? { workEnc: v.w } : {}),
+          at: v.at,
+        });
+      }
+    } catch {
+      // 缓存损坏就当没有：最多多几次请求，绝不影响正确性
+    }
+  }
+
   async #courseSignatures(
     http: SessionHttpClient,
     course: { courseId: string; classId: string; cpi?: string; enc?: string },
-  ): Promise<{ stuenc?: string; workEnc?: string; t?: string }> {
+  ): Promise<{ stuenc?: string; workEnc?: string; t?: string; fromCache?: boolean }> {
     const cached = this.#sigCache.get(course.courseId);
     if (cached) return cached;
     const fallback = { ...(course.enc ? { stuenc: course.enc } : {}) };
@@ -1337,7 +1395,9 @@ export class ChaoxingAdapter implements PlatformAdapter {
         this.#resolveTrace.push(`task-list:sig 复用跨轮缓存 course=${course.courseId}`);
         const result = { ...reused, t: String(Date.now()) };
         this.#sigCache.set(course.courseId, result);
-        return result;
+        // 标记"来自跨轮缓存"：调用方据此判断"拿回来的不是列表页"时要不要重取签名。
+        // 只标在跨轮复用的这一次返回上；本轮内再次读取不标（那不是"旧"签名）。
+        return { ...result, fromCache: true };
       }
     }
     if (!course.classId) {

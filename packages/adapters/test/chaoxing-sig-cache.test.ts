@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 超星跨轮签名缓存的安全阀。
  *
  * 背景（2026-11-10 真机反馈"重登功能后同步变慢"）：
@@ -134,7 +134,70 @@ describe('超星跨轮签名缓存', () => {
     await adapter.fetchTasks(ctx2, SESSION, req).catch(() => undefined);
     assert.ok(
       urls2.filter((u) => u.includes('stucoursemiddle')).length > 0,
-      '上一轮所有列表请求都被拒后，这一轮必须重新取签名（不能复用坏缓存）',
+      '上一轮列表请求都被拒后，这一轮必须重新取签名（不能复用坏缓存）',
+    );
+  });
+
+  it('复用旧签名失败时，会当场重取一次并重试（延长 TTL 的安全阀）', async () => {
+    const adapter = new ChaoxingAdapter();
+    const req = { courses: courseRaw(), quietCourseIds: [] } as never;
+
+    // 第一轮：课程页给 ENC1/WORK1，列表正常 → 写入跨轮缓存
+    const p1 = `<input id="enc" value="ENC1"/><input id="workEnc" value="WORK1"/><input id="t" value="1"/>`;
+    const { ctx: ctx1 } = makeCtx((r) => {
+      if (r.url.includes('stucoursemiddle')) return { text: p1 };
+      return { text: LIST_OK };
+    });
+    await adapter.fetchTasks(ctx1, SESSION, req);
+
+    // 第二轮：平台换了签名（ENC2/WORK2）。旧缓存 WORK1 会被列表页拒绝 ——
+    // 只有带 enc=WORK2 才返回真列表；模拟"签名过期"。
+    const p2 = `<input id="enc" value="ENC2"/><input id="workEnc" value="WORK2"/><input id="t" value="2"/>`;
+    let coursePageCalls = 0;
+    const { ctx: ctx2 } = makeCtx((r) => {
+      if (r.url.includes('stucoursemiddle')) {
+        coursePageCalls += 1;
+        return { text: coursePageCalls === 1 ? p2 : p2 };
+      }
+      if (r.url.includes('work/list')) {
+        return { text: /[?&]enc=WORK2(&|$)/.test(r.url) ? LIST_OK : LIST_BAD };
+      }
+      return { text: LIST_OK };
+    });
+
+    const page = await adapter.fetchTasks(ctx2, SESSION, req).catch(() => undefined);
+    // 关键：不能因为旧签名失败就整门课丢掉 —— 必须重取签名后拿到真列表
+    assert.ok(page, '必须重试成功，而不是抛「全部 0 条」');
+    assert.ok(
+      (page as { items: unknown[] }).items.some((t) => (t as { kind: string }).kind === 'homework'),
+      '重取签名后应解析出作业',
+    );
+    assert.ok(coursePageCalls >= 1, '应当重新请求课程页取新签名（第二轮原本命中缓存、一次都不请求）');
+  });
+
+  it('签名缓存可导出/导入（跨 App 重启复用）', async () => {
+    const a1 = new ChaoxingAdapter();
+    const { ctx } = makeCtx((r) => {
+      if (r.url.includes('stucoursemiddle')) return { text: COURSE_PAGE };
+      return { text: LIST_OK };
+    });
+    await a1.fetchTasks(ctx, SESSION, { courses: courseRaw(), quietCourseIds: [] } as never);
+
+    const blob = a1.exportSigCache();
+    assert.ok(blob && blob.includes('204587864'), '应导出这门课的签名');
+
+    // 模拟 App 重启：新实例 + 导入
+    const a2 = new ChaoxingAdapter();
+    a2.importSigCache(blob);
+    const { ctx: ctx2, urls: urls2 } = makeCtx((r) => {
+      if (r.url.includes('stucoursemiddle')) return { text: COURSE_PAGE };
+      return { text: LIST_OK };
+    });
+    await a2.fetchTasks(ctx2, SESSION, { courses: courseRaw(), quietCourseIds: [] } as never);
+    assert.equal(
+      urls2.filter((u) => u.includes('stucoursemiddle')).length,
+      0,
+      '导入缓存后应直接复用，不再请求课程页',
     );
   });
 });
