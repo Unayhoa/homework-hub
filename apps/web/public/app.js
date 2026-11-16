@@ -1898,7 +1898,16 @@ async function renderKeepAlive() {
           const since = Number(v?.sinceLastOkMs ?? 0);
           const sinceTxt = since > 0 ? `，最近成功 ${fmtSpan(since)}前` : '';
           const gapTxt = gaps > 0 ? `，其中断网 ${gaps} 次` : '';
-          return `${name}：当前连续 ${cur}（历史最长 ${best}${gapTxt}${sinceTxt}）`;
+          // 【正向指标】近 24h 保活覆盖率：成功探测 / 理论应探测。
+          // 这是唯一能"主动证明保活在干活"的数字，而不是等下次掉线才知道。
+          const cov = Number(v?.coverage ?? -1);
+          const ok24 = Number(v?.ok24h ?? 0);
+          const exp24 = Number(v?.expected24h ?? 0);
+          const covTxt =
+            cov >= 0 && exp24 > 0
+              ? `，近24h 成功 ${ok24}/${exp24} 次（覆盖率 ${Math.round(cov * 100)}%）`
+              : '';
+          return `${name}：当前连续 ${cur}（历史最长 ${best}${gapTxt}${sinceTxt}${covTxt}）`;
         })
         .join('；')
     : '';
@@ -1912,6 +1921,29 @@ async function renderKeepAlive() {
    *   · 失效前有一串断网  → 手机深睡没网，闲置超时
    * 这里把最近几次失效的这三个数字汇总成一句话。
    */
+  /**
+   * 【保活健康度】用覆盖率给结论，而不是"等下次掉线"。
+   *
+   * 判定线：≥90% = 保活按计划执行；60~90% = 手机偶尔掐网（去关电池优化）；
+   * <60% = 基本没在探活（保活形同虚设，掉线是必然）。
+   * 这三档都不依赖"是否已经失效"，所以是**正向**指标。
+   */
+  const kaVerdict = streaks
+    ? Object.entries(streaks)
+        .map(([pid, v]) => {
+          const cov = Number(v?.coverage ?? 0);
+          const pct = Math.round(cov * 100);
+          const label =
+            cov >= 0.9
+              ? '正常（探活按计划执行）'
+              : cov >= 0.6
+                ? '偏低（手机在深睡掐网，建议关电池优化）'
+                : '很低（几乎没探活，掉线是必然）';
+          return `${platformDisplayName(pid)}：${pct}% → ${label}`;
+        })
+        .join('\n')
+    : '';
+
   const failureAnatomy = (() => {
     const auths = (Array.isArray(st.log) ? st.log : []).filter((e) => e && e.kind === 'auth');
     if (auths.length === 0) return '';
@@ -2048,6 +2080,7 @@ async function renderKeepAlive() {
       不会因为长时间没有请求而失效。关掉后不再有任何后台请求。</div>
     <div class="ka-stat">${escapeHtml(whichText)} ${escapeHtml(stat)}</div>
     ${streakLines ? `<div class="ka-stat">${escapeHtml(streakLines)}</div>` : ''}
+    ${kaVerdict ? `<div class="ka-stat" style="white-space:pre-wrap">保活健康度：\n${escapeHtml(kaVerdict)}</div>` : ''}
     ${failureAnatomy ? `<div class="ka-stat" style="white-space:pre-wrap">${escapeHtml(failureAnatomy)}</div>` : ''}
     ${batteryRow}
     <div class="ka-action"><button class="ka-btn" id="kaSysSettings">打开电池设置</button></div>

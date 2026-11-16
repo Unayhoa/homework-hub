@@ -595,6 +595,31 @@ final class KeepAliveScheduler {
                     s.put("sinceLastOkMs", Math.max(0, System.currentTimeMillis() - lastOkAt));
                 }
                 s.put("gapsInStreak", gapsInCurrent);
+
+                // 【正向指标】近 24 小时「保活覆盖率」= 成功探测次数 / 理论应探测次数。
+                //
+                // 为什么需要它（用户 2026-11-16 提问）："会话失效次数""当前连续"本质上都是
+                // **失败指标**或"没有失败"的推论 —— 用户无法据此判断保活到底有没有在工作，
+                // 只能等下一次掉线报错。这个覆盖率是纯正向证据：
+                // 它衡量"手机到底有没有按计划把探活请求发出去"，与会话是否失效无关。
+                // 覆盖率低 = 手机在深睡掐网（该去改电池设置）；覆盖率高而仍掉线 = 平台策略。
+                long since24 = System.currentTimeMillis() - 24L * 60 * 60 * 1000;
+                int ok24 = 0;
+                int total24 = 0;
+                for (int i = 0; i < log.length(); i++) {
+                    JSONObject e2 = log.optJSONObject(i);
+                    if (e2 == null || !pid.equals(e2.optString("platformId", ""))) continue;
+                    long t2 = e2.optLong("t", 0L);
+                    if (t2 <= 0 || t2 < since24) continue;
+                    total24 += 1;
+                    if (KIND_OK.equals(e2.optString("kind", ""))) ok24 += 1;
+                }
+                long iv = Math.max(1L, intervalMs(ctx));
+                int expected24 = (int) Math.round(24.0 * 60 * 60 * 1000 / iv);
+                s.put("ok24h", ok24);
+                s.put("probes24h", total24);
+                s.put("expected24h", expected24);
+                s.put("coverage", expected24 > 0 ? Math.min(1.0, (double) ok24 / expected24) : 0.0);
                 streaks.put(pid, s);
             }
             o.put("streaks", streaks);
