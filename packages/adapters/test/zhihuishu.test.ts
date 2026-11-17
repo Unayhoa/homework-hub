@@ -194,6 +194,14 @@ describe('智慧树 · 抓取链路（HAR 结构）', () => {
     assert.ok(!/[?&]time=1(&|$)/.test(p.url), '不能写死 time=1');
   });
 
+  it('声明 probeBeforeSync：同步前先探会话，避免"0 请求却报 ok"', () => {
+    // 真机 2026-11-17：保活面板显示智慧树会话失效，但点同步显示
+    // 「ok · 请求 0 · 耗时 0.0s」—— 所有课程都在跳过窗口内，一个请求都没发，
+    // 于是"没有失败"被当成了"成功"。
+    // 声明 probeBeforeSync 后，同步前会先探一次会话；探不通就如实报 auth-required。
+    assert.equal(new ZhihuishuAdapter().capabilities.probeBeforeSync, true);
+  });
+
   it('共享课列表与学习进度（免加密接口）能算出视频任务点', async () => {
     const ctx = makeCtx((url) => {
       if (url.includes('getLoginUserInfo')) return { body: JSON.stringify({ code: 200, result: { uuid: 'u' } }) };

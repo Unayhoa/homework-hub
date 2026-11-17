@@ -129,6 +129,17 @@ export class ZhihuishuAdapter implements PlatformAdapter {
     cookieOnlySession: true,
     requiresNativeSigner: false,
     aggressiveAntiBot: false,
+    /**
+     * 【每轮同步先探一次会话】（2026-11-17 真机）
+     *
+     * 起因：保活面板显示「智慧树 会话失效」，但点同步却显示 **ok · 请求 0 · 0.0s** ——
+     * 因为所有课程都在「已完成跳过」窗口内，本轮一个请求都没发，
+     * 于是"没有失败"被当成了"成功"。这是本项目最忌讳的**静默假成功**。
+     *
+     * 智慧树的会话本来就不稳定（cookie-only、多域各自过期），
+     * 用 1 个只读请求换"同步结论可信"，完全值得。
+     */
+    probeBeforeSync: true,
   };
 
   readonly authMethods: AuthMethod[] = [

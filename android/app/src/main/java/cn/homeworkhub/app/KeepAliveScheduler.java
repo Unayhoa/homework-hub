@@ -208,7 +208,28 @@ final class KeepAliveScheduler {
         }
         long at = System.currentTimeMillis() + delay;
         try {
-            am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, probePendingIntent(ctx));
+            // 【精确闹钟，提升保活覆盖率】（2026-11-17 真机）
+            //
+            // 真机实测：探活覆盖率只有 **79%**（近 24h 成功 76/96 次），
+            // 而智慧树会话只要空腹 ~30 分钟就作废 —— 漏一次探测就可能掉线。
+            //
+            // 原来用 `setAndAllowWhileIdle`：它**允许在 Doze 中触发，但时间不精确**，
+            // 系统可以随意推迟（合并唤醒以省电）。这就是那 20% 缺口的来源。
+            // `setExactAndAllowWhileIdle` 在 Doze 中也能按点触发。
+            // Android 12+ 需要「闹钟与提醒」权限，未授予会抛 SecurityException →
+            // 此时**降级回不精确版本**，绝不因此让保活停摆。
+            boolean exact = false;
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+                try {
+                    am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, probePendingIntent(ctx));
+                    exact = true;
+                } catch (SecurityException se) {
+                    Log.w(TAG, "无精确闹钟权限，降级为不精确排期: " + se.getMessage());
+                }
+            }
+            if (!exact) {
+                am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, probePendingIntent(ctx));
+            }
             prefs(ctx).edit().putLong(KEY_NEXT, at).apply();
         } catch (Exception e) {
             Log.w(TAG, "保活探测排期失败: " + e.getMessage());

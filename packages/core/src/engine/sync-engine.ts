@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 同步引擎 —— 整个应用的大脑。
  *
  * 职责：把「账号 → 适配器 → 限流 HTTP → 归一化 → 幂等合并 → 提醒」串成一条流水线，
@@ -3286,5 +3286,6 @@ function rank(task: UnifiedTask, now: Date, includeOverdue: boolean): { bucket: 
   }
   return { bucket: 2, ms: Number.MAX_SAFE_INTEGER };
 }
+
 
 
