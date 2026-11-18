@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 同步引擎 —— 整个应用的大脑。
  *
  * 职责：把「账号 → 适配器 → 限流 HTTP → 归一化 → 幂等合并 → 提醒」串成一条流水线，
@@ -1632,9 +1632,14 @@ export class SyncEngine {
       // 纯内存缓存几乎每次都失效 —— 存进 store 才能真正常态复用。
       try {
         const sigCursor = await this.#store.getCursor(account.id, 'adapter-sig');
-        (
-          adapter as unknown as { importSigCache?: (j?: string) => void }
-        ).importSigCache?.(sigCursor?.cursor);
+        const sigAdapter = adapter as unknown as {
+          importSigCache?: (j?: string) => void;
+          sigCacheSize?: () => number;
+        };
+        sigAdapter.importSigCache?.(sigCursor?.cursor);
+        // 写进日志：这是判断"缓存到底有没有生效"的唯一直接证据。
+        // 若这里长期是 0，说明持久化没成功（最可能是进程被系统杀掉、防抖写没落盘）。
+        adapterDetails.push(`签名缓存：导入 ${sigAdapter.sigCacheSize?.() ?? 0} 条`);
       } catch {
         log.warn('读取签名缓存失败，本轮按无缓存处理', { platformId: account.platformId });
       }
@@ -1787,7 +1792,11 @@ export class SyncEngine {
     // 【跨进程签名缓存】把本轮取到的签名存下来，下次同步（含重开 App）直接复用。
     // 只在体积合理时保存；超长就丢掉 —— 缓存的价值远不如"别把 store 撑坏"。
     try {
-      const blob = (adapter as unknown as { exportSigCache?: () => string | undefined }).exportSigCache?.();
+      const sigAdapter = adapter as unknown as {
+        exportSigCache?: () => string | undefined;
+        sigCacheSize?: () => number;
+      };
+      const blob = sigAdapter.exportSigCache?.();
       if (blob && blob.length <= 8192) {
         await this.#store.setCursor({
           accountId: account.id,
@@ -1795,6 +1804,11 @@ export class SyncEngine {
           cursor: blob,
           updatedAt: this.#clock.now().toISOString(),
         });
+        // 【立刻落盘】store 是防抖写入（默认几百毫秒）。同步结束后用户常常直接退出，
+        // Android 随时可能把进程杀掉 —— 不 flush 的话这份缓存就白写了，
+        // 下次同步又得重取 15 个大页面（真机 2026-11-18：07:59 命中、12:08 又失效）。
+        this.#store.flush?.();
+        adapterDetails.push(`签名缓存：导出 ${sigAdapter.sigCacheSize?.() ?? 0} 条（已落盘）`);
       }
     } catch {
       // 缓存写失败不影响同步结果

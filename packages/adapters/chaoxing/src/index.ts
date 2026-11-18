@@ -1385,6 +1385,11 @@ export class ChaoxingAdapter implements PlatformAdapter {
     }
   }
 
+  /** 当前跨轮签名缓存条目数（写进同步日志，用来确认"缓存到底有没有生效"）。 */
+  sigCacheSize(): number {
+    return this.#sigCacheCross.size;
+  }
+
   async #courseSignatures(
     http: SessionHttpClient,
     course: { courseId: string; classId: string; cpi?: string; enc?: string },
