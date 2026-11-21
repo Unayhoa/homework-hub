@@ -418,7 +418,12 @@ export class YuketangAdapter implements PlatformAdapter {
           if (leafStats.size > 0) {
             const desc = [...leafStats.entries()]
               .sort((a, b) => b[1].count - a[1].count)
-              .map(([t, v]) => `${t}×${v.count}${v.names.length ? `(${v.names.join(' / ')})` : ''}`)
+              .map(([t, v]) => {
+                const names = v.names.length ? `(${v.names.join(' / ')})` : '';
+                // 对「作业类型」和「没见过的类型」附上字段名，用来判断能否直接适配（不必抓 HAR）
+                const keys = v.keys && (t === 6 || !HOMEWORK_LEAF_TYPES.has(t)) ? `[${v.keys.join(',')}]` : '';
+                return `${t}×${v.count}${names}${keys}`;
+              })
               .join(' · ');
             details.push(`《${course.name}》章节树叶子类型：${desc}`);
           }
@@ -650,8 +655,10 @@ export function parseYuketangCourses(list: unknown[]): PlatformCourse[] {
  * 一旦平台给新作业换了类型，就会表现为"明明爬了却什么都没有"，且日志无痕迹。
  * 把这些数字打出来，就能区分「没请求/没数据」和「有数据但类型没认」。
  */
-export function collectLeafTypes(node: unknown): Map<number, { count: number; names: string[] }> {
-  const out = new Map<number, { count: number; names: string[] }>();
+export function collectLeafTypes(
+  node: unknown,
+): Map<number, { count: number; names: string[]; keys?: string[] }> {
+  const out = new Map<number, { count: number; names: string[]; keys?: string[] }>();
   const walk = (n: unknown): void => {
     if (Array.isArray(n)) {
       for (const child of n) walk(child);
@@ -665,6 +672,9 @@ export function collectLeafTypes(node: unknown): Map<number, { count: number; na
       const cur = out.get(t) ?? { count: 0, names: [] as string[] };
       cur.count += 1;
       if (name && cur.names.length < 3) cur.names.push(name.slice(0, 24));
+      // 记下第一个样本的字段名：用来确认该类型有没有 deadline / start_time 等字段，
+      // 从而判断"能不能不抓 HAR 就把新类型接进来"。
+      if (!cur.keys) cur.keys = Object.keys(r).slice(0, 20);
       out.set(t, cur);
     }
     for (const k of Object.keys(r)) {
@@ -675,6 +685,24 @@ export function collectLeafTypes(node: unknown): Map<number, { count: number; na
   walk(node);
   return out;
 }
+
+/**
+ * 章节树里哪些 `leaf_type` 算「作业」。
+ *
+ * - `9`：老版作业节点（2026-10-11 抓包实证）
+ * - `6`：**新版作业节点**（2026-11-21 真机诊断）
+ *
+ * 2026-11-21 现场：老师新布置的「第十一次作业 / 第十二次作业」在小程序里显示为
+ * 「作业 · 计分」，但章节树里是 `leaf_type: 6`，而适配器当时只认 9 ——
+ * 于是"同步成功、拉取 10 条、新增 0"，新作业被静默丢弃。
+ * 叶子类型分布日志把这件事一眼照出来了。
+ *
+ * 不纳入的类型（有实证/有语义依据）：
+ * - `7`：课件（如「第三章第3节-原版」，无提交动作）
+ * - `8`：课堂/授课（如「9月11日授课」，只是上课记录）
+ * - `4` 等：视频等学习内容
+ */
+const HOMEWORK_LEAF_TYPES = new Set([6, 9]);
 
 export function collectChangjiangLeaves(
   node: unknown,
@@ -691,13 +719,27 @@ export function collectChangjiangLeaves(
   const r = node as Record<string, unknown>;
   const leafType = Number(r.leaf_type);
   const name = r.name;
-  if (leafType === 9 && typeof name === 'string' && name.trim()) {
-    const scoreMs = Number(r.score_deadline);
-    const endMs = Number(r.end_time);
-    const deadlineMs = Number.isFinite(scoreMs) && scoreMs > 1e12 ? scoreMs : Number.isFinite(endMs) && endMs > 1e12 ? endMs : undefined;
-    const startMs = Number(r.start_time);
+  if (HOMEWORK_LEAF_TYPES.has(leafType) && typeof name === 'string' && name.trim()) {
+    // 截止/开始时间的字段名做多别名兼容：老类型（9）用 score_deadline/end_time，
+    // 新类型（6）不一定同名 —— 先按常见别名取，取不到就不编造（deadline 留空）。
+    const msOf = (...vals: unknown[]): number | undefined => {
+      for (const v of vals) {
+        const n = Number(v);
+        if (Number.isFinite(n) && n > 1e12) return n;
+      }
+      return undefined;
+    };
+    const deadlineMs = msOf(r.score_deadline, r.end_time, r.deadline, r.expire_time, r.endTime);
+    const startMs = msOf(r.start_time, r.startTime, r.begin_time, r.publish_time);
     out.push({
-      platformTaskId: r.id !== undefined ? String(r.id) : r.leafinfo_id !== undefined ? String(r.leafinfo_id) : undefined,
+      platformTaskId:
+        r.id !== undefined
+          ? String(r.id)
+          : r.leafinfo_id !== undefined
+            ? String(r.leafinfo_id)
+            : r.leaf_id !== undefined
+              ? String(r.leaf_id)
+              : undefined,
       courseId,
       courseName,
       kind: 'homework',
@@ -708,7 +750,7 @@ export function collectChangjiangLeaves(
       // 否则界面就是在替平台断言"你还没交"，而平台其实什么都没说。
       statusSource: 'inferred',
       deadline: deadlineMs !== undefined ? new Date(deadlineMs).toISOString() : undefined,
-      publishedAt: Number.isFinite(startMs) && startMs > 1e12 ? new Date(startMs).toISOString() : undefined,
+      publishedAt: startMs !== undefined ? new Date(startMs).toISOString() : undefined,
       raw: r,
     });
     return; // 叶子节点不再下钻

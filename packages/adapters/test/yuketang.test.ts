@@ -145,3 +145,28 @@ describe('雨课堂 · 章节树叶子类型统计（诊断）', () => {
     assert.equal(stats.get(10)?.names[0], '新作业？');
   });
 });
+
+describe('雨课堂 · 新版作业 leaf_type=6（2026-11-21 真机）', () => {
+  it('leaf_type 6 与 9 都算作业；7（课件）/8（课堂）不算', () => {
+    const now = Date.now();
+    const tree = [
+      {
+        chapter: [
+          { leaf_type: 6, id: 101, name: '第十一次作业', score_deadline: now + 8 * 86400000 },
+          { leaf_type: 6, id: 102, name: '第十二次作业', score_deadline: now + 8 * 86400000 },
+          { leaf_type: 9, id: 201, name: '信安第一次作业(1)' },
+          { leaf_type: 7, id: 301, name: '第三章第3节-原版' },
+          { leaf_type: 8, id: 401, name: '9月11日授课' },
+        ],
+      },
+    ];
+    const out: UnifiedTask[] = [];
+    collectChangjiangLeaves(tree, out, 'c1', '信息安全数学基础', now);
+    assert.deepEqual(
+      out.map((t) => t.title),
+      ['第十一次作业', '第十二次作业', '信安第一次作业(1)'],
+      '新版作业(6)必须收进来，课件/课堂必须排除',
+    );
+    assert.ok(out[0]!.deadline, '新版作业的截止时间也要解析出来');
+  });
+});
