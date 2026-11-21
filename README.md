@@ -1,8 +1,8 @@
-# HomeworkHub · 课业中枢
+﻿# HomeworkHub · 课业中枢
 
 跨平台汇总自己的作业、考试信息 —— 学习通 / 雨课堂（含长江雨课堂）/ iSmart / PTA 拼题A / 智慧树。
 
-**当前版本：1.1.0（首个开源版本 1.0.0）** · 变更记录见 [CHANGELOG.md](./CHANGELOG.md)
+**当前版本：1.1.1（首个开源版本 1.0.0）** · 变更记录见 [CHANGELOG.md](./CHANGELOG.md)
 
 ```
 $ node apps/cli/src/main.ts demo
@@ -200,8 +200,8 @@ node apps/cli/src/main.ts attach chaoxing --port 9222
 ```bash
 npm install            # 只为拿 typescript
 npm run android:apk:user   # 生成前端资源 + 打面向用户的 APK
-# 产物：release/homework-hub-1.1.0-user-debug.apk（约 867 KB）
-adb install -r release/homework-hub-1.1.0-user-debug.apk
+# 产物：release/homework-hub-1.1.1-user-debug.apk（约 867 KB）
+adb install -r release/homework-hub-1.1.1-user-debug.apk
 ```
 
 也可以用 Android Studio 打开 `android/` 目录直接 Run。
@@ -443,6 +443,7 @@ HH_LOG=debug HH_TRACE=1 node apps/cli/src/main.ts sync --dry-run
 3. **删除判定必须能容忍上游抖动。**
    分页请求失败、临时风控都会让某一轮「少看到」任务，立刻删库会让作业一闪一闪。
    → 连续缺席 N 轮才软删除；数据不完整时整轮禁用删除判定。
+
 
 
 

@@ -157,11 +157,16 @@ describe('变更历史：查询侧（recentChanges）', () => {
     await store.init();
     const { dir, engine } = await makeEngine(store);
     try {
-      await store.upsertTasks([seeded({ platformTaskId: 'old' }, new Date('2026-09-01T02:00:00.000Z'))]);
-      await store.upsertTasks([seeded({ platformTaskId: 'new' }, new Date('2026-10-21T02:00:00.000Z'))]);
+      // 【不要写死日期】原来写成 2026-09-01 / 2026-10-21，到了 2026-11-21 之后
+      // 「最近 30 天」的兜底窗口就把 10-21 也排除掉了，测试会无缘无故变红 ——
+      // 这是测试自身的"时间炸弹"，不是代码回归。改成相对当前时间。
+      const now = Date.now();
+      const DAY = 24 * 60 * 60 * 1000;
+      await store.upsertTasks([seeded({ platformTaskId: 'old' }, new Date(now - 60 * DAY))]);
+      await store.upsertTasks([seeded({ platformTaskId: 'new' }, new Date(now - 5 * DAY))]);
 
-      const old = await engine.recentChanges(new Date('2026-10-01T00:00:00.000Z'));
-      assert.equal(old.length, 1, '窗口外（9/1）不返回，窗口内（10/21）返回');
+      const old = await engine.recentChanges(new Date(now - 30 * DAY));
+      assert.equal(old.length, 1, '窗口外（60 天前）不返回，窗口内（5 天前）返回');
       assert.equal(old[0]!.task.platformTaskId, 'new');
 
       const bad = await engine.recentChanges(new Date('这不是时间'));

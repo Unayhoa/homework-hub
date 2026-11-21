@@ -1965,6 +1965,11 @@ export class SyncEngine {
         `跳过 ${skippedCourseCount} 门已全部完成的课程（${(opts.completedCourseTtlMs ?? 6 * 60 * 60 * 1000) / 3_600_000} 小时内不重爬）`,
       );
     }
+    if (opts.skipCompletedCourses === false) {
+      // 手动同步：完整重爬，不跳过任何课程。明确写出来，
+      // 否则用户看到"请求数比平时多"会以为是故障。
+      details.push('本轮为手动同步：完整重爬，未跳过任何课程');
+    }
     if (mergedCount > 0) {
       // 让「实际入库比拉取少」在界面上直接可见 ——
       // 这类数据丢失以前是完全静默的（真机：拉取 84 条，列表只剩几条）

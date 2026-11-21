@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 与传输层无关的 API 实现。
  *
  * 抽出来的动机：同一个 API 需要跑在两种载体上 ——
@@ -319,7 +319,13 @@ export function createApiHandler(deps: ApiDeps): ApiHandler {
    * 「消失/恢复」的判定。所以复用进行中的同步，而不是排队两个。
    */
   function runSync(
-    opts: { allowRelogin?: boolean; refreshCourses?: boolean; skipDetails?: boolean } = {},
+    opts: {
+      allowRelogin?: boolean;
+      refreshCourses?: boolean;
+      skipDetails?: boolean;
+      /** 手动点按：绕过「已完成课程 6 小时跳过」，完整重爬一遍 */
+      forceFull?: boolean;
+    } = {},
   ): Promise<SyncReport> {
     if (inFlight) return inFlight;
     inFlight = deps.engine
@@ -328,6 +334,8 @@ export function createApiHandler(deps: ApiDeps): ApiHandler {
         ...(opts.refreshCourses ? { refreshCourses: 'always' as const } : {}),
         // 【先出待办，后台补细节】只抓待办本身，重详情页留给后台
         ...(opts.skipDetails ? { skipDetails: true } : {}),
+        // 【手动同步=完整重爬】用户点同步就是要最新数据，不能被"6 小时跳过"挡住
+        ...(opts.forceFull ? { skipCompletedCourses: false } : {}),
       })
       .finally(() => {
         inFlight = undefined;
@@ -1196,6 +1204,8 @@ export function createApiHandler(deps: ApiDeps): ApiHandler {
           allowRelogin: body.allowRelogin !== false,
           refreshCourses: body.refreshCourses === true,
           skipDetails: fastFirst,
+          // 手动点按同步 → 完整重爬（绕过「已完成课程 6 小时跳过」）
+          forceFull: body.forceFull === true,
         });
         // 不 await：同步该多快还多快，任务点在后台补（过期才抓）
         void refreshTaskPointsQuietly();

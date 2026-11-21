@@ -1,4 +1,4 @@
-/* 课业中枢 · 前端逻辑（无框架，零依赖） */
+﻿/* 课业中枢 · 前端逻辑（无框架，零依赖） */
 'use strict';
 
 const $ = (id) => document.getElementById(id);
@@ -2714,7 +2714,7 @@ async function runFixAction(a) {
     window.Android?.openCapture?.('dom', name, url);
   } else if (a.id === 'retry') {
     toast('正在重试…');
-    await doSync();
+    await doSync({ forceFull: true });
     await refresh();
   } else {
     window.Android?.openCapture?.('probe', name, url);
@@ -3042,7 +3042,7 @@ function activeTab() {
  * 以前手动同步会锁住整个界面、自动同步不会 —— 同一个动作两种体验，
  * 用户只能靠「这次有没有被挡住」来猜是谁在同步。
  */
-async function doSync() {
+async function doSync(opts = {}) {
   if (syncing) return undefined;
   syncing = true;
   syncBarStartedAt = Date.now();
@@ -3054,7 +3054,14 @@ async function doSync() {
     }
   }, 1000);
   try {
-    const r = await api('/api/sync', { method: 'POST', body: '{}' });
+    // 【手动同步 = 完整重爬】（2026-11-21）
+    // 引擎对「全部任务都是终态」的课程有 6 小时跳过窗口（省请求）。
+    // 但用户点同步的语义是「我现在就要最新数据」—— 老师完全可能在你做完之后补发新作业。
+    // 所以手动点按强制完整爬，自动同步仍走 TTL 省请求。
+    const r = await api('/api/sync', {
+      method: 'POST',
+      body: JSON.stringify({ forceFull: opts.forceFull === true }),
+    });
     const all = r.totals?.accounts ?? 0;
     const okN = r.totals?.ok ?? 0;
     const bad = (r.accounts ?? []).filter((a) => a.status !== 'ok');
@@ -3542,7 +3549,7 @@ async function markCompleted(taskId, completed) {
     busy(false);
   }
 }
-$('syncBtn').addEventListener('click', () => doSync());
+$('syncBtn').addEventListener('click', () => doSync({ forceFull: true }));
 $('platformSelect').addEventListener('change', () => {
   setCustomMode($('platformSelect').value === '__add_custom');
 });
@@ -4122,4 +4129,5 @@ function selfCheckCookieBridge() {
     else todoSeg = 'tasks';
   }
 })();
+
 
