@@ -1968,7 +1968,7 @@ export class SyncEngine {
     if (opts.skipCompletedCourses === false) {
       // 手动同步：完整重爬，不跳过任何课程。明确写出来，
       // 否则用户看到"请求数比平时多"会以为是故障。
-      details.push('本轮为手动同步：完整重爬，未跳过任何课程');
+      details.push('本轮为手动同步：完整重爬 + 刷新课程列表，未跳过任何课程');
     }
     if (mergedCount > 0) {
       // 让「实际入库比拉取少」在界面上直接可见 ——

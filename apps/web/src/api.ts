@@ -331,7 +331,9 @@ export function createApiHandler(deps: ApiDeps): ApiHandler {
     inFlight = deps.engine
       .syncAll({
         allowRelogin: opts.allowRelogin !== false,
-        ...(opts.refreshCourses ? { refreshCourses: 'always' as const } : {}),
+        // 手动同步 = 连课程列表也一起刷新：新开的课可能就带着新作业。
+        // 课程列表本身有 12 小时缓存，只刷任务不刷列表的话，新课永远看不见。
+        ...(opts.refreshCourses || opts.forceFull ? { refreshCourses: 'always' as const } : {}),
         // 【先出待办，后台补细节】只抓待办本身，重详情页留给后台
         ...(opts.skipDetails ? { skipDetails: true } : {}),
         // 【手动同步=完整重爬】用户点同步就是要最新数据，不能被"6 小时跳过"挡住

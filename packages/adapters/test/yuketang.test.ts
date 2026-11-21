@@ -1,11 +1,11 @@
-/**
+﻿/**
  * 长江雨课堂解析测试 —— 夹具直接取自 2026-09-29 的真实抓包（changjiang.yuketang2.cn.har）：
  * 课程列表 /v2/api/web/courses/list?identity=2 + 章节树 /mooc-api/v1/lms/learn/course/chapter。
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { parseYuketangCourses, collectChangjiangLeaves } from '../yuketang/src/index.ts';
+import { parseYuketangCourses, collectChangjiangLeaves, collectLeafTypes } from '../yuketang/src/index.ts';
 import type { UnifiedTask } from '../../core/src/index.ts';
 
 // ---- 真实抓包片段（/v2/api/web/courses/list?identity=2）----
@@ -122,5 +122,26 @@ describe('yuketang-changjiang · collectChangjiangLeaves（真实抓包夹具）
     assert.equal(third.courseId, '26617021');
     assert.equal(third.courseName, '信息安全数学基础');
     assert.equal(third.platformTaskId, '49547448');
+  });
+});
+
+
+describe('雨课堂 · 章节树叶子类型统计（诊断）', () => {
+  it('按 leaf_type 分组计数，并保留前几个名字', () => {
+    const tree = [
+      {
+        name: '第一章',
+        chapter: [
+          { leaf_type: 9, name: '作业A' },
+          { leaf_type: 4, name: '视频B' },
+          { leaf_type: 4, name: '视频C' },
+          { leaf_type: 10, name: '新作业？' },
+        ],
+      },
+    ];
+    const stats = collectLeafTypes(tree);
+    assert.equal(stats.get(9)?.count, 1);
+    assert.equal(stats.get(4)?.count, 2);
+    assert.equal(stats.get(10)?.names[0], '新作业？');
   });
 });

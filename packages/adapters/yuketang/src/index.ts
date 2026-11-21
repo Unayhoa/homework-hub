@@ -407,6 +407,21 @@ export class YuketangAdapter implements PlatformAdapter {
           }
           const before = items.length;
           collectChangjiangLeaves(chapters, items, course.platformCourseId, course.name, nowMs);
+          // 【诊断】章节树里到底有哪些叶子类型？
+          //
+          // 起因（2026-11-21 真机）：老师新布置了作业，手动完整重爬仍是「拉取 10 · 新增 0」，
+          // 请求只有 3 个（1 次 upcoming + 1 门课 2 个）—— 说明确实爬了，但解析没捡到。
+          // 当前只认 `leaf_type === 9`（其余类型全部丢弃，甚至连名字都不看）。
+          // 如果新作业用了别的 leaf_type，就会永远抓不到，而且日志里毫无痕迹。
+          // 这里把每个 leaf_type 的数量和前几个名字打出来，一眼就能判断是不是这个原因。
+          const leafStats = collectLeafTypes(chapters);
+          if (leafStats.size > 0) {
+            const desc = [...leafStats.entries()]
+              .sort((a, b) => b[1].count - a[1].count)
+              .map(([t, v]) => `${t}×${v.count}${v.names.length ? `(${v.names.join(' / ')})` : ''}`)
+              .join(' · ');
+            details.push(`《${course.name}》章节树叶子类型：${desc}`);
+          }
           // 教室的学习内容页 —— 2026-10-23 抓包实证的真实形态：
           // /pro/lms/{sign}/{classroomId}/studycontent?university_id=&platform_id=3&classroom_id=
           // 这里只能定位到**这个教室**，定位不到具体某份作业：
@@ -628,6 +643,39 @@ export function parseYuketangCourses(list: unknown[]): PlatformCourse[] {
  * 因此这里的状态必须标 `statusSource: 'inferred'` —— 平台什么都没说，
  * 不能让界面替它断言"你还没交"。
  */
+/**
+ * 统计章节树里各 `leaf_type` 的数量与前几个名字（**诊断用**）。
+ *
+ * 为什么需要：适配器目前只把 `leaf_type === 9` 当作业，其余类型直接丢弃。
+ * 一旦平台给新作业换了类型，就会表现为"明明爬了却什么都没有"，且日志无痕迹。
+ * 把这些数字打出来，就能区分「没请求/没数据」和「有数据但类型没认」。
+ */
+export function collectLeafTypes(node: unknown): Map<number, { count: number; names: string[] }> {
+  const out = new Map<number, { count: number; names: string[] }>();
+  const walk = (n: unknown): void => {
+    if (Array.isArray(n)) {
+      for (const child of n) walk(child);
+      return;
+    }
+    if (!n || typeof n !== 'object') return;
+    const r = n as Record<string, unknown>;
+    const t = Number(r.leaf_type);
+    if (Number.isFinite(t) && t > 0) {
+      const name = typeof r.name === 'string' ? r.name.trim() : '';
+      const cur = out.get(t) ?? { count: 0, names: [] as string[] };
+      cur.count += 1;
+      if (name && cur.names.length < 3) cur.names.push(name.slice(0, 24));
+      out.set(t, cur);
+    }
+    for (const k of Object.keys(r)) {
+      const v = r[k];
+      if (Array.isArray(v) || (v && typeof v === 'object')) walk(v);
+    }
+  };
+  walk(node);
+  return out;
+}
+
 export function collectChangjiangLeaves(
   node: unknown,
   out: PlatformTask[],
